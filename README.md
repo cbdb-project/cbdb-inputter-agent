@@ -22,8 +22,8 @@ Start here:
    Personal Access Token, and paste it into `.env` as `CBDB_API_TOKEN`.
 3. Leave `CBDB_DRY_RUN=true` until you've validated your input data against a local
    or test instance.
-4. `pip install -r requirements.txt` (once `src/` is implemented — see plan
-   milestones).
+4. `pip install -r requirements-dev.txt` (once `src/` is implemented — see plan
+   milestones; use `requirements.txt` alone for a runtime-only install).
 
 This project is a work in progress; see `docs/01-implementation-plan.md` for current
 status and open questions.

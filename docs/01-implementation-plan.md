@@ -36,10 +36,14 @@ cbdb-inputter-agent/
     01-implementation-plan.md
     02-review-log.md         # running log of review-agent + codex findings per milestone
     03-extraction-review-workflow.md   # source-text -> staging file -> human review pipeline
+    04-field-whitelists.md    # per-resource allowed fields + composite PK schema, read from target repo source
+    05-testing-strategy.md    # mocking approach, fixture conventions, unit vs local-integration tiers
   skills/
     cbdb-data-entry/
-      SKILL.md               # skill definition invoked via /cbdb-data-entry
-      scripts/                # thin CLI wrappers the skill shells out to
+      SKILL.md               # skill definition: structured-input path + extraction/review path
+      scripts/                # thin CLI wrappers the skill shells out to (empty for now)
+  requirements.txt            # runtime deps: requests, python-dotenv, PyYAML, pydantic
+  requirements-dev.txt        # + pytest, responses, freezegun
   src/
     cbdb_agent/
       __init__.py
@@ -75,7 +79,10 @@ a committed `.env.sample`.
 ```dotenv
 # Base URL of the cbdb-online-main-server instance to target.
 # Production: https://input.cbdb.fas.harvard.edu
-# Local dev:  http://localhost:8000
+# Local dev:  http://localhost:8000 is Laravel's generic `php artisan serve` default —
+#             NOT necessarily this repo's actual local target. Always check the real
+#             .env / AGENTS.md for the port actually in use (currently :8080 on the
+#             user's standing local instance, per AGENTS.md's Local dev section).
 CBDB_API_BASE_URL=https://input.cbdb.fas.harvard.edu
 
 # Sanctum Personal Access Token, created manually at {CBDB_API_BASE_URL}/profile.
@@ -182,9 +189,14 @@ overwritten, never deleted by the agent. This mirrors the server's append-only
 ## 6. Mutation API wrappers (`mutation_api.py`, `models.py`)
 
 - One typed function per resource + operation, e.g. `create_person(...)`,
-  `create_address(...)`, `update_kinship(...)`, mirroring the resources enumerated in
-  the brief (`basicinformation`, `altnames`, `addresses`, `kinship`, `offices`, `assoc`,
-  `entries`, `events`, `possession`, `socialinst`, `sources`, `statuses`, `texts`).
+  `create_address(...)`, `update_kinship(...)`, one per resource in
+  `docs/04-field-whitelists.md` (`basicinformation`, `altnames`, `addresses`,
+  `kinship`, `postings`/`offices`, `associations`, `entries`, `events`,
+  `possessions`, `social_institutions`, `sources`, `statuses`, `texts`) — use each
+  resource's *canonical* alias from that document, not the shorthand names in the
+  original brief §3 sketch (e.g. `associations`, not `assoc`; `social_institutions`,
+  not `socialinst`, for update calls specifically — see `04-field-whitelists.md` §12's
+  alias gap).
 - Each wrapper builds the JSON envelope from brief §3, always sets `mode: "direct"`,
   and validates the payload against a per-resource field whitelist declared in
   `models.py` **before** sending — client-side rejection of unknown fields, mirroring
@@ -279,13 +291,25 @@ Per user's explicit process requirement:
    `docs/02-review-log.md` before starting the next milestone.
 6. Only then move to the next milestone.
 
-## 12. Open questions for the user
+## 12. Open questions — resolved
 
-- Which CBDB account/token should be used — does it have `canWriteDirectly()`
-  (non-crowdsourcing) permission? (Needed for milestone 7 dry-run/live test.)
-- Do you want a local `cbdb-online-main-server` dev instance set up for milestone 7,
-  or should dry-run validation be the final gate before production use?
-- What's the source format of the records you'll be entering (CSV export from
-  somewhere, hand-written JSON, another database, or unstructured source text via the
-  extraction workflow in milestone 4)? This determines the exact shape `cli.py`'s
-  input reader should expect in milestone 5.
+- **Account/token**: resolved 2026-07-08. A dedicated local test account
+  (`cbdb-inputter-agent@local.test`, regular role, active — satisfies
+  `canWriteDirectly()`) was created via `php artisan cbdb:manage-user` on the user's
+  local `cbdb-online-main-server` instance and will **not** be deleted; it's the
+  standing account for all local testing going forward. A Sanctum token for it was
+  generated via `php artisan tinker` and written directly into this repo's `.env`
+  (never printed to chat/logs — see `docs/02-review-log.md`'s Milestone-2-prep entry).
+- **Local dev instance**: resolved. Already running, reachable at
+  `http://localhost:8080` (port identified via `netstat`, not yet confirmed by an
+  actual HTTP round-trip since network tool calls are restricted in this
+  environment — flagged as an open item until the user confirms it's correct).
+- **Structured-input source format (CSV/JSON/DB export)**: resolved as a *design-now,
+  build-later* decision. No such structured source exists yet; the unstructured-text
+  extraction workflow (`03-extraction-review-workflow.md`) is the near-term need.
+  Decision: `cli.py`'s `--input` path (milestone 5) is specified only at the level of
+  "one JSON object per logical person + nested sub-resources" (already in §7 above)
+  without committing to a CSV column mapping or specific external schema now — when a
+  real structured source shows up, its exact shape should drive a small adapter that
+  converts it into that same internal JSON shape, reusing `mutation_api.py`/
+  `staging.py` unchanged rather than inventing new ingestion code per source type.

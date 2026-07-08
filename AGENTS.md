@@ -6,8 +6,10 @@ authenticated CBDB user, in place of manually clicking through the web UI. Any a
 (Claude Code or otherwise) working in this repo must follow the rules below.
 
 Background reading, in order: `docs/00-target-system-brief.md` (facts about the target
-system — auth, API, audit logging), then `docs/01-implementation-plan.md` (this repo's
-architecture and milestones).
+system — auth, API, audit logging), `docs/01-implementation-plan.md` (this repo's
+architecture and milestones), `docs/03-extraction-review-workflow.md` (source-text →
+staging-file → human-review pipeline), `docs/04-field-whitelists.md` (per-resource
+allowed fields), `docs/05-testing-strategy.md` (mocking/fixture conventions).
 
 ## Hard rules
 
@@ -48,7 +50,11 @@ architecture and milestones).
    judgment — log it, surface it, move to the next record in a batch.
 6. **`c_personid` is client-assigned, not server-generated.** Always validate a
    candidate ID (nonzero, not already taken, within `max(existing)+10000`) via
-   `person_id.py` before sending a create — see brief §3.
+   `person_id.py` before sending a create — see brief §3. **Exception:** two
+   sub-resources have their own, *server*-assigned surrogate ID in their composite
+   PK — `possessions` (`c_possession_record_id`) and `postings`/`offices`
+   (`c_posting_id`). Never try to allocate or predict these client-side; read them
+   back from the server's create response. See `docs/04-field-whitelists.md`.
 7. **Person before sub-resources.** Never submit a sub-resource
    (`altnames`/`addresses`/`kinship`/etc.) referencing a `person_id` that hasn't been
    created yet in this run or confirmed to already exist via `GET /api/v2/get`.
@@ -67,7 +73,12 @@ milestone. Log both passes in `docs/02-review-log.md`.
 
 ## Local dev / testing
 
-Point `CBDB_API_BASE_URL` at a local `cbdb-online-main-server` instance
-(`http://localhost:8000`, see brief §7) instead of production whenever testing new
-code paths. Never use a production token for anything other than deliberate,
-user-confirmed production writes.
+Point `CBDB_API_BASE_URL` at a local `cbdb-online-main-server` instance instead of
+production whenever testing new code paths. The user's standing local instance is
+running at `http://localhost:8080` with a dedicated, permanent test account
+(`cbdb-inputter-agent@local.test`, `canWriteDirectly()`-capable — never delete it);
+`.env` is already pointed at it. `http://localhost:8000` is only Laravel's own
+generic `php artisan serve` default (brief §7) and may not match the port actually in
+use — always check `.env`'s current `CBDB_API_BASE_URL` rather than assuming a port.
+Never use a production token for anything other than deliberate, user-confirmed
+production writes.

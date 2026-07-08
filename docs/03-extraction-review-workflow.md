@@ -137,6 +137,11 @@ batch_notes: >
   batch_notes for what was deliberately left out and why, if anything.
 ```
 
+(`p3` omits `target_pk` because `basicinformation`'s PK is `c_personid` alone, already
+carried by `person_id` — see §2.5, validation rule 5, for when `target_pk` becomes
+required, e.g. updating an existing `altnames` row would need
+`target_pk: {c_alt_name_chn: ..., c_alt_name_type_code: ...}` alongside `person_id`.)
+
 Design points:
 - Every proposal carries `source_quote` and `confidence` — nothing is submitted
   without a traceable link back to the source text, independent of the server's or
@@ -151,6 +156,16 @@ Design points:
 - `person_id: NEW` / `person_id: p1` (referencing a sibling proposal) defers real
   `c_personid` allocation to submit time, so the whole batch can be drafted before any
   ID is committed — avoids burning IDs on proposals that get edited out.
+- `target_pk` carries the *identifying* composite-key fields for `update`/`delete`
+  proposals — required whenever the resource's PK has fields beyond `c_personid`
+  alone (see `docs/04-field-whitelists.md` for each resource's PK field list; e.g.
+  updating an `altnames` row needs `target_pk: {c_alt_name_chn: ..., 
+  c_alt_name_type_code: ...}` even if the edit itself only changes `c_notes`, since
+  `changes` alone can't identify *which* altname row to touch). Mirrors the real
+  API's `target.pk` field (brief §3) so `staging.py` can build the actual request
+  envelope directly from a resolved proposal without guessing which fields are
+  identifying vs. mutated. Omitted for `create` (nothing exists yet to target) and
+  for single-key resources being updated by `c_personid` alone (`basicinformation`).
 
 ### 2.3 Interaction loop
 
@@ -194,6 +209,103 @@ Design points:
   (`resource`, `operation`, `person_id`, `changes`, `source_quote`, `confidence`,
   `conflicts`) is generic across all resources listed in the brief §3.
 
+### 2.5 Validation schema (`staging.py`)
+
+Concrete validation rules `staging.py` must enforce, expressed as `pydantic` v2
+models (chosen over hand-rolled dict-checking so validation errors come with clear,
+structured messages the CLI/skill can surface verbatim; adds one dependency beyond
+`PyYAML` — see `requirements.txt`):
+
+```python
+from typing import Literal
+from pydantic import BaseModel, field_validator
+
+class ConflictOption(BaseModel):
+    value: str | int | float
+    rationale: str
+
+class Conflict(BaseModel):
+    id: str
+    field: str
+    description: str
+    options: list[ConflictOption]
+    agent_suggestion: str | int | float | None = None
+    agent_reasoning: str | None = None
+    resolution: str | int | float | None = None   # None = unresolved, blocks submit
+
+class Proposal(BaseModel):
+    id: str
+    resource: str            # validated against docs/04-field-whitelists.md's
+                              # known resource aliases, per-operation (see note below)
+    operation: Literal["create", "update", "delete"]
+    person_id: str | int      # "NEW", another proposal's local id (e.g. "p1"), or a
+                               # real c_personid int
+    target_pk: dict[str, str | int | float] | None = None
+    changes: dict[str, str | int | float | None] = {}
+    source_quote: str
+    confidence: Literal["high", "medium", "low"]
+    conflicts: list[Conflict] = []
+
+class StagingBatch(BaseModel):
+    batch_id: str
+    source_excerpt: str | None = None
+    proposals: list[Proposal]
+    batch_notes: str | None = None
+```
+
+Validation performed by `staging.py`, beyond what `pydantic` field types give for
+free (all of these produce a structured error list, not a first-error-and-stop):
+
+1. **No unresolved conflicts anywhere in the batch** — every `Conflict.resolution` in
+   every proposal must be non-`None` before `submit` (not before `validate`, which is
+   allowed to report them and exit cleanly).
+2. **Resource/operation alias check against `docs/04-field-whitelists.md`** —
+   `resource` must be a valid alias *for that specific operation*, not just for the
+   resource generally: e.g. `resource: "socialinst"` is valid for `create`/`delete`
+   but must be rejected (or silently normalized to `"social_institutions"`, TBD at
+   implementation time — either is acceptable, silent breakage is not) for `update`,
+   per the alias gap documented in `04-field-whitelists.md` §12.
+3. **Field whitelist check** — every key in `changes` must be in that
+   resource+operation's allowed-fields list from `docs/04-field-whitelists.md`,
+   **or** in that resource's documented pseudo-field set (e.g. `c_addr_id`/
+   `c_addr_cleared` for `events`/`associations`/`possessions`, `c_addr` for
+   `postings`/`offices`, `c_kinship_pair`/`c_assocship_pair`/`c_assoc_kinship_pair`
+   for `kinship`/`associations` — each called out in its resource's section of
+   `docs/04-field-whitelists.md`). Pseudo-fields are legitimate client input that the
+   *server* strips before its own whitelist check; `staging.py` must accept them for
+   the same resources the server does, not just the plain column whitelist.
+4. **Sibling `person_id` reference resolution** — if `person_id` is not `"NEW"` and
+   not a plausible integer `c_personid`, it must match another proposal's `id` field
+   in the same batch, and that sibling proposal must be `resource: basicinformation`,
+   `operation: create`. A dangling reference is a hard error.
+5. **`target_pk` required when the resource's PK has non-`c_personid` fields** — for
+   `update`/`delete` on any resource whose `docs/04-field-whitelists.md` PK is wider
+   than just `c_personid`, `target_pk` must be present and contain exactly that
+   resource's key columns (e.g. all 9 for `associations`, all 10 for `entries`).
+   Missing or partial `target_pk` on such a proposal is a hard error — there would be
+   no way to know which existing row to update/delete.
+6. **Server-assigned surrogate PKs must never be *client-chosen* on `create`, but
+   are *required* in `target_pk` on `update`/`delete`** — for `possessions`
+   (`c_possession_record_id`) and `postings`/`offices` (`c_posting_id`): a `create`
+   proposal must not set the surrogate ID in `changes` or `target_pk` (`staging.py`
+   rejects it — the ID doesn't exist yet, per `04-field-whitelists.md`'s
+   "server-assigned PK" note). An `update`/`delete` proposal, by contrast, *must*
+   supply it in `target_pk` (rule 5 already requires this for any multi-field PK) —
+   but the value must trace back to either a real ID already returned by the server
+   for an earlier create in this batch (see the "read the assigned ID back" flow in
+   `04-field-whitelists.md`), or a pre-existing ID the human explicitly supplied, not
+   a value the agent invented.
+7. **Ordering derivable, not required in file order** — `staging.py` topologically
+   sorts proposals by `person_id` sibling-reference at submit time, so a human
+   reordering rows while editing never breaks the person-before-sub-resource
+   requirement (`AGENTS.md` rule 7); the file's on-disk order is for human
+   readability only.
+
+`cli.py validate --staging <path>` runs all of the above and prints every violation
+found (not just the first), grouped by proposal `id`. `cli.py submit --staging <path>`
+refuses to run at all if validation reports anything beyond unresolved conflicts it
+was explicitly told to `--defer`.
+
 ## 3. Repo changes this adds
 
 ```
@@ -224,8 +336,9 @@ between Milestone 3 (mutation wrappers) and Milestone 5 (CLI + batch submission)
 - `cli.py` additions: `validate --staging <path>`, `submit --staging <path>`.
 - `skills/cbdb-data-entry/SKILL.md` extended with the extraction/review loop from
   §2.3 above.
-- No new external dependencies beyond a plain YAML library (`PyYAML`) — see §2.2 on
-  why comment round-tripping is not required here.
+- New external dependencies: a plain YAML library (`PyYAML`; see §2.2 on why comment
+  round-tripping is not required) and `pydantic` (see §2.5's schema). Both already
+  listed in `requirements.txt`.
 
 This does not change the review workflow itself (`01-implementation-plan.md` §11
 still applies: review agent → fix → codex → fix → log → next milestone).

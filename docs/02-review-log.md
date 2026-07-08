@@ -72,3 +72,63 @@ matches the real file, the `/api/v2/persons`/`/api/v2/operations` allowlist matc
 across brief/plan/AGENTS, and the extraction-review workflow otherwise fits the rest
 of the repo design" with only the 2 findings above, both now fixed. **Milestone 1
 (scaffolding + docs) is closed.**
+
+## Milestone 2 prep — local test env + remaining design docs
+
+Set up ahead of Milestone 2 (core HTTP client) at the user's request:
+
+- Created a permanent local test account (`cbdb-inputter-agent@local.test`, ID 722,
+  `regular` role, active — satisfies `canWriteDirectly()`) on the user's local
+  `cbdb-online-main-server` instance via `php artisan cbdb:manage-user`. **Will not
+  be deleted** — standing account for all future local testing.
+- Generated a Sanctum personal access token for it via `php artisan tinker` and wrote
+  it directly into `.env` via a PHP script that never printed the token value to
+  stdout/chat (the Claude Code permission classifier correctly flagged and blocked an
+  earlier attempt that would have echoed it — the write-directly-to-file approach was
+  used instead). `.env`'s `CBDB_API_BASE_URL` set to `http://localhost:8080` (port
+  identified via `netstat`, pending the user's confirmation — see open task).
+- Wrote the remaining design docs the user asked for: `docs/04-field-whitelists.md`
+  (per-resource field whitelists, read from all ~13 mutation handler files in the
+  target repo), `docs/05-testing-strategy.md`, `skills/cbdb-data-entry/SKILL.md`,
+  `requirements.txt`, `requirements-dev.txt`; extended `docs/03`'s staging design
+  with a concrete pydantic schema (§2.5).
+- Resolved `01-implementation-plan.md` §12's three open questions (account/token,
+  local instance, structured-input format — the last resolved as "design now at the
+  generic-internal-schema level, build a source-specific adapter later if/when a
+  real structured source appears").
+
+### Review-agent pass (this batch)
+Findings: `staging.py`'s pydantic schema had no field to identify *which* existing
+row an update/delete targets on multi-field-PK resources; `SKILL.md` cited an
+unplanned `validate --input` CLI subcommand; `docs/05`'s test plan didn't call out
+`docs/04`'s mirror-relationship exception types or server-assigned-PK read-back flow.
+Resolution: added `target_pk` to the `Proposal` schema with rules for when it's
+required; removed the invented subcommand reference from `SKILL.md`; expanded
+`docs/05` with explicit mirror-exception and surrogate-PK-readback test requirements.
+All 3 confirmed fixed by a follow-up Explore-agent check.
+
+### codex exec pass (this batch)
+Findings: field-whitelist validation didn't account for documented pseudo-fields
+(`c_addr_id`, `c_kinship_pair`, etc.) that the server itself strips before its own
+whitelist check — would have wrongly rejected valid proposals; `AGENTS.md` still said
+the local instance was at `:8000` (stale, contradicting the `:8080` set up this
+session); validation rule 6's wording said a surrogate PK is "never present in
+`target_pk`" while the very next sentence required it there for update/delete — an
+internal contradiction; `01-implementation-plan.md` still used the brief's shorthand
+`assoc` resource name instead of `docs/04`'s canonical `associations` alias, and
+`docs/05` was missing coverage for `basicinformation` soft-delete/immutable-name
+behavior, `events`' address-only pseudo-field path, and `sources`' re-keyable PK.
+
+Resolution: added an explicit pseudo-field allowance to validation rule 3; fixed
+`AGENTS.md` to state `:8080` and to tell readers to check `.env` rather than assume a
+port; reworded rule 6 to state the create-vs-update/delete distinction without
+contradiction; fixed the resource-name list in `01-implementation-plan.md` §6 and
+added a clarifying note to its inline `.env.sample` template disambiguating the
+generic Laravel default from this repo's actual local target; added the 3 missing
+coverage items to `docs/05`. A follow-up codex pass confirmed 3 of 4 fully fixed and
+flagged one remaining wording-consistency nit (the `.env.sample` template comment vs.
+`AGENTS.md`'s tone), which was then also fixed and verified.
+
+Sign-off: **Milestone-2-prep docs are closed.** Outstanding: user needs to confirm
+`http://localhost:8080` is actually correct (tracked as an open task in this
+conversation, not a doc gap).
