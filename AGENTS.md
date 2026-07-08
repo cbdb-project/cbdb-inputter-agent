@@ -71,6 +71,23 @@ to avoid stdin blocking, with `$env:HTTPS_PROXY`/`$env:HTTP_PROXY` set for proxy
 as an independent second review, and resolve its findings too, before starting the next
 milestone. Log both passes in `docs/02-review-log.md`.
 
+## Git workflow
+
+This repo is public (`github.com/cbdb-project/cbdb-inputter-agent`) with `main`
+branch-protected: linear history is required, force-pushes and branch deletion on
+`main` are blocked, and merge commits are disabled at the PR level (only squash or
+rebase merge). Practical rules that follow from this:
+
+- **Never push directly to `main`.** Branch, open a PR, merge via the GitHub UI
+  (squash or rebase — either is fine, just not "create a merge commit").
+- **Never `git merge` a feature branch into `main` locally and push the result** —
+  that produces a merge commit, which GitHub will reject anyway (linear history is
+  enforced), but don't rely on the rejection; branch + PR is the actual workflow.
+- If your branch falls behind `main`, `git rebase origin/main` it before opening/
+  updating the PR, rather than merging `main` into your branch.
+- Delete-branch-on-merge is enabled — a merged PR's branch is cleaned up
+  automatically; don't recreate it under the same name for unrelated work later.
+
 ## Local dev / testing
 
 Point `CBDB_API_BASE_URL` at a local `cbdb-online-main-server` instance instead of
