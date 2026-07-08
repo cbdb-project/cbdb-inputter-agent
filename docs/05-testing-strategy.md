@@ -55,10 +55,15 @@ fixture conventions.
 ## 3. What each module's tests must cover
 
 - **`http_client.py`**: one test per status-code branch in
-  `01-implementation-plan.md` §5 (401/403/409/422/429/5xx), a dry-run test asserting
-  no `responses`-mocked call is actually made for a mutating verb, and a rate-limiter
-  test using `freezegun` to control elapsed time deterministically instead of
-  real `time.sleep`.
+  `01-implementation-plan.md` §5 (401/403/409/422/429/5xx/network error), a dry-run
+  test asserting no `responses`-mocked call is actually made for a mutating verb, and
+  rate-limiter tests using injected fake `clock`/`sleep` callables (simpler than
+  `freezegun` for `RateLimiter`'s plain `time.monotonic`-based interval check —
+  `freezegun` remains available for other modules where mocking `datetime`/`time.time`
+  directly is a better fit, e.g. asserting `audit_log.py`'s ISO8601 timestamp format).
+  Also a defense-in-depth test that a caller-supplied `mutating` flag contradicting a
+  known endpoint's nature (e.g. `mutating=False` for `/api/v2/create`) is rejected
+  rather than silently trusted.
 - **`mutation_api.py`**: one test per resource wrapper asserting the JSON envelope
   sent matches brief §3's shape exactly (resource/mode/operation/person_id/target/
   changes), and a whitelist-rejection test per resource using `models.py`'s field

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cbdb-inputter-agent"
+version = "0.1.0"
+description = "Authorized API client for cbdb-online-main-server's /api/v2/* Mutation API"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31,<3",
+    "python-dotenv>=1.0,<2",
+    "PyYAML>=6.0,<7",
+    "pydantic>=2.5,<3",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: hits a real local cbdb-online-main-server instance (not run by default, see docs/05-testing-strategy.md)",
+]
+addopts = "-m 'not integration'"

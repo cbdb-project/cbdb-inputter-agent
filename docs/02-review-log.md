@@ -140,3 +140,53 @@ template comment, and `docs/05-testing-strategy.md` §1. No code existed yet to 
 affected. Lesson: don't treat a `netstat`-identified port as confirmed without an
 explicit user check — flagged as exactly that kind of open item last time, and it
 did turn out to be wrong.
+
+## Milestone 2 — Core client (config.py, audit_log.py, http_client.py, person_id.py)
+
+First real Python code in the repo, plus a full `responses`/`freezegun`-based unit
+test suite (45 tests) per `docs/05-testing-strategy.md`. Packaged with
+`pyproject.toml` (src layout, `pip install -e .`).
+
+### Review-agent pass
+Findings: (1) `mutating: bool` on `HttpClient.post()`/`get()` was trusted blindly
+with no cross-check against the actual endpoint — a future Milestone-3 wrapper bug
+could silently skip both the dry-run and `CBDB_CONFIRM_PROD` gates; (2) two
+live-write-gate tests lacked `@responses.activate`, so a regression moving the gate
+check after the network call could make them silently attempt a real request instead
+of failing; (3) dead `DryRunBlocked` exception class; (4) `RateLimiter`'s actual
+algorithm (fixed minimum-interval) silently diverged from docs/01's "token-bucket"
+wording; (5) a `requests.RequestException` was re-raised with zero retries, unlike
+5xx responses which retry — undocumented asymmetry; (6) `freezegun` was an unused
+dev dependency; (7) `config.py`'s `load_dotenv(override=False)` precedence was
+undocumented.
+
+Resolution: added `MutatingFlagMismatch`/`_check_mutating_flag()` as a fail-closed
+guard on known mutating/read-only paths; added `@responses.activate` + zero-calls
+assertions to the two gate tests; removed `DryRunBlocked`; corrected docs/01 §5's
+wording to describe the real algorithm; added a `NetworkError` class with the same
+retry/backoff as 5xx, with test coverage; added a `freezegun`-based timestamp test to
+`test_audit_log.py`; added an explanatory comment to `config.py`. All 7 confirmed
+fixed by a follow-up Explore-agent pass; full suite (45 tests) still green.
+
+### codex exec pass
+Findings: (1) `config.py`'s `load_dotenv(override=False)` — flagged again, this time
+as a real bug rather than just an undocumented footgun, since a stale exported env
+var could keep sending live writes to an old host even after `.env` was edited back
+to something safer; (2) `http_client.py` always logged `request_payload=json_body`,
+but `get()` never sets `json_body` (real input lives in `params`) — GET calls
+(including `person_id.py`'s existence/discovery lookups) were being audit-logged
+with no payload; (3) most status-code tests didn't assert an `audit_log.record()`
+entry was actually written, so a regression skipping logging on those paths could
+leave the suite green. Core safety logic (dry-run + `CBDB_CONFIRM_PROD` gate always
+run before any mutating call; 409/422 never retried) was independently verified
+clean by codex tracing the code by hand.
+
+Resolution: flipped to `load_dotenv(override=True)` so `.env` is authoritative, with
+an expanded comment explaining why (opposite of typical dotenv advice, deliberately);
+computed a `logged_payload` that falls back to `params` when `json_body` is `None`,
+used consistently across all three `audit_log.record()` call sites; added
+`read_audit_records()` assertions to the GET, 401, 409, 429-exhausted, and
+network-error-exhausted tests. A follow-up codex pass confirmed all 3 fixed with no
+new issues introduced; full suite (45 tests) still green.
+
+Sign-off: **Milestone 2 is closed.**

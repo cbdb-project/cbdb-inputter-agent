@@ -176,7 +176,9 @@ overwritten, never deleted by the agent. This mirrors the server's append-only
 
 - `requests.Session` with `Authorization: Bearer {token}` header set once.
 - Wraps every call with: local audit logging (§4), client-side rate limiting
-  (token-bucket at `CBDB_MAX_REQUESTS_PER_MINUTE`), and structured error mapping:
+  (a fixed minimum-interval limiter at `CBDB_MAX_REQUESTS_PER_MINUTE` — simpler
+  than a token bucket and deliberately more conservative: no burst allowance),
+  and structured error mapping:
   - 401 → raise `AuthenticationError` (bad/expired token — do not retry)
   - 403 → raise `AuthorizationError` (account lacks `canWriteDirectly()` — do not retry)
   - 409/422 → raise `ConflictError` with the response body attached — surfaced to the
