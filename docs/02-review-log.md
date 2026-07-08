@@ -190,3 +190,47 @@ network-error-exhausted tests. A follow-up codex pass confirmed all 3 fixed with
 new issues introduced; full suite (45 tests) still green.
 
 Sign-off: **Milestone 2 is closed.**
+
+## Milestone 3 — Mutation wrappers (models.py, mutation_api.py)
+
+Encodes all 13 resources from `docs/04-field-whitelists.md` as data
+(`RESOURCE_SPECS`), plus generic `MutationApi.create/update/delete/get()` and named
+convenience wrappers for `basicinformation`/`addresses`/`kinship`
+(docs/01-implementation-plan.md milestone 3 scope). 76 tests total (31 new).
+
+### Review-agent pass
+Findings: (1) `postings`' `pseudo_fields` wrongly included `c_addr_cleared` (that
+belongs to `events`, not `postings`) — a real whitelist transcription error that
+would let an invalid field through client-side validation; (2)
+`validate_target_pk_for_create()` only rejected server-assigned PK fields, never
+checked required-field completeness or unknown fields, unlike the update/delete
+version; (3) `update_immutable_fields` was dead code — the generic whitelist check
+always fired first with a less specific message; (4) `MutationApi.get()` lacked a
+`resource_string` override for symmetry with the write methods; (5) the `sources`
+resource's field list looked ambiguous against docs/04's prose — verified directly
+against `BiogSourceRepository.php` in the target repo and confirmed correct (the
+`c_personid`-in-changes handling is intentionally stricter on our side than the
+server's tolerant-if-equal behavior, which is safe).
+
+Resolution: fixed `postings.pseudo_fields` to `{"c_addr"}`; added completeness/
+unknown-field checks to `validate_target_pk_for_create()`; reordered
+`validate_changes()` so the immutable-field check runs first with a clear message;
+added `resource_string` param to `get()`; added regression tests for all of the
+above (including a dedicated postings-pseudo-field test and an events-pseudo-field
+test to prevent the two being confused again). All 4 confirmed fixed by a follow-up
+Explore-agent pass; full suite green.
+
+### codex exec pass
+Cross-checked all 13 `RESOURCE_SPECS` entries against `docs/04-field-whitelists.md`
+exhaustively — no further transcription errors found (the postings fix from the
+review-agent pass held up). One new finding: `create()` merged `target_pk` into
+`changes` via `dict.setdefault()`, meaning a caller passing conflicting values for
+the same PK field in `target_pk` vs. `changes` (e.g. `target_pk={"c_office_id": 1}`,
+`changes={"c_office_id": 2}`) would silently send `changes`' value with no error —
+an internally inconsistent envelope reaching the server, undetected client-side.
+
+Resolution: `create()` now raises `FieldWhitelistError` if a PK field appears in
+both `target_pk` and `changes` with different values, before ever building the
+envelope. Added a regression test. Full suite green (76 tests).
+
+Sign-off: **Milestone 3 is closed.**
