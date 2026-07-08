@@ -1,6 +1,7 @@
 # Extraction & Interactive Review Workflow
 
-Status: draft, pending review. Extends `01-implementation-plan.md` with a stage that
+Status: implemented (`src/cbdb_agent/staging.py`, Milestone 4 — see
+`docs/02-review-log.md`). Extends `01-implementation-plan.md` with a stage that
 sits between "user has source material" and "data is submitted via `/api/v2/*`".
 
 ## 1. Problem

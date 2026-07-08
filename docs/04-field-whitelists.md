@@ -1,6 +1,8 @@
 # Per-Resource Field Whitelists
 
-Status: draft, pending review. Read directly from
+Status: implemented (`src/cbdb_agent/models.py`, Milestone 3 — see
+`docs/02-review-log.md`; all 13 resources cross-checked field-by-field against
+the target repo during review). Read directly from
 `cbdb-online-main-server`'s `app/Services/Mutations/*Handler.php` and
 `app/Support/CompositePrimaryKey.php` on 2026-07-08 (see brief's caveat: this is a
 snapshot, re-verify against the live repo before trusting it for anything

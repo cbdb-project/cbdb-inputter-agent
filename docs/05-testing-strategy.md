@@ -1,6 +1,7 @@
 # Testing Strategy
 
-Status: draft, pending review. Fills in the "unit tests with a mocked HTTP layer"
+Status: implemented across Milestones 2-7 (129 tests total, see
+`docs/02-review-log.md`). Fills in the "unit tests with a mocked HTTP layer"
 mention in `01-implementation-plan.md` §10 (Milestone 2) with concrete tooling and
 fixture conventions.
 

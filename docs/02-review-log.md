@@ -446,3 +446,30 @@ can only waste an ID, never cause a real collision. Also added a defensive
 `max_attempts >= 1` guard. Full suite green (129 tests).
 
 Sign-off: **Milestone 7 is closed.**
+
+## Final — README/docs update before publishing
+
+Updated README.md (early-development notice, real CLI usage, status summary) and
+`docs/01-implementation-plan.md` (all 7 milestones marked done, repo-layout block
+and §7's CLI description brought in line with what was actually built) ahead of
+publishing the repo.
+
+### codex exec pass
+Findings: `docs/03`/`04`/`05` still had stale `Status: draft, pending review`
+headers, contradicting the "all milestones complete" framing; `01`'s repo-layout
+block was out of sync (referenced a nonexistent `skills/.../scripts/` directory,
+omitted `batch_runner.py` and several test files); §7's CLI description described
+a "per-record slice" archiving behavior that isn't what was actually implemented
+(the whole source file + a `results.json` gets archived, not per-record slices).
+
+Resolution: updated the three stale status headers to `Status: implemented`;
+corrected the repo-layout block to match the real file tree; rewrote §7 to
+describe the actual `batch_runner.run_batch()`/`cli.py` behavior (shared
+`StagingBatch` representation for both input paths, per-proposal failure
+isolation, `-attemptN` archiving). One codex finding (README's "early-stage"
+framing reading as inconsistent with "all milestones complete") was intentionally
+not applied — the user explicitly asked for that notice to stay, since the
+implemented code is still expected to change before wider use. Full suite green
+(129 tests).
+
+Sign-off: **Ready to publish.**

@@ -1,9 +1,11 @@
 # CBDB Inputter Agent — Implementation Plan
 
-Status: draft, pending review. See `00-target-system-brief.md` for the target-system
-facts this plan relies on, and `03-extraction-review-workflow.md` for the
-source-text → proposal → human-review pipeline that precedes submission for
-unstructured input.
+Status: **all 7 milestones implemented and reviewed** (see §10 and
+`docs/02-review-log.md`). This document is kept as the architectural record and
+rationale, not as a pending TODO list. See `00-target-system-brief.md` for the
+target-system facts this plan relies on (including facts confirmed live during
+Milestone 7), and `03-extraction-review-workflow.md` for the source-text →
+proposal → human-review pipeline that precedes submission for unstructured input.
 
 ## 1. Goal
 
@@ -41,30 +43,38 @@ cbdb-inputter-agent/
   skills/
     cbdb-data-entry/
       SKILL.md               # skill definition: structured-input path + extraction/review path
-      scripts/                # thin CLI wrappers the skill shells out to (empty for now)
   requirements.txt            # runtime deps: requests, python-dotenv, PyYAML, pydantic
   requirements-dev.txt        # + pytest, responses, freezegun
+  pyproject.toml              # src-layout package + pytest config
   src/
     cbdb_agent/
       __init__.py
       config.py               # loads/validates .env
       http_client.py           # low-level authenticated HTTP wrapper (retries, throttle, error mapping)
       mutation_api.py          # typed wrappers for create/mutate/delete/get per resource
-      models.py                 # dataclasses for BiogMain, Address, Kinship, etc. + field whitelists
+      models.py                 # per-resource field whitelists + composite PK schemas
       audit_log.py              # local JSONL audit logger (independent of server audit_log)
       person_id.py               # c_personid allocation/validation helper
       staging.py                  # YAML staging-file schema, whitelist + conflict validation
-      cli.py                      # `python -m cbdb_agent ...` entry point
+      batch_runner.py              # submission engine: person_id allocation, per-proposal execution
+      cli.py                        # `python -m cbdb_agent ...` entry point
   data/
-    inbox/                       # user drops already-structured source records here (csv/json)
+    inbox/                       # user drops already-structured source records here (JSON)
     staging/                     # <batch-id>/proposal.yaml + source.txt — see 03-extraction-review-workflow.md
-    processed/                   # moved here after successful submission, with server response attached
+    processed/                   # archived here after a submit attempt, alongside a results.json
   logs/
     .gitkeep                     # local_audit_log JSONL files live here, gitignored except .gitkeep
   tests/
+    conftest.py
+    test_config.py
+    test_audit_log.py
     test_http_client.py
     test_mutation_api.py
+    test_models.py
     test_person_id.py
+    test_staging.py
+    test_batch_runner.py
+    test_cli.py
     fixtures/
 ```
 
@@ -212,20 +222,31 @@ overwritten, never deleted by the agent. This mirrors the server's append-only
   (via `GET /api/v2/get`) and raises a clear local error instead of relying on the
   server's 4xx if the person doesn't exist yet.
 
-## 7. CLI / entry point (`cli.py`)
+## 7. CLI / entry point (`cli.py`, `batch_runner.py`) — as implemented
 
-`python -m cbdb_agent submit --input data/inbox/records.json` (or `.csv`):
-- Reads a batch of records in a documented internal schema (one JSON object per
-  logical person + nested sub-resources).
-- For each record: create person, then sub-resources, in the required order
-  (brief §3/§6), logging each API call locally (§4) regardless of outcome.
-- On any conflict/validation error for a record, stop processing *that record*, log
-  the failure, and continue with the next record (partial-batch failure isolation) —
-  never silently skip, always print + log a per-record summary at the end.
-- On success, move the source file (or that record's slice) to `data/processed/`
-  with the server's response payload attached for traceability.
+`python -m cbdb_agent submit --input data/inbox/records.json` (a JSON array of
+records; see `staging.load_input_batch()`'s docstring for the exact shape) or
+`--staging <path>` (a YAML file from the extraction workflow, §4 below):
+- Both paths converge on one internal representation (`staging.StagingBatch`) and
+  one execution engine (`batch_runner.run_batch()`), rather than duplicating
+  submission logic per input format.
+- Validates the whole batch upfront (`staging.validate_for_submit()`) before
+  sending anything — a structural error blocks the entire batch, distinct from a
+  runtime failure on one proposal (see below).
+- Submits proposals in dependency order (person before sub-resources, §6),
+  logging each API call locally (§4) regardless of outcome.
+- On a runtime failure (conflict, permission error) for one proposal, that
+  proposal is marked `failed` and any proposal depending on it is marked
+  `skipped_dependency_failed` — the rest of the batch continues
+  (`AGENTS.md` rule 5's isolation applies per-proposal, not just per-record).
+- On any real (non-dry-run) submit attempt, the whole source file (input JSON or
+  staging YAML) is archived to `data/processed/<batch_id>/` alongside a
+  `results.json` with every proposal's outcome — a repeat submission of the same
+  `batch_id` gets its own `-attempt2`/`-attempt3` directory rather than
+  overwriting the previous attempt's results.
 - `--dry-run` flag mirrors `CBDB_DRY_RUN` and can force it on even if `.env` disables
-  it, but cannot force it off (safety only goes one direction from the CLI).
+  it, but cannot force it off (safety only goes one direction from the CLI); a
+  dry-run never archives anything, since nothing was actually attempted.
 
 ## 8. Skill (`skills/cbdb-data-entry/SKILL.md`)
 
@@ -257,22 +278,27 @@ Documents for any agent working in this repo:
 
 ## 10. Milestones
 
-1. **Scaffolding**: repo skeleton, `.env`/`.env.sample`/`.gitignore`, `AGENTS.md`,
-   `docs/`. *(this doc's deliverable)*
-2. **Core client**: `config.py`, `http_client.py`, `audit_log.py`, `person_id.py` +
+1. ✅ **Scaffolding**: repo skeleton, `.env`/`.env.sample`/`.gitignore`, `AGENTS.md`,
+   `docs/`.
+2. ✅ **Core client**: `config.py`, `http_client.py`, `audit_log.py`, `person_id.py` +
    unit tests with a mocked HTTP layer (no real network calls in tests).
-3. **Mutation wrappers**: `mutation_api.py` + `models.py` for `basicinformation` and
-   2–3 sub-resources (addresses, kinship) first, rest following the same pattern.
-4. **Extraction staging** (see `03-extraction-review-workflow.md`): `staging.py`
+3. ✅ **Mutation wrappers**: `mutation_api.py` + `models.py`, covering all 13
+   resources' whitelists, with named convenience wrappers for `basicinformation`,
+   `addresses`, and `kinship`.
+4. ✅ **Extraction staging** (see `03-extraction-review-workflow.md`): `staging.py`
    (YAML staging-file load/validate/save, reusing `models.py`'s whitelists) +
    `cli.py validate/submit --staging`, so source material can be read, proposed,
    bulk-edited by a human, and interactively negotiated before anything is sent.
-5. **CLI + batch submission**: `cli.py`, `data/inbox` → `data/processed` flow (the
-   already-structured-JSON/CSV path, for when there's no extraction step needed).
-6. **Skill**: `skills/cbdb-data-entry/SKILL.md` wired to both the direct-submit CLI
-   and the extraction/staging workflow.
-7. **End-to-end dry-run validation** against a local `cbdb-online-main-server`
-   instance (brief §7) before ever pointing at production.
+5. ✅ **CLI + batch submission**: `cli.py` + `batch_runner.py`,
+   `data/inbox`/`data/staging` → `data/processed` flow, covering both the
+   already-structured-JSON and extraction/staging input paths.
+6. ✅ **Skill**: `skills/cbdb-data-entry/SKILL.md` wired to both the direct-submit
+   CLI and the extraction/staging workflow.
+7. ✅ **End-to-end dry-run + live validation** against the user's local
+   `cbdb-online-main-server` instance — this caught and fixed two real bugs no
+   amount of mocked testing would have (see `docs/02-review-log.md`'s Milestone 7
+   entry and `docs/00-target-system-brief.md`'s "Confirmed live" section) before
+   ever pointing at production.
 
 ## 11. Review workflow (applies to every milestone above)
 
