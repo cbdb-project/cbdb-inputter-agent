@@ -9,12 +9,13 @@ Design note on target_pk vs changes for `create` (see docs/03-extraction-review-
 workflow.md section 2.5 for the same question in the staging-file context): the
 target system's real request envelope includes `target.pk` for every operation,
 including create, and each resource's create field whitelist (docs/04) includes the
-composite PK columns as normal, settable fields. Since the exact interaction between
-target.pk and changes on create was not confirmed against a live response as of this
-module's initial implementation, `create()` conservatively supplies the PK fields in
+composite PK columns as normal, settable fields. `create()` supplies the PK fields in
 BOTH target.pk and changes (when they're part of that resource's create whitelist),
-so whichever the server actually reads, the value is present and consistent. Correct
-this if Milestone 7's live testing reveals the server behaves differently.
+so whichever the server actually reads, the value is present and consistent. **This
+was confirmed correct against a live response during Milestone 7** (a real
+basicinformation create and a real addresses sub-resource create both succeeded
+end-to-end against the user's local instance - see docs/00-target-system-brief.md's
+"Confirmed live" section).
 """
 
 from __future__ import annotations
@@ -183,17 +184,31 @@ class MutationApi:
         self,
         resource_key: str,
         *,
+        person_id: int | str,
         target_pk: dict[str, Any],
         resource_string: str | None = None,
     ) -> dict[str, Any]:
-        # No alias validation here (unlike create/update/delete) - docs/00 and
-        # docs/04 don't document a per-alias whitelist for GET, so any string is
-        # passed through as-is; resource_string exists only for symmetry with the
-        # write methods in case a caller needs a specific alias.
+        """GET /api/v2/get requires the same envelope shape as the write endpoints
+        (resource, person_id, target.pk) - confirmed live during Milestone 7
+        against app/Http/Controllers/Api/MutationController::get() in the target
+        repo, which 422s "缺少 target.pk" without a nested target.pk and separately
+        requires person_id. Sent as a JSON body on the GET request (Laravel reads
+        the JSON body first, same as for POST).
+
+        Known caveat (also confirmed live, via
+        app/Services/Mutations/MutationReadService.php): the alias list for GET is
+        NOT always identical to the create/update/delete alias lists in
+        docs/04-field-whitelists.md - e.g. GET accepts "socialinstitution" (no
+        underscore) instead of "socialinst", and accepts "source" (singular) as an
+        extra alias for `sources`. Passing a canonical `resource_key` (the
+        default, when resource_string is omitted) is always safe; only override
+        `resource_string` with a value you've confirmed is in the GET-specific
+        alias list.
+        """
         spec = get_resource_spec(resource_key)
         alias = resource_string or spec.key
-        params = {"resource": alias, **target_pk}
-        return self._client.get("/api/v2/get", params=params, resource=spec.key)
+        envelope = {"resource": alias, "person_id": person_id, "target": {"pk": target_pk}}
+        return self._client.get("/api/v2/get", json_body=envelope, resource=spec.key)
 
     # -- Named convenience wrappers (docs/01-implementation-plan.md milestone 3) --
 

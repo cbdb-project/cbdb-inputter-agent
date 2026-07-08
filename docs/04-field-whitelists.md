@@ -258,6 +258,12 @@ same batch.
 - **Update**: identical minus `c_personid`.
 - `c_bi_role_code`/`c_source` sentinel-normalized. `c_inst_code`/`c_inst_name_code`
   reference social-institution type/name code tables.
+- **Confirmed live (Milestone 7): `GET /api/v2/get`'s alias list is separately
+  defined and different again** — `app/Services/Mutations/MutationReadService.php`
+  accepts `social_institutions`, `socialinstitution` (no underscore — not the same
+  string as the write-side `social_institution`), `social_institution`,
+  `biog_inst_data` for reads. It does not accept `socialinst` either. Always pass
+  the canonical `social_institutions` key for GET; don't reuse a write-side alias.
 
 ## 13. sources (`BIOG_SOURCE_DATA`) — single unified handler, no separate create class
 
@@ -273,6 +279,10 @@ same batch.
   immutable on update (`422 changes.c_personid: immutable` if changed).
 - `c_textid` must reference an existing row (validated against `TEXT_DATA`/
   `TEXT_CODES`) — `422 c_textid: invalid` otherwise.
+- **Confirmed live (Milestone 7):** `GET /api/v2/get`'s `MutationReadService`
+  definition for this resource additionally accepts `source` (singular) and
+  `biog_source_data` as aliases, beyond the write-side's `sources`-only. Always
+  pass the canonical `sources` key for GET.
 - Create: `409` if the PK already exists, or if a pending create-proposal exists for
   the same PK. Update: re-keying checked for collision → `409 target.pk: duplicate`.
 - Delete: `c_pages` is an optional key field, canonicalized to `''` (not null) to

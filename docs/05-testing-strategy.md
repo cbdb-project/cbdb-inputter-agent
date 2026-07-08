@@ -114,9 +114,20 @@ fixture conventions.
 ## 4. Test data hygiene
 
 - No real person data, real tokens, or content from actual source texts in
-  `tests/fixtures/` — use clearly fictional placeholder names/IDs (the brief's
-  `c_personid` numbering scheme leaves room for an obviously-fake range, e.g.
-  `9999901`+, reserved by convention for test fixtures only).
-- `pytest.ini` / `pyproject.toml` test config lives at the repo root once Milestone 2
-  lands; `-m "not integration"` is the default so `pytest` alone never touches a real
-  server, local or otherwise.
+  `tests/fixtures/` — use clearly fictional placeholder names/IDs. For **unit**
+  tests (mocked HTTP, no real server), any `c_personid` works since it's never
+  checked against a real `max(existing)`.
+- For **local integration** tests (§1) that create a real row: there is no fixed
+  "obviously fake" ID range you can hardcode — confirmed live during Milestone 7,
+  `c_personid` is capped at `max(existing) + 10000` (`docs/00-target-system-brief.md`
+  §3), and on the shared local test instance `max(existing)` is already ~698,000+,
+  so a distant fixed sentinel like `9999901` would simply be rejected by the
+  server's own validation. Always derive the ID dynamically via
+  `person_id.get_max_person_id()` + 1 (or `batch_runner.allocate_person_id()`) at
+  test time, and mark the row unambiguously via `c_notes`/`c_name` content (e.g.
+  "Created by cbdb-inputter-agent automated test") rather than via ID range, so a
+  human can identify and clean up test rows on the shared instance regardless of
+  which ID they landed on.
+- `pytest.ini` / `pyproject.toml` test config lives at the repo root (added in
+  Milestone 2); `-m "not integration"` is the default so `pytest` alone never
+  touches a real server, local or otherwise.

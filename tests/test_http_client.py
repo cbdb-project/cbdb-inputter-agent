@@ -11,6 +11,7 @@ from cbdb_agent.http_client import (
     HttpClient,
     MutatingFlagMismatch,
     NetworkError,
+    NotFoundError,
     RateLimitedError,
     RateLimiter,
     ServerError,
@@ -207,6 +208,25 @@ def test_422_raises_conflict_error_no_retry(tmp_path):
     with pytest.raises(ConflictError) as exc_info:
         client.post("/api/v2/create", json_body={}, mutating=True)
     assert exc_info.value.status_code == 422
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_404_raises_not_found_error_specifically_no_retry(tmp_path):
+    """Confirmed live (Milestone 7): GET /api/v2/get 404s for a nonexistent row.
+    Must map to NotFoundError specifically, not the generic CbdbApiError base or
+    UnexpectedResponseError, so callers like is_person_id_taken() can distinguish
+    it with a plain isinstance/except clause."""
+    client, _ = make_client(tmp_path)
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/get",
+        json={"ok": False, "message": "not found"},
+        status=404,
+    )
+    with pytest.raises(NotFoundError) as exc_info:
+        client.get("/api/v2/get", json_body={"resource": "basicinformation"})
+    assert exc_info.value.status_code == 404
     assert len(responses.calls) == 1
 
 

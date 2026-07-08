@@ -136,9 +136,27 @@ before/after payloads, without us needing to build any of our own server-side lo
 - Besides the write endpoints, our agent may also call the two read-only, public
   `GET /api/v2/persons` and `GET /api/v2/operations` list endpoints (`API.md`) — e.g.
   to discover `max(c_personid)` before assigning a new person ID (§3).
+  **Confirmed live (Milestone 7):** `GET /api/v2/persons`' pagination metadata is
+  nested under a top-level `"pagination"` key (`total`/`per_page`/`current_page`/
+  `last_page`/`from`/`to`) — **not** `"meta"`. Rows are server-ordered ascending by
+  `c_personid` (`PersonListController::index()`'s `orderBy(...,'asc')`), so the
+  highest existing ID is always on the *last* page — fetch page 1 to learn
+  `last_page`, then fetch that page directly, rather than scanning every page.
 - Self-throttle bulk writes even though no explicit limit was found on `/api/v2/*`
   (global `api` group elsewhere throttles 600/min) — respect `429` with backoff.
 - Use `GET /api/v2/get` to check for existing rows before create, for idempotency.
+  **Confirmed live (Milestone 7):** this endpoint requires the *same* envelope
+  shape as the write endpoints — `resource`, `person_id`, **and** a nested
+  `target.pk` object — sent as a JSON body (works on GET too; Laravel reads
+  `$request->json()->all()` first, same as for POST). Flat query params alone are
+  rejected with `422 缺少 target.pk`. A nonexistent row 404s (not a 200 with a
+  null/empty `result`).
+  **Also confirmed live:** the resource-alias list `MutationReadService` accepts
+  for GET is not always identical to the create/update/delete alias lists in
+  `docs/04-field-whitelists.md` — e.g. it accepts `"socialinstitution"` (no
+  underscore) instead of `"socialinst"`, and additionally accepts `"source"`
+  (singular) for `sources`. Always send the canonical resource key for GET calls
+  rather than reusing a write-side alias.
 - Handle `409`/`422` (conflict / mirror-relationship issues) as terminal for that
   record, surfaced to a human — do not auto-retry with different data.
 - No CSRF dance needed for `/api/v2/*` Bearer-token calls.
@@ -159,3 +177,20 @@ before/after payloads, without us needing to build any of our own server-side lo
 - Full per-resource field whitelists (`AltnameCreateHandler`, `PostingCreateHandler`,
   etc.) were not exhaustively read for every one of the ~13 sub-resources; read the
   specific handler file before wiring a new resource's field mapping into the client.
+
+## Confirmed live (Milestone 7, 2026-07-08)
+
+Everything below was previously a documented assumption/unknown and has now been
+verified end-to-end against the user's local `cbdb-online-main-server` instance
+(create → get → delete, for both `basicinformation` and an `addresses` sub-resource,
+using the standing local test account):
+
+- `/api/v2/create`'s `target.pk`-in-both-`target.pk`-and-`changes` design (§3's
+  design note in `mutation_api.py`) is correct — a real create with the composite
+  PK fields present in both places succeeds.
+- The full create → read-back → delete (soft-delete for `basicinformation`, hard
+  delete for sub-resources) cycle works exactly as documented in §3-4, including
+  `c_created_by` being stamped from the token's associated user
+  (`"CBDB Inputter Agent (local test)"`) and an `operation_id` being returned.
+- `GET /api/v2/persons` and `GET /api/v2/get`'s exact required shapes (see §6) —
+  the single biggest gap this brief had before Milestone 7.

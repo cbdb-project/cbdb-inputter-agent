@@ -57,6 +57,10 @@ class NetworkError(CbdbApiError):
     """A connection/timeout/DNS failure persisted past the retry budget."""
 
 
+class NotFoundError(CbdbApiError):
+    """404 - e.g. GET /api/v2/get for a row that doesn't exist. Not retried."""
+
+
 class MutatingFlagMismatch(ValueError):
     """Raised when a caller's `mutating` flag contradicts a known endpoint's nature.
 
@@ -154,13 +158,25 @@ class HttpClient:
         path: str,
         *,
         params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
         resource: str | None = None,
     ) -> dict[str, Any]:
+        """json_body: some endpoints (e.g. /api/v2/get) require a nested request
+        shape that doesn't fit flat query params - Laravel reads a JSON body on a
+        GET request just like on POST, so `requests`' `json=` on a GET call works.
+
+        params and json_body are mutually exclusive: no current endpoint needs
+        both, and allowing both would let a caller's `params` silently vanish from
+        the local audit log (which logs one or the other, not a merge) while
+        `requests` still sent both over the wire - a real audit-completeness gap.
+        """
+        if params is not None and json_body is not None:
+            raise ValueError("get() accepts params or json_body, not both")
         return self._request(
             "GET",
             path,
             params=params,
-            json_body=None,
+            json_body=json_body,
             mutating=False,
             resource=resource,
             operation=None,
@@ -308,6 +324,12 @@ class HttpClient:
                 raise ConflictError(
                     f"Conflict/validation error ({response.status_code})",
                     status_code=response.status_code,
+                    body=body,
+                )
+            if response.status_code == 404:
+                raise NotFoundError(
+                    "Not found (404) - e.g. no row matching this target.pk",
+                    status_code=404,
                     body=body,
                 )
 

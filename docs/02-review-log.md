@@ -373,3 +373,76 @@ handling, both attribution fixes) against the current code — reported clean, n
 further findings. Full suite green (124 tests).
 
 Sign-off: **Milestone 6 is closed.**
+
+## Milestone 7 — End-to-end dry-run + local live validation
+
+Ran the client for real against the user's local `cbdb-online-main-server`
+instance (`http://localhost:8000`, standing test account) — dry-run first, then a
+real create → read → delete cycle for both `basicinformation` and an `addresses`
+sub-resource. This is the milestone that exists specifically to catch wrong
+assumptions unit tests (mocked HTTP) can't catch, and it did: **two real bugs
+were found live**, beyond the usual review-agent/codex loop.
+
+### Live findings (found by actually calling the real server, not by review)
+1. `GET /api/v2/persons` pagination metadata is nested under `"pagination"`, not
+   `"meta"` as originally assumed — `get_max_person_id()` was silently unable to
+   ever find `last_page` and would have looped until hitting the old
+   `max_pages` cap and raising `PersonIdError` on every real call.
+2. `GET /api/v2/get` requires the *same* envelope shape as the write endpoints —
+   `resource`, `person_id`, **and** a nested `target.pk` — sent as a JSON body
+   (works on GET; Laravel reads the JSON body first). The old flat
+   `params={"resource": ..., **target_pk}` design (missing `person_id` entirely)
+   404'd/422'd on every real call. A nonexistent row 404s, not a 200 with null.
+3. (Bonus, read directly from `MutationReadService.php` while fixing #2):
+   `GET /api/v2/get`'s resource-alias list is a *separate* definition from the
+   write-side alias lists in `docs/04-field-whitelists.md` — e.g. it accepts
+   `"socialinstitution"` (no underscore) instead of `"socialinst"` for
+   `social_institutions`, and additionally accepts `"source"` (singular) for
+   `sources`.
+
+Fixed: rewrote `person_id.py`'s pagination/response parsing entirely; added a
+`json_body` parameter to `HttpClient.get()` and a `NotFoundError` class mapped to
+404; rewrote `MutationApi.get()` and `is_person_id_taken()` to send the full
+envelope. Confirmed the fix live: a real `create_person()` + `create_address()` +
+`get()` + `delete_address()` + `delete_person()` (soft-delete) cycle all
+succeeded end-to-end, with `c_created_by` correctly attributed to the token's
+user and an `operation_id` returned. `.env` was reverted to safe dry-run defaults
+immediately after. Corrected `docs/00`, `docs/04`, and `docs/05`'s testing-ID
+convention (a hardcoded "obviously fake" ID range turned out to be impossible
+given the real `max(existing)+10000` ceiling) with these live-confirmed facts.
+
+### Review-agent pass (on the fix)
+Findings: (1) `get_max_person_id()`'s new "jump to last page" logic wasn't safe
+against concurrent writes shifting the page count between the two requests —
+could silently undershoot; (2) `mutation_api.py`'s module docstring was left
+stale, still describing the target_pk/changes design as unconfirmed; (3)
+`tests/test_batch_runner.py`'s mocks still simulated the old (wrong) 200/null
+"not taken" shape instead of the confirmed-live 404; (4) no test asserted 404
+maps to `NotFoundError` specifically; (5) `HttpClient.get()` accepted both
+`params` and `json_body` with no guard, risking a silent audit-log gap.
+
+Resolution: added a stability-check retry loop to `get_max_person_id()`; updated
+the stale docstring; updated all `test_batch_runner.py` mocks to 404; added
+`test_404_raises_not_found_error_specifically_no_retry` and tightened
+`is_person_id_taken()` to catch `NotFoundError` specifically; added a `ValueError`
+guard against `get()` receiving both `params` and `json_body`. All 5 confirmed
+fixed by a follow-up Explore-agent pass.
+
+### codex exec pass
+Finding: the stability-check loop still returned immediately after fetching the
+candidate last page without a post-fetch recheck — a concurrent insert between
+the final page-1 read and the final last-page fetch could still return a stale
+max, contradicting the docstring's own stated design.
+
+Resolution: rewrote to a true "verify-after-fetch" pattern — fetch the candidate
+last page, THEN re-fetch page 1 to confirm `last_page` didn't change during the
+fetch, retrying against the fresh reading if it did. A follow-up codex pass
+confirmed the specific reported race is closed, but correctly noted one
+irreducible residual race remains (a new max landing on the same, not-yet-full
+last page between fetch and recheck) — documented in the function's docstring as
+an accepted, harmless limitation: `allocate_person_id()` always re-validates its
+final candidate via `is_person_id_taken()` before use, so a stale-by-a-little max
+can only waste an ID, never cause a real collision. Also added a defensive
+`max_attempts >= 1` guard. Full suite green (129 tests).
+
+Sign-off: **Milestone 7 is closed.**

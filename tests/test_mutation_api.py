@@ -179,15 +179,21 @@ def test_dry_run_blocks_actual_send(tmp_path):
 
 
 @responses.activate
-def test_get_builds_params_from_target_pk(tmp_path):
+def test_get_sends_full_envelope_as_json_body(tmp_path):
+    """Confirmed live (Milestone 7) against MutationController::get(): the real
+    endpoint requires person_id AND a nested target.pk, sent as a JSON body (flat
+    query params are rejected with a 422 "缺少 target.pk")."""
     api = make_api(tmp_path)
-    responses.add(
-        responses.GET,
-        "http://localhost:8000/api/v2/get",
-        json={"ok": True, "result": {"row": {}}},
-        status=200,
-    )
-    body = api.get("basicinformation", target_pk={"c_personid": 900001})
+    captured = {}
+
+    def callback(request):
+        captured["body"] = json.loads(request.body)
+        return (200, {}, json.dumps({"ok": True, "result": {"row": {}}}))
+
+    responses.add_callback(responses.GET, "http://localhost:8000/api/v2/get", callback=callback)
+    body = api.get("basicinformation", person_id=900001, target_pk={"c_personid": 900001})
     assert body["ok"] is True
-    assert responses.calls[0].request.params["resource"] == "basicinformation"
-    assert responses.calls[0].request.params["c_personid"] == "900001"
+    sent = captured["body"]
+    assert sent["resource"] == "basicinformation"
+    assert sent["person_id"] == 900001
+    assert sent["target"]["pk"] == {"c_personid": 900001}

@@ -27,17 +27,24 @@ def mock_persons_page(max_id=900000):
     responses.add(
         responses.GET,
         "http://localhost:8000/api/v2/persons",
-        json={"data": [{"c_personid": max_id}], "meta": {"current_page": 1, "last_page": 1}},
+        json={
+            "ok": True,
+            "data": [{"c_personid": max_id}],
+            "pagination": {"total": 1, "per_page": 1000, "current_page": 1, "last_page": 1, "from": 1, "to": 1},
+        },
         status=200,
     )
 
 
 def mock_get_not_taken():
+    # 404 is the confirmed-live real server response for a nonexistent row
+    # (Milestone 7) - mock the actual behavior, not just is_person_id_taken()'s
+    # belt-and-suspenders fallback for a 200/null response.
     responses.add(
         responses.GET,
         "http://localhost:8000/api/v2/get",
-        json={"ok": True, "result": None},
-        status=200,
+        json={"ok": False, "message": "BIOG_MAIN 記錄不存在"},
+        status=404,
     )
 
 
@@ -62,8 +69,8 @@ def test_allocate_person_id_skips_taken_id(tmp_path):
     responses.add(
         responses.GET,
         "http://localhost:8000/api/v2/get",
-        json={"ok": True, "result": None},  # 900002 free
-        status=200,
+        json={"ok": False, "message": "not found"},  # 900002 free (confirmed-live: 404)
+        status=404,
     )
     assert allocate_person_id(api) == 900002
 
@@ -147,8 +154,8 @@ def test_run_batch_isolates_failure_and_continues(tmp_path):
     mock_persons_page(max_id=900000)
 
     def get_callback(request):
-        # is_person_id_taken checks - always "not taken" for simplicity.
-        return (200, {}, json.dumps({"ok": True, "result": None}))
+        # is_person_id_taken checks - always "not taken" (confirmed-live: 404).
+        return (404, {}, json.dumps({"ok": False, "message": "not found"}))
 
     responses.add_callback(responses.GET, "http://localhost:8000/api/v2/get", callback=get_callback)
 
@@ -215,8 +222,8 @@ def test_run_batch_two_independent_new_persons_get_different_ids(tmp_path):
     responses.add(
         responses.GET,
         "http://localhost:8000/api/v2/get",
-        json={"ok": True, "result": None},  # always "not taken" server-side
-        status=200,
+        json={"ok": False, "message": "not found"},  # always "not taken" (confirmed-live: 404)
+        status=404,
     )
 
     def create_callback(request):
