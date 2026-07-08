@@ -284,3 +284,58 @@ and multiple independent deferred chains and found no further bug. Full suite gr
 (104 tests).
 
 Sign-off: **Milestone 4 is closed.**
+
+## Milestone 5 — CLI + batch submission (batch_runner.py, cli.py)
+
+Implements `python -m cbdb_agent validate/submit --staging|--input`. Added
+`batch_runner.py` (submission engine: `allocate_person_id`, per-proposal execution,
+failure isolation) and `staging.load_input_batch()` so both `--staging` (YAML,
+Milestone 4) and `--input` (already-structured JSON) converge on one `StagingBatch`
+representation and one execution engine, rather than duplicating submission logic.
+123 tests total (19 new + `tests/conftest.py`).
+
+### Review-agent pass
+Findings: (1) `run_batch()` only caught `CbdbApiError`, so a `FieldWhitelistError`
+from `mutation_api.create()` (e.g. a `target_pk`/`changes` value mismatch on a
+shared PK field — a case `find_issues()` doesn't check) would crash the *entire*
+batch instead of being isolated to one proposal; (2) two independent `person_id:
+"NEW"` proposals in the same batch could be allocated the *same* `c_personid`,
+since nothing tracked IDs already claimed earlier in the same run; (3) `cli.py`
+would silently overwrite a previous attempt's `results.json`/archived source file
+if the same `batch_id` was submitted twice; (4) `find_issues()` never validated
+that `person_id: "NEW"` is only meaningful on a `basicinformation` create — a
+malformed proposal would pass validation and get a misleading
+`skipped_dependency_failed` status at runtime instead of a clear upfront error;
+(5) `cli.py` returned exit code `1` for every failure type, making "nothing was
+attempted" indistinguishable from "some records failed"; (6) a latent risk that a
+future test omitting `--env` could silently load the repo's real root `.env`.
+
+Resolution: broadened the catch to `(CbdbApiError, FieldWhitelistError)`; added
+`already_claimed` tracking to `allocate_person_id()`, passed as
+`set(person_id_map.values())`; `_archive_batch()` now creates a numbered
+`-attempt2`/`-attempt3` directory instead of overwriting; added a hard
+`find_issues()` error for `"NEW"` used outside a `basicinformation` create;
+introduced distinct exit codes (`EXIT_LOAD_ERROR=2`, `EXIT_VALIDATION_ERROR=3`,
+`EXIT_CONFIG_ERROR=4`, `EXIT_SUBMISSION_FAILURES=1`); added an autouse
+`tests/conftest.py` fixture that raises loudly if `load_dotenv` is ever called
+without an explicit path during tests. All 6 confirmed fixed by a follow-up
+Explore-agent pass; full suite green (121 tests at that point).
+
+### codex exec pass
+Findings: (1) **High** — dry-run was not actually network-free: `allocate_person_id()`
+always made real `GET /api/v2/persons`/`GET /api/v2/get` calls to discover a real
+ID, even though nothing was ever going to be created — a "preview only" dry run
+would still hit the configured host (including production, if pointed there) purely
+for ID-discovery reads. (2) **Medium** — `_archive_batch()`'s character-level
+sanitizer left a `batch_id` of `".."` unchanged, which could resolve via normal
+filesystem dot-segment handling to escape `data/processed/`.
+
+Resolution: added a public `HttpClient.dry_run` property; `allocate_person_id()`
+now checks it first and returns an obviously-fake negative placeholder ID with
+zero network calls when true; `_archive_batch()` now falls back to a literal
+`"_batch"` directory name if the sanitized `batch_id` is empty or consists only of
+dots. Added regression tests for both. A follow-up codex pass confirmed both fixed
+with no new issues (one accepted-by-design note: archiving is relative to cwd).
+Full suite green (123 tests).
+
+Sign-off: **Milestone 5 is closed.**

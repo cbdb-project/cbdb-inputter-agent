@@ -17,6 +17,7 @@ reconstructed at resolution time by merging in the resolved `person_id`.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 import yaml
@@ -101,6 +102,45 @@ def load_staging_file(path: str) -> StagingBatch:
     return StagingBatch.model_validate(raw)
 
 
+def load_input_batch(path: str, *, batch_id: str | None = None) -> StagingBatch:
+    """Load an already-structured JSON batch (docs/01-implementation-plan.md
+    section 7's `cli.py submit --input` path) as a StagingBatch, so both input
+    paths share one validation/submission engine (batch_runner.py) instead of
+    duplicating it.
+
+    Input file shape: a JSON array of records, each with the same fields as a
+    staging Proposal MINUS source_quote/confidence/conflicts (there's no
+    extraction step here - the data is already structured, so there's nothing to
+    cite a source for or flag a confidence level on). Those three fields are
+    filled with fixed placeholders (`source_quote="(structured input, no
+    extraction)"`, `confidence="high"`, `conflicts=[]`) so the resulting
+    StagingBatch validates and runs through find_issues()/run_batch() unchanged.
+    """
+    with open(path, encoding="utf-8") as f:
+        records = json.load(f)
+    if not isinstance(records, list):
+        raise StagingError(f"{path}: expected a JSON array of records, got {type(records).__name__}")
+
+    proposals = []
+    for i, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise StagingError(f"{path}: record #{i} is not a JSON object")
+        proposals.append(
+            Proposal(
+                id=record.get("id", f"record-{i}"),
+                resource=record["resource"],
+                operation=record["operation"],
+                person_id=record["person_id"],
+                target_pk=record.get("target_pk"),
+                changes=record.get("changes", {}),
+                source_quote="(structured input, no extraction)",
+                confidence="high",
+                conflicts=[],
+            )
+        )
+    return StagingBatch(batch_id=batch_id or path, proposals=proposals)
+
+
 def save_staging_file(batch: StagingBatch, path: str) -> None:
     # Known cosmetic limitation: plain yaml.safe_dump() does not reproduce the
     # multi-line `|` block-scalar style shown in docs/03 section 2.2's worked
@@ -159,6 +199,19 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
                     proposal_id=p.id,
                     severity="error",
                     message="person_id refers to its own proposal id (self-reference)",
+                )
+            )
+        elif p.person_id == "NEW" and not (
+            p.resource in ("basicinformation", "biogmain", "biog_main") and p.operation == "create"
+        ):
+            issues.append(
+                Issue(
+                    proposal_id=p.id,
+                    severity="error",
+                    message=(
+                        "person_id 'NEW' is only valid on a basicinformation create - "
+                        f"this proposal is resource={p.resource!r} operation={p.operation!r}"
+                    ),
                 )
             )
         elif isinstance(p.person_id, str) and p.person_id != "NEW":
@@ -421,7 +474,19 @@ def resolve_target_pk(
 ) -> dict[str, Any]:
     """Build the full target.pk dict (including c_personid where applicable) to
     send to mutation_api.py, given the batch's already-resolved person_id for this
-    proposal."""
+    proposal.
+
+    On `create`, a staging Proposal is NOT required to set `target_pk` at all for
+    a multi-field-PK resource (find_issues() rule 5 only requires it for
+    update/delete - see docs/03-extraction-review-workflow.md section 2.2's own
+    worked example, where an altnames create has no `target_pk`, just `changes`
+    containing the same PK columns). But mutation_api.create()'s
+    validate_target_pk_for_create() DOES require every non-server-assigned PK
+    field to be present in target_pk. Reconcile the two here: for `create`, fill
+    in any PK field missing from `target_pk` by reading it out of `changes` (where
+    docs/04-field-whitelists.md's create whitelist for every resource already
+    includes its own PK columns as ordinary settable fields).
+    """
     # proposal.resource may be any valid alias (e.g. "socialinst"), not
     # necessarily this module's canonical RESOURCE_SPECS key - look it up by
     # alias unless the caller already knows and passed the canonical key.
@@ -429,4 +494,8 @@ def resolve_target_pk(
     full = dict(proposal.target_pk or {})
     if STAGING_PERSONID_FIELD in spec.pk_fields:
         full[STAGING_PERSONID_FIELD] = resolved_person_id
+    if proposal.operation == "create":
+        for pk_field in spec.pk_fields:
+            if pk_field not in full and pk_field in proposal.changes:
+                full[pk_field] = proposal.changes[pk_field]
     return full

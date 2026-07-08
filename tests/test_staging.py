@@ -227,6 +227,21 @@ def test_invalid_alias_for_operation_is_error():
     assert any("not a valid resource alias" in i.message for i in issues)
 
 
+def test_new_person_id_only_valid_on_basicinformation_create():
+    p1 = Proposal(
+        id="p1",
+        resource="altnames",  # not basicinformation
+        operation="create",
+        person_id="NEW",
+        changes={"c_alt_name_chn": "x", "c_alt_name_type_code": "y"},
+        source_quote="x",
+        confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    issues = find_issues(batch)
+    assert any("only valid on a basicinformation create" in i.message for i in issues)
+
+
 def test_topological_order_person_before_subresource():
     p1 = make_person_create(id_="p1")
     p2 = Proposal(

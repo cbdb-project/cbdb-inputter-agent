@@ -135,6 +135,10 @@ class HttpClient:
         self._rate_limiter = rate_limiter or RateLimiter(config.max_requests_per_minute)
         self._sleep = sleep
 
+    @property
+    def dry_run(self) -> bool:
+        return self._config.dry_run
+
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
         if self._config.api_token:

@@ -60,6 +60,12 @@ class MutationApi:
     def __init__(self, client: HttpClient) -> None:
         self._client = client
 
+    @property
+    def client(self) -> HttpClient:
+        """The underlying HttpClient, for callers (e.g. batch_runner.py's
+        allocate_person_id) that need to use person_id.py's functions directly."""
+        return self._client
+
     def create(
         self,
         resource_key: str,
