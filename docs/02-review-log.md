@@ -234,3 +234,53 @@ both `target_pk` and `changes` with different values, before ever building the
 envelope. Added a regression test. Full suite green (76 tests).
 
 Sign-off: **Milestone 3 is closed.**
+
+## Milestone 4 — Extraction staging (staging.py)
+
+Implements the pydantic schema and 7 validation rules from
+`docs/03-extraction-review-workflow.md` §2.5: `Proposal`/`Conflict`/
+`ConflictOption`/`StagingBatch` models, YAML load/save, `find_issues()`/
+`validate_for_submit()`, `submittable_proposals()`, `topological_submission_order()`,
+and `resolve_target_pk()`. Added `find_spec_by_alias()` to `models.py` (staging
+proposals carry a human/agent-written alias string, not necessarily the canonical
+`RESOURCE_SPECS` key). 104 tests total (28 new).
+
+### Review-agent pass
+Findings: (1) a `continue` after a resource-alias lookup failure skipped the
+unresolved-conflict check for that same proposal, hiding an unrelated real problem;
+(2) no cycle detection for `person_id` references (a mutual or self-reference
+would pass `find_issues()`/`validate_for_submit()` cleanly and only fail later,
+confusingly, in `topological_submission_order()`); (3) `find_issues()` and
+`topological_submission_order()` disagreed on whether a numeric-looking string
+`person_id` matching a sibling `id` counts as a dependency; (4) the documented
+`resolution: "defer"` value had no implementation; (5) `StagingError` didn't carry
+the structured `Issue` list, unlike other error classes in the codebase; (6-7) two
+minor doc/type consistency notes (YAML block-style not preserved on save, `changes`
+typed looser than docs/03's literal schema to accommodate pseudo-fields).
+
+Resolution: moved the conflict check to run unconditionally before the alias
+lookup; added `_find_person_reference_cycles()` (DFS-based) plus an explicit
+self-reference check, both called from `find_issues()`; factored out a shared
+`_sibling_dependency()` helper used by both the cycle check and
+`topological_submission_order()` so they agree; added `submittable_proposals()`
+implementing "defer"; added `StagingError.issues`; added explanatory comments for
+the two minor items. All fixes verified by a follow-up Explore-agent pass; full
+suite green (103 tests at that point).
+
+### codex exec pass
+Finding: `submittable_proposals()` only excluded proposals *directly* resolved as
+"defer" — a proposal depending (via sibling reference) on a deferred proposal would
+still be included, meaning `validate_for_submit()` accepts the batch but
+`topological_submission_order()` (which now defaults to `submittable_proposals()`)
+would raise a confusing "dependency cycle or unresolved sibling reference" error at
+submission time for a batch that had already been declared safe.
+
+Resolution: `submittable_proposals()` now does a fixpoint transitive closure —
+excludes the directly-deferred proposals, then repeatedly excludes anything
+depending on an already-excluded proposal until nothing new is found. Added a
+regression test for a person-create deferred while a sub-resource still references
+it. A follow-up codex pass independently traced 3+-level chains, mid-chain deferrals,
+and multiple independent deferred chains and found no further bug. Full suite green
+(104 tests).
+
+Sign-off: **Milestone 4 is closed.**

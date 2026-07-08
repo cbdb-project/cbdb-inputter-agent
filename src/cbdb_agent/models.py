@@ -497,3 +497,24 @@ def get_resource_spec(key: str) -> ResourceSpec:
         raise FieldWhitelistError(
             f"Unknown resource key {key!r}. Known: {sorted(RESOURCE_SPECS)}"
         ) from None
+
+
+def find_spec_by_alias(resource_string: str) -> ResourceSpec:
+    """Find the ResourceSpec whose create/update/delete aliases include
+    resource_string, regardless of operation.
+
+    Use this (not get_resource_spec) when the caller only has a resource string as
+    written by a human/agent (e.g. a staging-file `resource:` value) rather than
+    this module's canonical resource key - the two are usually the same string but
+    not always (e.g. "socialinst" is a valid alias but not the canonical key
+    "social_institutions"). After finding the spec, still call
+    spec.resolve_alias(resource_string, operation) to check the alias is valid for
+    that specific operation (some aliases, like "socialinst", are gapped per
+    docs/04-field-whitelists.md section 12).
+    """
+    for spec in RESOURCE_SPECS.values():
+        if resource_string in (spec.create_aliases | spec.update_aliases | spec.delete_aliases):
+            return spec
+    raise FieldWhitelistError(
+        f"{resource_string!r} is not a known resource alias for any resource"
+    )
