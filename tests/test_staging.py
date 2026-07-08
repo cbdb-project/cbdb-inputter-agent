@@ -8,6 +8,7 @@ from cbdb_agent.staging import (
     StagingBatch,
     StagingError,
     find_issues,
+    load_input_batch,
     load_staging_file,
     resolve_target_pk,
     save_staging_file,
@@ -459,6 +460,21 @@ def test_yaml_round_trip(tmp_path):
     assert len(loaded.proposals) == 1
     assert loaded.proposals[0].source_quote == "柳宗元，字子厚"
     assert loaded.batch_notes == "test batch"
+
+
+def test_load_input_batch_missing_required_field_raises_staging_error(tmp_path):
+    """Regression test: a record missing 'resource'/'operation'/'person_id' must
+    raise a clean StagingError (caught by cli.py -> EXIT_LOAD_ERROR), not an
+    uncaught KeyError from raw dict indexing."""
+    import json
+
+    path = tmp_path / "input.json"
+    path.write_text(
+        json.dumps([{"id": "p1", "resource": "basicinformation", "changes": {}}]),
+        encoding="utf-8",
+    )  # missing "operation" and "person_id"
+    with pytest.raises(StagingError, match="missing required field"):
+        load_input_batch(str(path))
 
 
 def test_load_staging_file_rejects_bad_operation(tmp_path):

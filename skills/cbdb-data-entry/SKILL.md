@@ -11,29 +11,64 @@ description: >
 
 # CBDB Data Entry
 
-This skill wraps the `cbdb_agent` Python package (`src/cbdb_agent/`) in this repo.
-Read `AGENTS.md` (hard rules) and `docs/00-target-system-brief.md` (target-system
-facts) before using it if you haven't already — this file assumes both are known.
+This skill wraps the `cbdb_agent` Python package (`src/cbdb_agent/`) in this repo,
+via its `python -m cbdb_agent` CLI (`src/cbdb_agent/cli.py`). Read `AGENTS.md`
+(hard rules) and `docs/00-target-system-brief.md` (target-system facts) before
+using it if you haven't already — this file assumes both are known.
+
+Setup check: `pip install -e .` (or `-r requirements-dev.txt` for running tests
+too) must have been run once in this environment, and `.env` must exist (copied
+from `.env.sample`) with a real `CBDB_API_TOKEN`.
+
+## CLI reference
+
+```
+python -m cbdb_agent validate --staging <path> | --input <path>
+python -m cbdb_agent submit   --staging <path> | --input <path>  [--dry-run] [--env <path>]
+```
+
+- `validate` never touches the network and never requires `.env` — it only checks
+  the file's structure/whitelists/conflicts (`staging.find_issues()`) and prints
+  every issue found. Exit codes: `0` clean (unresolved conflicts alone still exit
+  `0` — they're expected mid-review, per `docs/03-extraction-review-workflow.md`
+  §2.5), `2` couldn't load/parse the file, `3` structural error found.
+- `submit` first re-validates (hard gate — any structural error or unresolved
+  conflict blocks it, exit `3`), then loads `.env` (exit `4` on a config error),
+  then actually runs the batch through `MutationApi`/`HttpClient`. Exit `1` if any
+  proposal failed or was skipped; `0` only if every proposal succeeded.
+- `--dry-run` forces dry-run on for this run even if `.env` says otherwise — it
+  cannot force dry-run off (`AGENTS.md` rule 4). A dry-run `submit` never sends a
+  mutating request and never archives the source file (nothing was actually
+  attempted, so it's left in place for another iteration).
+- On a real (non-dry-run) `submit`, the source file is moved to
+  `data/processed/<batch_id>/` alongside a `results.json` with the per-proposal
+  outcome — re-submitting the same `batch_id` gets its own `-attempt2`/`-attempt3`
+  directory rather than overwriting the previous attempt's results.
+- `--env <path>` points at a specific `.env` file — useful for testing against the
+  local `cbdb-online-main-server` instance (see `AGENTS.md`'s Local dev section)
+  without touching the default one.
 
 ## Two entry paths
 
-### A. Already-structured input (CSV/JSON records ready to submit)
+### A. Already-structured input (JSON records ready to submit)
+
+Input file shape: a JSON array of records, each with `id`, `resource`,
+`operation` (`create`/`update`/`delete`), `person_id` (a real `c_personid`,
+`"NEW"` for a person to be created in this batch, or another record's `id` string
+for a sub-resource of a person also being created in this batch), optional
+`target_pk`, and `changes` — see `staging.load_input_batch()`'s docstring and
+`docs/04-field-whitelists.md` for what belongs in `changes` per resource.
 
 1. Confirm `.env` is configured: `CBDB_API_BASE_URL`, `CBDB_API_TOKEN` set,
    `CBDB_DRY_RUN` state known. **Never proceed with a non-dry-run call without
    telling the user which host it's about to hit and getting explicit confirmation**,
    even if `CBDB_CONFIRM_PROD` is already set — a human should always know before a
    live write happens, gate or no gate.
-2. Sanity-check the input file's shape yourself before calling anything (does it
-   look like the internal per-person + nested sub-resources schema described in
-   `docs/01-implementation-plan.md` §7? are required fields present per
-   `docs/04-field-whitelists.md`?) — Milestone 5 has not yet defined a dedicated
-   `validate --input` subcommand the way the staging path has `validate --staging`
-   (`docs/03-extraction-review-workflow.md` §2.5); don't invent one, just read the
-   file and flag anything obviously wrong before calling `submit`.
+2. Run `python -m cbdb_agent validate --input <path>` first; fix anything it
+   reports before proceeding.
 3. Run `python -m cbdb_agent submit --input <path>`.
 4. Report the per-record summary verbatim to the user (successes, conflicts,
-   failures) — do not paraphrase away a failure or conflict.
+   failures, skipped-dependency records) — do not paraphrase away a failure.
 5. Never construct a raw HTTP call yourself, bypassing `mutation_api.py`'s validation
    or `http_client.py`'s local audit logging — always go through the CLI/library
    (`AGENTS.md` rule 2).
@@ -61,28 +96,41 @@ does when invoked this way:
    - The user discusses a specific conflict in chat (referencing its local `id`,
      e.g. "c3 应该是 820") — update that conflict's `resolution` in the file
      yourself and confirm back what you changed.
-5. **Validate before ever offering to submit**
-   (`python -m cbdb_agent validate --staging <path>`, once Milestone 4 lands): every
-   `conflicts[].resolution` must be non-null, every field must pass that resource's
-   whitelist, every sibling-`id` person reference must resolve. Report remaining
-   issues plainly and loop back to step 4 — do not submit a batch with unresolved
-   items even if the user seems to be in a hurry.
+5. **Validate before ever offering to submit**: `python -m cbdb_agent validate
+   --staging <path>`. Every `conflicts[].resolution` must be non-null, every field
+   must pass that resource's whitelist, every sibling-`id` person reference must
+   resolve to a `basicinformation` create. Report remaining issues plainly and
+   loop back to step 4 — do not submit a batch with unresolved items even if the
+   user seems to be in a hurry. A conflict resolved as `"defer"` is treated as
+   resolved (validation passes) but that proposal — and anything depending on it —
+   is silently excluded from submission; tell the user which rows were deferred
+   when you report the submit summary.
 6. **Only submit on explicit confirmation** ("提交" / "submit" / equivalent):
    `python -m cbdb_agent submit --staging <path>`. Same dry-run/production-gate and
    audit-logging guarantees as path A apply — this workflow does not create a
-   separate, less-audited write path.
+   separate, less-audited write path. A `"NEW"` person's real `c_personid` is only
+   allocated at this point (`batch_runner.allocate_person_id`), not while drafting.
 7. On completion, tell the user where the processed batch (staging file + server
-   responses) landed in `data/processed/`.
+   responses) landed in `data/processed/<batch_id>/`.
 
-## Hard constraints (repeated from AGENTS.md — do not relax them for this skill)
+## Hard constraints from AGENTS.md (do not relax them for this skill)
 
 - Only `/api/v2/create|mutate|delete|get` (`mode: "direct"` for writes) and the
   read-only `/api/v2/persons`/`/api/v2/operations` — never legacy `/basicinformation/*`
   routes or other undocumented endpoints.
-- `c_personid` is client-assigned — always let `person_id.py` validate/allocate it,
-  never invent one inline.
-- Person-before-sub-resource ordering, always.
+- `c_personid` is client-assigned — for a `"NEW"` proposal, only
+  `batch_runner.allocate_person_id()` may pick the real value (it's the only code
+  path that calls `person_id.py`'s validation/existence checks); for a
+  human-supplied `c_personid`, the CLI currently passes it through as-is with no
+  extra validation beyond what the server itself enforces on the actual request —
+  don't invent or hand-adjust an ID yourself either way.
+- Person-before-sub-resource ordering, always — the CLI already enforces this via
+  `staging.topological_submission_order()`, so don't reorder proposals yourself in
+  a way that fights it.
 - Never auto-retry a `409`/`422` — surface it, don't guess a fix and resend.
+
+## Additional constraint from docs/03-extraction-review-workflow.md §2.4
+
 - This skill must never itself call an external LLM API for extraction — the
   "reading" in path B is done by the agent session invoking this skill, using its own
   language understanding, not a separate model call from `src/cbdb_agent/`.

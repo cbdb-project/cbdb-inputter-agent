@@ -125,9 +125,15 @@ def load_input_batch(path: str, *, batch_id: str | None = None) -> StagingBatch:
     for i, record in enumerate(records):
         if not isinstance(record, dict):
             raise StagingError(f"{path}: record #{i} is not a JSON object")
+        record_id = record.get("id", f"record-{i}")
+        missing = [f for f in ("resource", "operation", "person_id") if f not in record]
+        if missing:
+            raise StagingError(
+                f"{path}: record {record_id!r} is missing required field(s) {missing}"
+            )
         proposals.append(
             Proposal(
-                id=record.get("id", f"record-{i}"),
+                id=record_id,
                 resource=record["resource"],
                 operation=record["operation"],
                 person_id=record["person_id"],

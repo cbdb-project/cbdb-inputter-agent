@@ -339,3 +339,37 @@ with no new issues (one accepted-by-design note: archiving is relative to cwd).
 Full suite green (123 tests).
 
 Sign-off: **Milestone 5 is closed.**
+
+## Milestone 6 — Finalize skill wiring (SKILL.md)
+
+Rewrote `skills/cbdb-data-entry/SKILL.md` to describe the CLI surface actually
+implemented in Milestones 2-5 (it previously described a not-yet-built design):
+real exit codes, dry-run/archiving/`-attemptN` behavior, `"defer"` semantics, and
+the input JSON shape.
+
+### Review-agent pass
+Findings: (1) a real bug surfaced while fact-checking the docs — `staging.
+load_input_batch()` used raw dict indexing (`record["resource"]`, etc.), so a
+structured-input record missing a required field raised an uncaught `KeyError`
+instead of the clean `StagingError` (→ `EXIT_LOAD_ERROR`) SKILL.md claimed;
+(2) SKILL.md claimed a human-supplied `c_personid` goes through `person_id.py`'s
+validation, but that module is only ever invoked via `batch_runner.
+allocate_person_id()` for `"NEW"` proposals — a human-supplied ID is passed
+through as-is; (3) SKILL.md attributed the "never call an external LLM API"
+constraint to `AGENTS.md`, but it actually comes from `docs/03-extraction-review-
+workflow.md` §2.4 (`AGENTS.md`'s 8 rules don't mention LLMs at all).
+
+Resolution: `load_input_batch()` now checks for missing `resource`/`operation`/
+`person_id` and raises a clean `StagingError` naming the record and the missing
+fields; added a regression test. Corrected SKILL.md's `c_personid` bullet to
+accurately describe the two different code paths; split the LLM-API constraint
+into its own correctly-attributed section. All 3 confirmed fixed by a follow-up
+Explore-agent pass; full suite green (124 tests).
+
+### codex exec pass
+Independently cross-checked every remaining factual claim in SKILL.md (exit
+codes, dry-run/archive behavior, defer semantics, input JSON shape, person_id
+handling, both attribution fixes) against the current code — reported clean, no
+further findings. Full suite green (124 tests).
+
+Sign-off: **Milestone 6 is closed.**
