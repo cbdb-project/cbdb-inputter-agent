@@ -129,6 +129,14 @@ coverage items to `docs/05`. A follow-up codex pass confirmed 3 of 4 fully fixed
 flagged one remaining wording-consistency nit (the `.env.sample` template comment vs.
 `AGENTS.md`'s tone), which was then also fixed and verified.
 
-Sign-off: **Milestone-2-prep docs are closed.** Outstanding: user needs to confirm
-`http://localhost:8080` is actually correct (tracked as an open task in this
-conversation, not a doc gap).
+Sign-off: **Milestone-2-prep docs are closed.**
+
+### Correction (2026-07-08, post-commit)
+User confirmed the local instance's actual port is `:8000`, not the `:8080` guessed
+from `netstat` output alone (both ports happened to be listening; `:8080` was a
+different, unrelated local service). Fixed in `.env` (`CBDB_API_BASE_URL`),
+`AGENTS.md`, `docs/01-implementation-plan.md` §12 and its inline `.env.sample`
+template comment, and `docs/05-testing-strategy.md` §1. No code existed yet to be
+affected. Lesson: don't treat a `netstat`-identified port as confirmed without an
+explicit user check — flagged as exactly that kind of open item last time, and it
+did turn out to be wrong.

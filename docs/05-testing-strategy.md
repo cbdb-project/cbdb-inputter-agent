@@ -11,7 +11,7 @@ fixture conventions.
    intercepts `requests` at the transport level. Cover `http_client.py`,
    `mutation_api.py`, `person_id.py`, `staging.py`, `audit_log.py` this way.
 2. **Local integration tests (opt-in, not run by default)** — hit the real local
-   `cbdb-online-main-server` instance (now running at `http://localhost:8080` with
+   `cbdb-online-main-server` instance (now running at `http://localhost:8000` with
    the dedicated `cbdb-inputter-agent@local.test` test account, per
    `docs/02-review-log.md`'s Milestone-2-prep notes) with `CBDB_DRY_RUN=false` and
    `CBDB_CONFIRM_PROD` pinned to that local URL. Marked with `@pytest.mark.integration`

@@ -75,10 +75,10 @@ milestone. Log both passes in `docs/02-review-log.md`.
 
 Point `CBDB_API_BASE_URL` at a local `cbdb-online-main-server` instance instead of
 production whenever testing new code paths. The user's standing local instance is
-running at `http://localhost:8080` with a dedicated, permanent test account
-(`cbdb-inputter-agent@local.test`, `canWriteDirectly()`-capable — never delete it);
-`.env` is already pointed at it. `http://localhost:8000` is only Laravel's own
-generic `php artisan serve` default (brief §7) and may not match the port actually in
-use — always check `.env`'s current `CBDB_API_BASE_URL` rather than assuming a port.
-Never use a production token for anything other than deliberate, user-confirmed
-production writes.
+running at `http://localhost:8000` (confirmed by the user 2026-07-08; this also
+matches Laravel's generic `php artisan serve` default, brief §7) with a dedicated,
+permanent test account (`cbdb-inputter-agent@local.test`, `canWriteDirectly()`-capable
+— never delete it); `.env` is already pointed at it. Still always check `.env`'s
+current `CBDB_API_BASE_URL` rather than hardcoding a port anywhere in code — it can
+change. Never use a production token for anything other than deliberate,
+user-confirmed production writes.

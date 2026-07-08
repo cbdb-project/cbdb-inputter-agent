@@ -79,10 +79,10 @@ a committed `.env.sample`.
 ```dotenv
 # Base URL of the cbdb-online-main-server instance to target.
 # Production: https://input.cbdb.fas.harvard.edu
-# Local dev:  http://localhost:8000 is Laravel's generic `php artisan serve` default —
-#             NOT necessarily this repo's actual local target. Always check the real
-#             .env / AGENTS.md for the port actually in use (currently :8080 on the
-#             user's standing local instance, per AGENTS.md's Local dev section).
+# Local dev:  http://localhost:8000 (Laravel's `php artisan serve` default — also
+#             confirmed by the user as the actual port for the standing local
+#             instance, see AGENTS.md's Local dev section). Always check the real
+#             .env for the port actually in use rather than hardcoding this.
 CBDB_API_BASE_URL=https://input.cbdb.fas.harvard.edu
 
 # Sanctum Personal Access Token, created manually at {CBDB_API_BASE_URL}/profile.
@@ -301,9 +301,9 @@ Per user's explicit process requirement:
   generated via `php artisan tinker` and written directly into this repo's `.env`
   (never printed to chat/logs — see `docs/02-review-log.md`'s Milestone-2-prep entry).
 - **Local dev instance**: resolved. Already running, reachable at
-  `http://localhost:8080` (port identified via `netstat`, not yet confirmed by an
-  actual HTTP round-trip since network tool calls are restricted in this
-  environment — flagged as an open item until the user confirms it's correct).
+  `http://localhost:8000` — confirmed by the user 2026-07-08 (an initial guess of
+  `:8080`, made from `netstat` output alone since network tool calls are restricted
+  in this environment, was corrected to `:8000` by the user).
 - **Structured-input source format (CSV/JSON/DB export)**: resolved as a *design-now,
   build-later* decision. No such structured source exists yet; the unstructured-text
   extraction workflow (`03-extraction-review-workflow.md`) is the near-term need.
