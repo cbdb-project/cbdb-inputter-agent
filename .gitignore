@@ -1,0 +1,30 @@
+# Secrets / local config
+.env
+.env.*
+!.env.sample
+*.env
+*.bak
+
+# Local audit logs and processed data (contain real submitted data + tokens' effects)
+logs/*
+!logs/.gitkeep
+data/inbox/*
+!data/inbox/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/staging/*
+!data/staging/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
