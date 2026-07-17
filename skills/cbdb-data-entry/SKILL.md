@@ -154,6 +154,15 @@ does when invoked this way:
   `staging.topological_submission_order()`, so don't reorder proposals yourself in
   a way that fights it.
 - Never auto-retry a `409`/`422` — surface it, don't guess a fix and resend.
+- **For `kinship`/`associations`: `GET` both directions of the pair before writing
+  `c_notes`/`c_source`/`c_pages` (or the assoc year fields)** — the server mirrors
+  these fields between a pair's two rows on every direct update, so two proposals
+  in the same batch writing *different* content to each direction will silently
+  corrupt each other (whichever mutate call runs last wins on both sides). If the
+  two directions' existing content already differs, stop and get a human decision
+  before writing either — don't let a batch resolve it by write order. See
+  AGENTS.md's "Reverse-pair mirror sync" section for the full mechanism and the
+  byte-for-byte-preservation gotcha when appending to existing content.
 
 ## Additional constraint from docs/03-extraction-review-workflow.md §2.4
 

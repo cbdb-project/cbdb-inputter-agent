@@ -117,3 +117,60 @@ asking the user for one. Two concrete gotchas that wasted a round-trip once alre
   deliberately excludes `c_personid` — see `staging.py`'s module docstring; that
   exclusion only applies to `Proposal.target_pk`, not to a direct `MutationApi.get()`
   call).
+
+## Reverse-pair mirror sync (`kinship`, `associations` — check before every write)
+
+**Discovered the hard way (2026-07-17):** updating `c_notes`/`c_source`/`c_pages`
+(and, for `associations`, `c_assoc_first_year`/`c_assoc_last_year` too) on one
+direction of a mirrored-pair resource **automatically overwrites the same fields
+on the reverse-direction row**, server-side, in the same transaction. Confirmed in
+`KinshipMutationHandler::afterDirectUpdate()` and
+`AssociationMutationHandler::afterDirectUpdate()` (both call
+`BiogMainRepository::sync*MirrorOnUpdate()` with the just-written row's new
+content-field values; both declare a `CONTENT_CONFLICT_FIELDS` constant naming
+exactly these fields). For `kinship` specifically: `c_kin_code=243` (10884→15213)
+and `c_kin_code=62` (15213→10884) are **not two independently-editable rows** —
+they're two views of one relationship, and the server keeps their content fields
+in lockstep. Submitting two proposals in the same batch that intentionally write
+*different* `c_notes` text to the forward and reverse row (as an earlier version
+of this repo's own worked example in `docs/06-staging-preview-design.md` did) will
+silently corrupt data: whichever proposal's mutate call runs *last* wins, and its
+mirror-sync clobbers whatever the *other* proposal had just written — the server
+returns `200 ok:true` for both, so nothing in the response signals the corruption.
+The server does have a conflict-detection guard (`conflictBaselines()` /
+`MirrorConflictException`, 409) for when the mirror row has genuinely diverged
+from what it "should" be — but two same-batch writes racing each other on the
+same pair don't trip it, because each write's own baseline is computed *after*
+the other write's mirror-sync already ran.
+
+**Before writing to `c_notes`/`c_source`/`c_pages` (or the assoc year fields) on a
+`kinship` or `associations` row, always `GET` *both* directions of the pair
+first**, then:
+- **Same content, or one side blank** → safe to proceed with a single-direction
+  `update`; the mirror sync will propagate it to the other side automatically.
+  Don't also submit a second proposal for the reverse direction with the same
+  intent — it's redundant at best (the server will 422 `no_effective_changes` if
+  the mirror-sync already made it a no-op) and duplicated-write risk at worst.
+- **Different content on the two sides** → stop and get a human decision on how
+  to merge them (concatenate, pick one, rewrite) — never let whichever proposal
+  happens to submit last silently overwrite the other's genuinely-different
+  content.
+- If the field already has content and the task is to *append* rather than
+  replace: preserve the existing text **byte-for-byte** in the new value (verify
+  with an exact prefix match before submitting — the existing text may contain
+  characters that look like plain spaces but aren't, e.g. U+00A0 non-breaking
+  space instead of U+0020; a naive "same-looking" retype can silently normalize
+  these and count as an unintended edit to content you were only supposed to
+  leave alone).
+
+**Also:** a live *write* against production (`CBDB_DRY_RUN=false`), even from a
+correctly-argued ad-hoc verification script using `http_client.py`/`mutation_api.py`
+directly rather than a raw HTTP call, may be blocked by Claude Code's own
+permission classifier — it doesn't know the script is using the sanctioned
+client under the hood. When that happens, don't try to work around it: build a
+proper `data/staging/<batch_id>/proposal.yaml` and submit it through
+`python -m cbdb_agent submit --staging <path>` instead. This isn't just a
+workaround for the block — it's the actually-correct path per this repo's own
+design (staged, previewed, reviewed, audited), and an ad-hoc script was cutting
+a corner that shouldn't have been cut for a real production write in the first
+place.
