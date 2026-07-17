@@ -25,7 +25,13 @@ from .http_client import CbdbApiError
 from .models import FieldWhitelistError, find_spec_by_alias
 from .mutation_api import MutationApi
 from .person_id import PersonIdError, get_max_person_id, is_person_id_taken, validate_new_person_id
-from .staging import Proposal, StagingBatch, resolve_target_pk, topological_submission_order
+from .staging import (
+    Proposal,
+    ProposalCurrentState,
+    StagingBatch,
+    resolve_target_pk,
+    topological_submission_order,
+)
 
 
 @dataclass
@@ -203,5 +209,68 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                 resolved_target_pk=full_target_pk,
             )
         )
+
+    return results
+
+
+def fetch_current_values(batch: StagingBatch, api: MutationApi) -> dict[str, ProposalCurrentState]:
+    """Best-effort live old-vs-new diff support (docs/06-staging-preview-design.md
+    Tier 2): for every `update`/`delete` proposal whose `person_id` is already a
+    concrete, resolvable value (not `"NEW"` or a sibling reference to a create
+    that hasn't happened yet in this batch), attempt one `GET /api/v2/get` to
+    fetch the row's current values, for staging.render_preview_markdown() to
+    diff against the proposed `changes`.
+
+    Never raises - every failure mode (network, auth, 404, an unresolved
+    person_id, an unknown resource alias) is caught and reported as a
+    `ProposalCurrentState(error=...)` for that one proposal, so a preview can
+    always render something rather than fail outright over one broken lookup.
+    This is presentational-only support for a nicer review experience - it must
+    never be treated as a stand-in for `validate_for_submit()`'s hard structural
+    checks, and callers must not skip that just because this ran successfully.
+    """
+    results: dict[str, ProposalCurrentState] = {}
+    for proposal in batch.proposals:
+        if proposal.operation not in ("update", "delete"):
+            continue  # create: nothing exists yet to diff against
+
+        # An empty person_id_map here is deliberate: we're previewing, not
+        # submitting, so no "NEW" proposal has actually been allocated a real id
+        # yet. This correctly treats "NEW" and any still-pending sibling
+        # reference as unresolved for diffing purposes, even though the same
+        # helper (with a populated map) is used differently by run_batch().
+        resolved_pid = _resolve_person_id(proposal, {})
+        if resolved_pid is None:
+            results[proposal.id] = ProposalCurrentState(
+                error="person_id not yet resolved in this batch (depends on a pending create)"
+            )
+            continue
+
+        try:
+            spec = find_spec_by_alias(proposal.resource)
+            full_target_pk = resolve_target_pk(
+                proposal, resolved_person_id=resolved_pid, spec_key=spec.key
+            )
+            body = api.get(spec.key, person_id=resolved_pid, target_pk=full_target_pk)
+        except Exception as exc:  # noqa: BLE001 - intentionally broad, see docstring:
+            # this is best-effort presentational support, and it must degrade to
+            # "couldn't fetch" for ANY failure mode rather than ever propagate and
+            # abort the whole preview over one bad lookup.
+            results[proposal.id] = ProposalCurrentState(error=str(exc))
+            continue
+
+        row = None
+        if isinstance(body, dict):
+            result = body.get("result")
+            if isinstance(result, dict):
+                row = result.get("row")
+        if not isinstance(row, dict):
+            # Covers both "missing" (row is None) and a malformed response where
+            # the server returned something unexpected in its place (e.g. a list
+            # or string) - either way this is "couldn't get a usable row", never
+            # a crash, per this function's never-raises contract.
+            results[proposal.id] = ProposalCurrentState(error="row not found in response")
+        else:
+            results[proposal.id] = ProposalCurrentState(row=row)
 
     return results

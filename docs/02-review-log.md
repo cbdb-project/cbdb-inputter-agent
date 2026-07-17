@@ -626,3 +626,41 @@ Resolution: routed the resolution status line through `_preview_inline()` too;
 added a `model_validator(mode="after")` enforcing exactly one of `row`/`error` is
 set on `ProposalCurrentState`. Added regression tests for both. A follow-up codex
 pass confirmed both fixed — reported clean. Full suite green (152 tests).
+
+### Implementation — Increment 2: Tier 2 best-effort live diff
+
+Added `fetch_current_values(batch, api)` to `batch_runner.py`: for every
+`update`/`delete` proposal with a concrete, resolvable `person_id`, attempts one
+`GET /api/v2/get` (merging `c_personid` into `target_pk` via the existing
+`resolve_target_pk()`, reusing the mechanism the Increment-1/design review had
+already flagged as necessary) to fetch the row's current server-side values for
+`render_preview_markdown()` to diff against, per Tier 2 of
+`docs/06-staging-preview-design.md` §2. `create` proposals are skipped entirely
+(nothing to diff). Never raises — every failure (unresolved `person_id`, 404,
+network error, unknown resource alias, malformed response) degrades to a
+`ProposalCurrentState(error=...)`. 8 new tests initially.
+
+#### Review-agent pass
+Findings: implementation and test coverage were correct and matched the design
+doc; one nice-to-have gap — no test covered an unknown/invalid resource alias
+reaching `find_spec_by_alias()` (already safely caught by the broad
+`except Exception`, just unproven by a test).
+
+Resolution: added
+`test_fetch_current_values_unknown_resource_alias_becomes_error_not_exception`.
+Full suite green (162 tests at that point, before the codex pass's fix below).
+
+#### codex exec pass
+Finding (must-fix): the row-shape check ran *after* the broad `try/except`, so a
+malformed successful response with a non-dict `result.row` (e.g. a list or
+string) would reach `ProposalCurrentState(row=row)` and raise a Pydantic
+`ValidationError` — violating the function's own "never raises" contract, since
+`ProposalCurrentState.row` is typed `dict[str, Any] | None`.
+
+Resolution: changed the check from `if row is None:` to
+`if not isinstance(row, dict):` so a non-dict row also degrades to
+`ProposalCurrentState(error="row not found in response")`. Added
+`test_fetch_current_values_non_dict_row_becomes_error_not_exception` as a
+regression test. A follow-up codex pass confirmed the fix closes the gap, found
+no other similar gaps, and confirmed the new test genuinely exercises the fixed
+path. Full suite green (162 tests).
