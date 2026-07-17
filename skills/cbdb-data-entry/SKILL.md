@@ -23,15 +23,30 @@ from `.env.sample`) with a real `CBDB_API_TOKEN`.
 ## CLI reference
 
 ```
-python -m cbdb_agent validate --staging <path> | --input <path>
+python -m cbdb_agent validate --staging <path> | --input <path>  [--env <path>]
 python -m cbdb_agent submit   --staging <path> | --input <path>  [--dry-run] [--env <path>]
 ```
 
-- `validate` never touches the network and never requires `.env` — it only checks
-  the file's structure/whitelists/conflicts (`staging.find_issues()`) and prints
-  every issue found. Exit codes: `0` clean (unresolved conflicts alone still exit
-  `0` — they're expected mid-review, per `docs/03-extraction-review-workflow.md`
-  §2.5), `2` couldn't load/parse the file, `3` structural error found.
+- `validate` checks the file's structure/whitelists/conflicts
+  (`staging.find_issues()`) and prints every issue found — this part never
+  requires `.env` and never fails without it. Exit codes: `0` clean (unresolved
+  conflicts alone still exit `0` — they're expected mid-review, per
+  `docs/03-extraction-review-workflow.md` §2.5), `2` couldn't load/parse the
+  file, `3` structural error found.
+- `validate --staging` additionally writes/refreshes `preview.md` next to the
+  staging YAML on every run (`docs/06-staging-preview-design.md` §3) — a
+  generated, read-only Markdown summary (status line, per-proposal diffs,
+  conflict highlighting). If a working config is available — via `--env`, or
+  the standard `.env` lookup if `--env` is omitted — `preview.md` also includes
+  a best-effort live old-vs-new diff for `update`/`delete` proposals
+  (`batch_runner.fetch_current_values()`). Two different degrees of fallback,
+  both silent and never affecting `validate`'s own exit code: config that
+  fails to load at all (missing/broken `.env`, whether or not `--env` was
+  passed) drops the live diff for the *whole* batch (offline-only); a
+  per-proposal failure (a 404, an unreachable network) only shows `could not fetch
+  (<reason>)` for *that* proposal — the rest of the batch still gets its live
+  diff. `validate --input` does not write a preview (no staging YAML to put it
+  next to).
 - `submit` first re-validates (hard gate — any structural error or unresolved
   conflict blocks it, exit `3`), then loads `.env` (exit `4` on a config error),
   then actually runs the batch through `MutationApi`/`HttpClient`. Exit `1` if any
@@ -105,6 +120,17 @@ does when invoked this way:
    resolved (validation passes) but that proposal — and anything depending on it —
    is silently excluded from submission; tell the user which rows were deferred
    when you report the submit summary.
+   - This step also refreshes `preview.md` next to the staging file (see the CLI
+     reference above) — point the user at it, or read it back to them yourself,
+     as the primary way to review a batch instead of raw YAML.
+   - If the user wants a nicer visual than the plain Markdown file, or asks to
+     "see"/可视化 the batch, render `preview.md` as a Claude Code Artifact
+     (`docs/06-staging-preview-design.md` Tier 3) — conflict cards, side-by-side
+     option comparisons, etc. This is session-only interactive behavior, not a
+     CLI/package feature: `preview.md` itself must always stand alone (openable
+     in any plain editor, no Claude Code session required), so never make the
+     Artifact rendering something a user depends on to review a batch at all —
+     it's a nicer view of the same file, not a second source of truth.
 6. **Only submit on explicit confirmation** ("提交" / "submit" / equivalent):
    `python -m cbdb_agent submit --staging <path>`. Same dry-run/production-gate and
    audit-logging guarantees as path A apply — this workflow does not create a

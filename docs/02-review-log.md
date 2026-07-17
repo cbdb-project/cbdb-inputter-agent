@@ -708,3 +708,49 @@ Milestone 8 (staging batch preview) is now fully implemented: Tier 1, Tier 2,
 and CLI integration are all done and reviewed. Tier 3 (optional Artifact
 rendering) is explicitly out of scope for the Python package per the design
 doc's §2 — it's documented as agent-level `SKILL.md` behavior, not code.
+
+### Follow-up — SKILL.md was never actually updated for Tier 3, and had a stale claim
+
+Caught when the user directly asked "did `/goal` actually finish `docs/06`?"
+after the goal-completion signal had already fired. Checking honestly (not
+just re-asserting "done") turned up two real gaps the increments above missed:
+`SKILL.md` still said "`validate` never touches the network and never requires
+`.env`" — true before Increment 2/3, no longer accurate now that `validate
+--staging` can optionally do a network call for Tier 2 — and Tier 3 (session-
+only Artifact rendering) was never actually written into `SKILL.md` at all,
+despite the design doc explicitly requiring it to be documented there (§2:
+"documented as agent behavior in `SKILL.md`"). Neither gap broke any test,
+since both are pure documentation.
+
+Fixed: scoped the "never touches the network" claim to `find_issues()`
+specifically; added a bullet describing `preview.md` generation, Tier 2's
+config-dependent behavior, and the whole-batch-vs-per-proposal fallback
+distinction; added Tier 3 guidance under section B's validate step (session-
+only, `preview.md` must stand alone without a Claude Code session, never a
+second source of truth).
+
+#### Review-agent pass
+Findings: none must-fix on the Tier 3 addition itself (accurately scoped,
+consistent with docs/06 §4's constraints). One nice-to-have: the fallback
+wording conflated "no `--env`" with "a per-proposal network failure" as both
+causing a full offline fallback, overstating the blast radius of a single bad
+`GET` — only a `ConfigError` (broken/missing `.env`) drops Tier 2 for the whole
+batch; a per-proposal failure only affects that one proposal's row.
+
+Resolution: reworded to distinguish whole-batch fallback (config fails to
+load at all) from per-proposal fallback (one bad `GET`). Full suite green
+(166 tests, docs-only change).
+
+#### codex exec pass
+Finding (must-fix): the reworded text still said "no `--env` ... drops the
+live diff for the whole batch" — wrong, since omitting `--env` just triggers
+python-dotenv's standard `.env` lookup and can still succeed; the real trigger
+for whole-batch fallback is `load_config()` raising `ConfigError`, independent
+of whether `--env` was passed.
+
+Resolution: reworded again to "config that fails to load at all (missing/
+broken `.env`, whether or not `--env` was passed) drops the live diff for the
+whole batch." A follow-up codex pass confirmed this is now accurate against
+`cmd_validate()`/`_write_preview()`/`load_config()`'s actual behavior, and that
+the per-proposal distinction holds regardless of how `--env` was supplied.
+Full suite green (166 tests).
