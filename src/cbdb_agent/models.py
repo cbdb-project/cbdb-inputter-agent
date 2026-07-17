@@ -401,15 +401,19 @@ RESOURCE_SPECS: dict[str, ResourceSpec] = {
     ),
     "postings": ResourceSpec(
         key="postings",
-        create_aliases=frozenset(
-            {"postings", "posting", "offices", "posted_to_office_data"}
-        ),
-        update_aliases=frozenset(
-            {"postings", "posting", "offices", "posted_to_office_data"}
-        ),
-        delete_aliases=frozenset(
-            {"postings", "posting", "offices", "posted_to_office_data"}
-        ),
+        # NOTE: the real server's MutationHandlerRegistry still accepts "offices"
+        # for this resource too (verified 2026-07-17), but we deliberately do NOT
+        # list it here anymore. A new, unrelated "office entity" resource
+        # (OFFICE_CODES/OFFICE_CODE_TYPE_REL reference data, added 2026-07 in the
+        # target repo) ALSO claims "offices" via its own handler's supports().
+        # Server-side resolution is first-match-wins by registration order, and
+        # today that still resolves "offices" to postings - but that's an
+        # accident of ordering, not a guarantee, and a future server-side refactor
+        # could silently redirect it to the wrong handler. Always use the
+        # unambiguous "postings" (or "posting"/"posted_to_office_data") alias.
+        create_aliases=frozenset({"postings", "posting", "posted_to_office_data"}),
+        update_aliases=frozenset({"postings", "posting", "posted_to_office_data"}),
+        delete_aliases=frozenset({"postings", "posting", "posted_to_office_data"}),
         pk_fields=("c_office_id", "c_posting_id"),
         server_assigned_pk_fields=frozenset({"c_posting_id"}),
         create_fields=frozenset(

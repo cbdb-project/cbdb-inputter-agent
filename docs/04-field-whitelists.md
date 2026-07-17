@@ -35,7 +35,7 @@ their own quirks noted below):
 | kinship | `kinship`, `kin`, `kin_data` | 3 | `c_personid` | No |
 | possessions | `possessions`, `possession`, `possession_data` | 1 | none (same list) | **Yes** — `c_possession_record_id` |
 | texts | `texts`, `text`, `biog_text_data`, `text_data` | 3 | `c_personid` | No |
-| postings / offices | `postings`, `posting`, `offices`, `posted_to_office_data` | 2 | none (same list, incl. `c_office_id`) | **Yes** — `c_posting_id` |
+| postings / offices | `postings`, `posting`, `posted_to_office_data` (⚠️ server also accepts `offices`, but our client deliberately doesn't — see §11) | 2 | none (same list, incl. `c_office_id`) | **Yes** — `c_posting_id` |
 | social_institutions | create/delete: + `socialinst`; **update: missing `socialinst`, see §12** | 4 | `c_personid` | No |
 | sources | `sources` (no aliases) | 3 (`c_pages` optional) | none (identical create/update list) | No, but `c_textid`/`c_pages` re-keyable |
 
@@ -229,7 +229,19 @@ same batch.
 
 ## 11. postings / offices (`POSTED_TO_OFFICE_DATA`) — server-assigned surrogate PK
 
-- Resource aliases: `postings`, `posting`, `offices`, `posted_to_office_data`.
+- Resource aliases (server-side, per `PostingMutationHandler`/`*CreateHandler`/
+  `*DeleteHandler`): `postings`, `posting`, `offices`, `posted_to_office_data`.
+  **⚠️ Our client's `models.py` deliberately does NOT include `"offices"`** in its
+  own alias sets, despite the server still accepting it as of 2026-07-17. A new,
+  unrelated "office entity" resource (`OFFICE_CODES`/`OFFICE_CODE_TYPE_REL`
+  reference-data CRUD, added mid-2026 for managing the office code dictionary
+  itself, distinct from a *person's appointment record* in `POSTED_TO_OFFICE_DATA`)
+  also claims `"offices"` via its own handler's `supports()`. Server-side
+  resolution is first-match-wins by registration order in
+  `MutationHandlerRegistry`, and today that order still favors the postings
+  handlers — but that's an accident of registration order, not a contract. Always
+  use `"postings"` (or `"posting"`/`"posted_to_office_data"`) explicitly; never
+  `"offices"`.
 - PK: `c_office_id` (client-supplied, required, references `OFFICE_CODES`),
   `c_posting_id` (**server-assigned**, max+1).
 - **Create/update share the same field list** (unlike most resources, `c_office_id`

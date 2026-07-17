@@ -473,3 +473,46 @@ implemented code is still expected to change before wider use. Full suite green
 (129 tests).
 
 Sign-off: **Ready to publish.**
+
+## Maintenance — target-repo sync check (2026-07-17)
+
+~40 commits had landed in `cbdb-online-main-server` since this brief/whitelist docs
+were last synced (2026-07-08). Full diff review of everything this client depends
+on found: no breaking change to any of the 13 resources' field whitelists, PKs,
+alias lists, or the mutation/read envelope shapes; a new additive
+`POST /api/v2/batch_mutate` endpoint (not adopted, documented as a future option);
+new unrelated resources outside our scope; and a `basicinformation`/`altnames`
+character-variant-substitution behavior change plus an optional `notices` response
+key (no code change needed — already tolerated) that doesn't affect this client
+since we only use `mode: "direct"`.
+
+One real finding: a **new "office entity" resource** (managing the `OFFICE_CODES`
+reference table) was added whose handler claims the string `"offices"` — the same
+alias our existing `postings` resource (`POSTED_TO_OFFICE_DATA`, a person's
+appointment record — a completely different table) also accepted. Server-side
+resolution is first-match-wins by registration order, and today's order still
+favors postings, but that's incidental, not a contract.
+
+### Fix
+Removed `"offices"` from `models.py`'s `postings` alias sets (kept `"postings"`/
+`"posting"`/`"posted_to_office_data"`); added a regression test
+(`test_postings_rejects_offices_alias`); documented the collision and the other
+sync-check findings in `docs/00-target-system-brief.md` and
+`docs/04-field-whitelists.md`.
+
+### Review-agent pass
+Finding: the quick-reference table in `docs/04-field-whitelists.md` still listed
+`"offices"` as an accepted alias with no caveat, contradicting the newly-added §11
+warning that the client deliberately excludes it.
+
+Resolution: updated the table row to note the server-vs-client distinction; also
+added a pointer from `docs/00`'s illustrative JSON example (which still shows
+`"offices"` as one of several server-valid resource strings) to the new sync-check
+section, so a reader doesn't copy that example into using the ambiguous alias.
+
+### codex exec pass
+Independently re-verified the alias-collision claim and registration-order claim
+directly against the target repo source (`MutationHandlerRegistry.php`,
+`Office*Handler.php`, `Posting*Handler.php`) — confirmed accurate. Confirmed the
+three docs (table, §11, JSON example) are now mutually consistent. Reported clean.
+Full suite green (130 tests).

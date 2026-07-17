@@ -80,6 +80,20 @@ def test_possessions_requires_server_assigned_pk_on_update():
     )  # must not raise
 
 
+def test_postings_rejects_offices_alias():
+    """Regression test (2026-07-17): the target server added a new, unrelated
+    'office entity' resource (OFFICE_CODES reference data) whose handler ALSO
+    claims the 'offices' alias, resolved by registration-order today but not
+    guaranteed - our client must never rely on 'offices' for postings, only the
+    unambiguous 'postings'/'posting'/'posted_to_office_data'."""
+    spec = get_resource_spec("postings")
+    assert "offices" not in spec.create_aliases
+    assert "offices" not in spec.update_aliases
+    assert "offices" not in spec.delete_aliases
+    with pytest.raises(FieldWhitelistError):
+        spec.resolve_alias("offices", "create")
+
+
 def test_postings_rejects_server_assigned_pk_on_create():
     spec = get_resource_spec("postings")
     with pytest.raises(FieldWhitelistError):

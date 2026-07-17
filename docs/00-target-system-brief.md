@@ -46,7 +46,10 @@ All writes go through one JSON envelope, dispatched by resource name
 | GET/POST | `/api/v2/get` | read a row back (for verification / idempotency checks) |
 | POST | `/api/v2/relationship/opposite-edges` | mirror-relationship helper (kinship/assoc) |
 
-Request shape:
+Request shape (illustrative resource names only — see `docs/04-field-whitelists.md`
+for the canonical, exact alias to use per resource; notably `"offices"` shown below
+is a real server-accepted alias but is **not** the one this client uses, per the
+2026-07-17 sync-check note below and `docs/04-field-whitelists.md` §11):
 
 ```json
 {
@@ -194,3 +197,43 @@ using the standing local test account):
   (`"CBDB Inputter Agent (local test)"`) and an `operation_id` being returned.
 - `GET /api/v2/persons` and `GET /api/v2/get`'s exact required shapes (see §6) —
   the single biggest gap this brief had before Milestone 7.
+
+## Target-repo sync check (2026-07-17)
+
+Re-checked the target repo after ~40 commits landed since the brief above was
+written (2026-07-08 → 2026-07-17). Full diff review of everything this brief and
+`docs/04-field-whitelists.md` depend on — the `/api/v2/*` Mutation/read
+controllers, `MutationHandlerRegistry`, `MutationReadService`, `PersonListController`/
+`OperationListController`, and `CompositePrimaryKey` — for all 13 tracked
+resources. Summary (see `docs/04-field-whitelists.md`'s per-resource notes for
+detail):
+
+- **No breaking change** to any of the 13 resources' field whitelists, PKs, alias
+  lists, or the `create`/`mutate`/`delete`/`get` envelope shape. `GET /api/v2/persons`'
+  pagination shape and `GET /api/v2/get`'s required-envelope/404 behavior (§6) are
+  both unchanged.
+- **New, additive `POST /api/v2/batch_mutate` endpoint** (CSRF-exempt, same as the
+  other four): submits up to 500 items in one call, each using the identical
+  single-item envelope, dispatched through the same `MutationHandlerRegistry` (same
+  per-resource validation/whitelists apply). Supports `atomic` (all-or-nothing) or
+  non-atomic (best-effort, per-item results) modes. Not yet adopted by this client —
+  would reduce round-trips for large batches if implemented later, but every
+  current guarantee (audit trail, whitelist validation, dry-run/confirm-prod gate)
+  would need to be re-verified for it specifically before use, per AGENTS.md rule 1's
+  "only endpoints confirmed audited" principle.
+- **New, unrelated resources** (`merged-person` → `MERGED_PERSON_DATA`,
+  `text-codes`/`char-variant-map` → config-driven code-table CRUD) were added —
+  outside this client's 13-resource scope, no action needed.
+- **`basicinformation`/`altnames` behavior change** (commit `e7dfdcc3`): submitted
+  `c_surname_chn`/`c_mingzi_chn` (basicinformation) and `c_alt_name_chn` (altnames)
+  now pass through a server-side `CharVariantMapService` character-variant
+  normalization before being persisted/used to build the PK — a submitted variant
+  character present in the server's `char_variant_map` table can come back stored
+  differently than submitted. The response may now carry an additional, optional
+  top-level `notices` array when a substitution occurred (our client already
+  tolerates unknown response keys, since we return the parsed body as-is — no code
+  change needed, just be aware of it if you're diffing a submitted `c_alt_name_chn`
+  against the returned row). A separately tightened validation rule on
+  `basicinformation` **proposal-mode** updates (blank `c_mingzi_chn`/`c_mingzi` now
+  rejected unless the original was already blank) does not affect this client,
+  since AGENTS.md rule 1 already restricts us to `mode: "direct"` only.
