@@ -99,3 +99,21 @@ permanent test account (`cbdb-inputter-agent@local.test`, `canWriteDirectly()`-c
 current `CBDB_API_BASE_URL` rather than hardcoding a port anywhere in code — it can
 change. Never use a production token for anything other than deliberate,
 user-confirmed production writes.
+
+**The local instance is a full mirror of production data**, not a synthetic/empty
+test DB — real historical `c_personid`s (e.g. 陳俊卿 10884, 陳文龍 15213) exist there
+with their real rows. So when you need to look up or verify a real CBDB record for
+a data-correction task: **try the local instance first** (it's already configured,
+no token juggling needed) before assuming you need a separate production token or
+asking the user for one. Two concrete gotchas that wasted a round-trip once already:
+- If the local server seems unreachable, re-check with a plain `requests.get()` /
+  `netstat` before concluding it's down and reaching for production — a transient
+  connection hiccup looks identical to "not running."
+- `MutationApi.get()` (unlike `create()`/`update()`/`delete()`) does **not**
+  auto-merge `person_id` into `target_pk` — for a multi-field-PK resource (e.g.
+  `kinship`'s PK is `c_personid`+`c_kin_id`+`c_kin_code`), you must include
+  `c_personid` in `target_pk` yourself or the server 422s "缺少必要的複合主鍵參數"
+  (this is different from the *staging-file* schema's `target_pk`, which
+  deliberately excludes `c_personid` — see `staging.py`'s module docstring; that
+  exclusion only applies to `Proposal.target_pk`, not to a direct `MutationApi.get()`
+  call).

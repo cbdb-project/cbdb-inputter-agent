@@ -548,3 +548,43 @@ double-execution, test false-pass risk, packaging). No must-fix issues. One
 nice-to-have noted (the test doesn't separately assert delegation-vs-
 reimplementation, given the actual code is a one-line delegation) — not acted
 on. Full suite green (131 tests).
+
+## Milestone 8 (design-only) — staging batch preview
+
+Written after a real review friction point during actual use: reviewing a real
+data-correction batch (a `KIN_DATA` `c_notes` update for a disputed kinship
+relation between two historical CBDB persons) by reading raw YAML meant manually
+cross-referencing nested `conflicts[].options[]` with no at-a-glance status, and
+manually checking the current server value before trusting an "append to c_notes"
+proposal — exactly the kind of check a tool should do automatically. Added
+`docs/06-staging-preview-design.md` (design only, no code): a generated read-only
+Markdown summary (status line, per-proposal conflict highlighting) plus an
+optional best-effort live old→new diff for `update`/`delete` proposals, refreshed
+by `validate --staging`. Added as an unchecked Milestone 8 to `docs/01-
+implementation-plan.md` §10, and documented the review friction's root cause
+(local instance is a full production-data mirror; `MutationApi.get()` doesn't
+auto-merge `person_id` into `target_pk`) as an explicit note in `AGENTS.md`.
+
+### Review-agent pass
+Findings: (1) the design's Tier 2 live-diff section didn't account for
+`MutationApi.get()` needing `target_pk` to include `c_personid` (which a staging
+`Proposal.target_pk` deliberately excludes) — a literal implementation would 422
+on the very first multi-field-PK resource, including the doc's own kinship
+example; (2) a fabricated citation to `docs/00-target-system-brief.md` §6 for the
+"GET ignores dry-run" claim — that section never mentions dry-run at all; (3)
+`docs/01-implementation-plan.md`'s milestone list only went up to 7, with no
+mention of this new Milestone 8 doc.
+
+Resolution: added an explicit implementation note pointing at the existing
+`staging.resolve_target_pk()` helper (already used for submission) as the correct
+way to merge `person_id` before calling `get()`; corrected the citation to
+`docs/01-implementation-plan.md` §3's actual "GET calls still go through" text;
+added Milestone 8 as an unchecked entry to `docs/01`'s list. All 3 confirmed fixed.
+
+### codex exec pass
+Independently re-verified all 3 fixes and did an additional consistency pass
+against `staging.py`/`http_client.py`/`mutation_api.py`/`batch_runner.py` and
+docs 00/01/03 — reported clean, with one minor editorial nit (the plan's header
+still said "all 7 milestones implemented" despite §10 already showing Milestone 8
+as design-only) which was also fixed. Full suite green (130 tests, docs-only
+change).

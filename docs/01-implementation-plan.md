@@ -1,7 +1,8 @@
 # CBDB Inputter Agent — Implementation Plan
 
-Status: **all 7 milestones implemented and reviewed** (see §10 and
-`docs/02-review-log.md`). This document is kept as the architectural record and
+Status: **Milestones 1-7 implemented and reviewed; Milestone 8 is design-only so
+far** (see §10 and `docs/02-review-log.md`). This document is kept as the
+architectural record and
 rationale, not as a pending TODO list. See `00-target-system-brief.md` for the
 target-system facts this plan relies on (including facts confirmed live during
 Milestone 7), and `03-extraction-review-workflow.md` for the source-text →
@@ -299,6 +300,12 @@ Documents for any agent working in this repo:
    amount of mocked testing would have (see `docs/02-review-log.md`'s Milestone 7
    entry and `docs/00-target-system-brief.md`'s "Confirmed live" section) before
    ever pointing at production.
+8. ⬜ **Staging batch preview** (design only so far — see
+   `06-staging-preview-design.md`, not yet implemented): a generated, read-only
+   Markdown summary of a staging batch (status line, per-proposal conflict
+   highlighting, best-effort live old→new diff for `update`/`delete` proposals),
+   refreshed by `validate --staging`, to make bulk review faster than reading raw
+   YAML — motivated by a real review friction point hit during actual use.
 
 ## 11. Review workflow (applies to every milestone above)
 
