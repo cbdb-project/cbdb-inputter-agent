@@ -1,11 +1,11 @@
 # cbdb-inputter-agent
 
 > **⚠️ Early-stage project, under active development.** The core client
-> (Milestones 1–7 — auth, mutation API, extraction/staging workflow, CLI,
-> live-validated against a real instance) is implemented and tested, but the CLI
-> surface, staging-file schema, and skill wiring should all still be considered
-> subject to change. Read [`AGENTS.md`](AGENTS.md) before touching production
-> data with this.
+> (Milestones 1–8 — auth, mutation API, extraction/staging workflow, CLI,
+> live-validated against a real instance, staging-batch preview) is implemented
+> and tested, but the CLI surface, staging-file schema, and skill wiring should
+> all still be considered subject to change. Read [`AGENTS.md`](AGENTS.md)
+> before touching production data with this.
 
 An authorized API client for [`cbdb-online-main-server`](https://github.com/cbdb-project/cbdb-online-main-server)
 (the CBDB online data-entry system, live at https://input.cbdb.fas.harvard.edu) that
@@ -23,6 +23,10 @@ Start here:
   human-reviewable, bulk-editable staging file before anything is submitted.
 - [`docs/04-field-whitelists.md`](docs/04-field-whitelists.md) — per-resource allowed
   fields and composite primary keys for all 13 supported resources.
+- [`docs/06-staging-preview-design.md`](docs/06-staging-preview-design.md) — the
+  generated, read-only `preview.md` (with a best-effort live old-vs-new diff)
+  that `validate --staging` refreshes on every run, for reviewing a batch without
+  reading raw YAML.
 - [`docs/02-review-log.md`](docs/02-review-log.md) — the review-agent + `codex`
   findings and fixes for every milestone, including the two real bugs Milestone 7's
   live validation caught that no amount of mocked testing would have found.
@@ -41,7 +45,7 @@ Start here:
 ## Usage
 
 ```
-python -m cbdb_agent validate --staging <path> | --input <path>
+python -m cbdb_agent validate --staging <path> | --input <path>  [--env <path>]
 python -m cbdb_agent submit   --staging <path> | --input <path>  [--dry-run] [--env <path>]
 ```
 
@@ -53,7 +57,7 @@ staging file for human review before anything is submitted.
 
 ## Status
 
-All 7 planned milestones are implemented, tested (129 unit tests, no real network
+All 8 planned milestones are implemented, tested (167 unit tests, no real network
 calls), and — for the core write path — validated live against a real local
 `cbdb-online-main-server` instance. See `docs/01-implementation-plan.md` for the
 milestone list and `docs/02-review-log.md` for what each one's review passes found.
