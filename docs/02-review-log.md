@@ -516,3 +516,35 @@ directly against the target repo source (`MutationHandlerRegistry.php`,
 `Office*Handler.php`, `Posting*Handler.php`) — confirmed accurate. Confirmed the
 three docs (table, §11, JSON example) are now mutually consistent. Reported clean.
 Full suite green (130 tests).
+
+## Bug fix — missing `__main__.py`
+
+Discovered when the user actually ran the documented `python -m cbdb_agent
+validate --staging ...` command for real: every doc (README, `01-implementation-
+plan.md`, `03-extraction-review-workflow.md`) documents this as the CLI entry
+point, but the package never had a `__main__.py`, so it failed with "No module
+named cbdb_agent.__main__; 'cbdb_agent' is a package and cannot be directly
+executed". `cli.py`'s own `if __name__ == "__main__":` guard only fires for
+`python -m cbdb_agent.cli`, not `python -m cbdb_agent` — a distinct, missing
+file. Fixed by adding `src/cbdb_agent/__main__.py`, delegating to `cli.main()`.
+Added `tests/test_main_entry_point.py`, a subprocess-based regression test
+(`sys.executable -m cbdb_agent validate --input ...`) — the only kind of test
+that actually exercises `-m`'s module-resolution behavior; every other CLI test
+in this suite calls `cli.main()` in-process and would not have caught this.
+Verified the new test fails without the fix (temporarily removed `__main__.py`,
+confirmed the exact original error reproduces) and passes with it restored.
+
+### Review-agent pass
+No issues found. Confirmed no double-execution risk (importing `cli` as
+`cbdb_agent.cli` never triggers `cli.py`'s own `__main__` guard), confirmed the
+test's assertions (`returncode == 0` + expected stdout, not just absence of the
+error string) rule out a false pass from an unrelated failure, confirmed
+`pyproject.toml`'s `packages.find` correctly includes the new file, and found no
+stale doc/comment anywhere claiming the command doesn't work.
+
+### codex exec pass
+Independently re-checked the same points (delegation correctness, no
+double-execution, test false-pass risk, packaging). No must-fix issues. One
+nice-to-have noted (the test doesn't separately assert delegation-vs-
+reimplementation, given the actual code is a one-line delegation) — not acted
+on. Full suite green (131 tests).
