@@ -21,7 +21,7 @@ import json
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .models import FieldWhitelistError, find_spec_by_alias, get_resource_spec
 
@@ -94,6 +94,30 @@ class Issue(BaseModel):
     proposal_id: str | None
     severity: Literal["error", "unresolved_conflict"]
     message: str
+
+
+class ProposalCurrentState(BaseModel):
+    """Best-effort, live-fetched current server state for one proposal's target
+    row - produced by batch_runner.fetch_current_values() (docs/06-staging-preview-
+    design.md's Tier 2). `row` is the fetched row's fields if the fetch succeeded;
+    `error` explains why nothing was fetched (network/auth failure, row not found,
+    a `create` proposal with nothing to diff against yet, or person_id not yet
+    resolved in this batch). Never both set - exactly one is non-None."""
+
+    row: dict[str, Any] | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_of_row_or_error(self) -> "ProposalCurrentState":
+        if (self.row is None) == (self.error is None):
+            raise ValueError(
+                "ProposalCurrentState requires exactly one of row/error to be set "
+                f"(got row={self.row!r}, error={self.error!r}) - a proposal with no "
+                "entry in the current_values dict at all is how "
+                "render_preview_markdown() represents 'not fetched, offline "
+                "preview', not an instance with both fields None"
+            )
+        return self
 
 
 def load_staging_file(path: str) -> StagingBatch:
@@ -505,3 +529,169 @@ def resolve_target_pk(
             if pk_field not in full and pk_field in proposal.changes:
                 full[pk_field] = proposal.changes[pk_field]
     return full
+
+
+def _preview_inline(text: str) -> str:
+    """Make arbitrary text safe to interpolate into a single Markdown bullet line:
+    collapse embedded newlines (which would otherwise break out of the bullet's
+    indentation and merge into whatever follows) and neutralize backticks (which
+    would otherwise leave an unbalanced inline code span for the rest of the
+    line/paragraph)."""
+    return " ".join(text.split("\n")).replace("`", "'")
+
+
+def _preview_value(value: Any) -> str:
+    """Render a field value for display. None (missing/blank in the current row,
+    or a proposed value that's explicitly null) shows as `_(empty)_`, not the
+    Python literal `None` - a bare `None` reads ambiguously as "we have no data"
+    vs. "the value truly is null" vs. a field whose actual string content happens
+    to be "None"."""
+    if value is None:
+        return "_(empty)_"
+    return _preview_inline(repr(value))
+
+
+def render_preview_markdown(
+    batch: StagingBatch,
+    issues: list[Issue] | None = None,
+    current_values: dict[str, ProposalCurrentState] | None = None,
+) -> str:
+    """Render a read-only, human-friendly Markdown summary of a staging batch
+    (docs/06-staging-preview-design.md's Tier 1). Pure string formatting, no
+    network calls - `current_values` (Tier 2's best-effort live old-vs-new diff)
+    is optional and supplied by the caller (see batch_runner.fetch_current_values);
+    without it, every changed field shows only its proposed value.
+
+    This output is generated-only - never hand-edit it. All edits happen in the
+    YAML staging file itself (directly, or via chat asking the agent to update a
+    specific `resolution`), per docs/03-extraction-review-workflow.md.
+    """
+    if issues is None:
+        issues = find_issues(batch)
+    current_values = current_values or {}
+
+    known_ids = {p.id for p in batch.proposals}
+    issues_by_proposal: dict[str | None, list[Issue]] = {}
+    unattributed_issues: list[Issue] = []
+    for issue in issues:
+        if issue.proposal_id in known_ids:
+            issues_by_proposal.setdefault(issue.proposal_id, []).append(issue)
+        else:
+            unattributed_issues.append(issue)
+
+    error_count = sum(1 for i in issues if i.severity == "error")
+    unresolved_count = sum(1 for i in issues if i.severity == "unresolved_conflict")
+    ready = error_count == 0 and unresolved_count == 0
+
+    lines: list[str] = [f"# Staging batch: {batch.batch_id}", ""]
+
+    status_bits = f"{len(batch.proposals)} proposal(s)"
+    if error_count:
+        status_bits += f", {error_count} error(s)"
+    if unresolved_count:
+        status_bits += f", {unresolved_count} unresolved conflict(s)"
+    status_word = "ready to submit" if ready else "NOT ready to submit"
+    lines.append(f"**Status:** {status_bits} — {status_word}")
+    lines.append("")
+    lines.append(
+        "_Generated preview - do not edit. Edit `proposal.yaml` instead; this file "
+        "is refreshed by `validate --staging`._"
+    )
+    lines.append("")
+
+    if batch.source_excerpt:
+        lines.append("## Source")
+        lines.append("")
+        for excerpt_line in batch.source_excerpt.splitlines() or [""]:
+            lines.append(f"> {excerpt_line}")
+        lines.append("")
+
+    lines.append("## Proposals")
+    lines.append("")
+
+    for idx, proposal in enumerate(batch.proposals, start=1):
+        lines.append(
+            f"### {idx}. `{proposal.id}` — {proposal.resource} / {proposal.operation} "
+            f"(confidence: {proposal.confidence})"
+        )
+        lines.append("")
+
+        meta_bits = [f"person_id: {proposal.person_id}"]
+        if proposal.target_pk:
+            pk_str = ", ".join(f"{k}={v}" for k, v in proposal.target_pk.items())
+            meta_bits.append(f"target_pk: {pk_str}")
+        lines.append("- " + " · ".join(meta_bits))
+
+        state = current_values.get(proposal.id)
+        for field, proposed_value in proposal.changes.items():
+            lines.append(f"- **{field}**")
+            if proposal.operation == "create":
+                lines.append(f"  - proposed: {_preview_value(proposed_value)}")
+            elif state is None:
+                lines.append("  - current:  _(not fetched — offline preview)_")
+                lines.append(f"  - proposed: {_preview_value(proposed_value)}")
+            elif state.error is not None:
+                lines.append(f"  - current:  ⚠️ could not fetch ({_preview_inline(state.error)})")
+                lines.append(f"  - proposed: {_preview_value(proposed_value)}")
+            else:
+                current_value = (state.row or {}).get(field)
+                lines.append(f"  - current:  {_preview_value(current_value)}")
+                lines.append(f"  - proposed: {_preview_value(proposed_value)}")
+
+        if proposal.source_quote:
+            lines.append(f'- source_quote: "{_preview_inline(proposal.source_quote)}"')
+
+        for issue in issues_by_proposal.get(proposal.id, []):
+            if issue.severity == "error":
+                lines.append(f"- 🛑 **error**: {_preview_inline(issue.message)}")
+
+        for conflict in proposal.conflicts:
+            resolved = conflict.resolution is not None
+            marker = "✅" if resolved else "⚠️"
+            status = (
+                f"resolved as `{_preview_inline(str(conflict.resolution))}`"
+                if resolved
+                else "UNRESOLVED"
+            )
+            lines.append(f"- {marker} **{conflict.id}** ({conflict.field}) — {status}")
+            lines.append(f"  - {_preview_inline(conflict.description)}")
+            if conflict.options:
+                opts = " · ".join(
+                    f"`{_preview_inline(str(o.value))}` ({_preview_inline(o.rationale)})"
+                    for o in conflict.options
+                )
+                lines.append(f"  - options: {opts}")
+            if conflict.agent_suggestion is not None:
+                reasoning = (
+                    f" — {_preview_inline(conflict.agent_reasoning)}"
+                    if conflict.agent_reasoning
+                    else ""
+                )
+                lines.append(
+                    f"  - agent suggests: `{_preview_inline(str(conflict.agent_suggestion))}`{reasoning}"
+                )
+
+        lines.append("")
+
+    if unattributed_issues:
+        lines.append("## Unattributed issues")
+        lines.append("")
+        lines.append(
+            "_These issues reference a proposal id that isn't in this batch (or no "
+            "id at all) - shown here so nothing counted in the status line above "
+            "goes unexplained._"
+        )
+        lines.append("")
+        for issue in unattributed_issues:
+            marker = "🛑" if issue.severity == "error" else "⚠️"
+            lines.append(f"- {marker} [{issue.proposal_id!r}] {_preview_inline(issue.message)}")
+        lines.append("")
+
+    if batch.batch_notes:
+        lines.append("## Batch notes")
+        lines.append("")
+        for notes_line in batch.batch_notes.splitlines() or [""]:
+            lines.append(f"> {notes_line}")
+        lines.append("")
+
+    return "\n".join(lines)
