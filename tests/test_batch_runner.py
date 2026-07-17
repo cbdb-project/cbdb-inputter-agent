@@ -3,7 +3,7 @@ import json
 import responses
 
 from cbdb_agent.audit_log import AuditLog
-from cbdb_agent.batch_runner import allocate_person_id, run_batch
+from cbdb_agent.batch_runner import allocate_person_id, fetch_current_values, run_batch
 from cbdb_agent.config import Config
 from cbdb_agent.http_client import HttpClient
 from cbdb_agent.mutation_api import MutationApi
@@ -302,3 +302,192 @@ def test_run_batch_update_and_delete(tmp_path):
     batch = StagingBatch(batch_id="b1", proposals=[p_update, p_delete])
     results = run_batch(batch, api)
     assert [r.status for r in results] == ["success", "success"]
+
+
+# -- fetch_current_values (docs/06-staging-preview-design.md Tier 2) --
+
+
+@responses.activate
+def test_fetch_current_values_returns_row_for_concrete_person_id(tmp_path):
+    api = make_api(tmp_path)
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/get",
+        json={"ok": True, "result": {"row": {"c_notes": "old text"}}},
+        status=200,
+    )
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="update", person_id=900001,
+        changes={"c_notes": "new text"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    result = fetch_current_values(batch, api)
+    assert result["p1"].row == {"c_notes": "old text"}
+    assert result["p1"].error is None
+
+
+@responses.activate
+def test_fetch_current_values_non_dict_row_becomes_error_not_exception(tmp_path):
+    api = make_api(tmp_path)
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/get",
+        json={"ok": True, "result": {"row": ["not", "a", "dict"]}},
+        status=200,
+    )
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="update", person_id=900001,
+        changes={"c_notes": "x"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    result = fetch_current_values(batch, api)  # must not raise
+    assert result["p1"].error is not None
+    assert result["p1"].row is None
+
+
+@responses.activate
+def test_fetch_current_values_skips_create_proposals_entirely(tmp_path):
+    api = make_api(tmp_path)
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="create", person_id="NEW",
+        changes={"c_name_chn": "x"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    result = fetch_current_values(batch, api)
+    assert "p1" not in result  # not just skipped-with-error - absent entirely
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_fetch_current_values_unresolved_new_person_id_no_network_call(tmp_path):
+    """An update/delete referencing a sibling 'NEW' create that hasn't happened
+    yet (in this preview-only, no-submission context) must not attempt a fetch -
+    there's nothing on the server to diff against."""
+    api = make_api(tmp_path)
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="update", person_id="NEW",
+        changes={"c_notes": "x"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    result = fetch_current_values(batch, api)
+    assert result["p1"].error is not None
+    assert result["p1"].row is None
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_fetch_current_values_unresolved_sibling_reference_no_network_call(tmp_path):
+    api = make_api(tmp_path)
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="create", person_id="NEW",
+        changes={"c_name_chn": "x"}, source_quote="x", confidence="high",
+    )
+    p2 = Proposal(
+        id="p2", resource="altnames", operation="update", person_id="p1",
+        target_pk={"c_alt_name_chn": "y", "c_alt_name_type_code": "z"},
+        changes={"c_notes": "x"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1, p2])
+    result = fetch_current_values(batch, api)
+    assert "p1" not in result  # create - skipped entirely
+    assert result["p2"].error is not None  # sibling not yet resolved in this preview
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_fetch_current_values_404_becomes_error_not_exception(tmp_path):
+    api = make_api(tmp_path)
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/get",
+        json={"ok": False, "message": "not found"},
+        status=404,
+    )
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="update", person_id=900001,
+        changes={"c_notes": "x"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    result = fetch_current_values(batch, api)  # must not raise
+    assert result["p1"].error is not None
+    assert result["p1"].row is None
+
+
+@responses.activate
+def test_fetch_current_values_unknown_resource_alias_becomes_error_not_exception(tmp_path):
+    api = make_api(tmp_path)
+    p1 = Proposal(
+        id="p1", resource="not_a_real_resource_alias", operation="update", person_id=900001,
+        changes={"c_notes": "x"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    result = fetch_current_values(batch, api)  # must not raise
+    assert result["p1"].error is not None
+    assert result["p1"].row is None
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_fetch_current_values_network_error_becomes_error_not_exception(tmp_path):
+    import requests as _requests
+
+    api = make_api(tmp_path)
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/get",
+        body=_requests.exceptions.ConnectionError("connection refused"),
+    )
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="update", person_id=900001,
+        changes={"c_notes": "x"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    result = fetch_current_values(batch, api)  # must not raise
+    assert result["p1"].error is not None
+
+
+@responses.activate
+def test_fetch_current_values_covers_delete_proposals_too(tmp_path):
+    api = make_api(tmp_path)
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/get",
+        json={"ok": True, "result": {"row": {"c_notes": "will be deleted"}}},
+        status=200,
+    )
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="delete", person_id=900001,
+        source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    result = fetch_current_values(batch, api)
+    assert result["p1"].row == {"c_notes": "will be deleted"}
+
+
+@responses.activate
+def test_fetch_current_values_uses_full_merged_target_pk_for_multi_field_pk(tmp_path):
+    """Regression test for the exact gap flagged during design review: kinship's
+    target_pk must be merged with the resolved person_id before calling api.get()."""
+    api = make_api(tmp_path)
+    captured = {}
+
+    def callback(request):
+        import json as _json
+        from urllib.parse import parse_qs, urlparse
+
+        captured["body"] = request.body
+        return (200, {}, _json.dumps({"ok": True, "result": {"row": {"c_notes": "old"}}}))
+
+    responses.add_callback(responses.GET, "http://localhost:8000/api/v2/get", callback=callback)
+    p1 = Proposal(
+        id="p1", resource="kinship", operation="update", person_id=900001,
+        target_pk={"c_kin_id": 900002, "c_kin_code": 243},
+        changes={"c_notes": "new"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    result = fetch_current_values(batch, api)
+    assert result["p1"].row == {"c_notes": "old"}
+
+    sent = json.loads(captured["body"])
+    assert sent["target"]["pk"] == {"c_personid": 900001, "c_kin_id": 900002, "c_kin_code": 243}
+    assert sent["person_id"] == 900001
