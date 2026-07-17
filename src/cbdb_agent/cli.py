@@ -1,14 +1,20 @@
 """`python -m cbdb_agent` entry point.
 
 Subcommands:
-  validate --staging <path> | --input <path>
-  submit   --staging <path> | --input <path>  [--dry-run]
+  validate --staging <path> | --input <path>  [--env <path>]
+  submit   --staging <path> | --input <path>  [--dry-run] [--env <path>]
 
 See docs/01-implementation-plan.md section 7 and docs/03-extraction-review-
 workflow.md section 2.3 for the intended interaction flow. Both --staging and
 --input converge on the same StagingBatch representation (staging.py) and the
 same submission engine (batch_runner.py) - see load_input_batch()'s docstring for
 why.
+
+`validate --staging` additionally refreshes a `preview.md` file next to the
+staging YAML on every run (docs/06-staging-preview-design.md section 3);
+`--env` there is only used for that preview's best-effort Tier 2 live diff, not
+for validation itself, which never touches the network. `validate --input` has
+no persistent file location to write a preview next to, so it skips this.
 """
 
 from __future__ import annotations
@@ -21,11 +27,20 @@ import sys
 from pathlib import Path
 
 from .audit_log import AuditLog
-from .batch_runner import ProposalResult, run_batch
+from .batch_runner import ProposalResult, fetch_current_values, run_batch
 from .config import ConfigError, load_config
 from .http_client import HttpClient
 from .mutation_api import MutationApi
-from .staging import StagingBatch, StagingError, find_issues, load_input_batch, load_staging_file, validate_for_submit
+from .staging import (
+    Issue,
+    StagingBatch,
+    StagingError,
+    find_issues,
+    load_input_batch,
+    load_staging_file,
+    render_preview_markdown,
+    validate_for_submit,
+)
 
 # Distinct exit codes so a caller/CI script can tell "nothing was attempted" apart
 # from "some records failed at the server" (docs/01-implementation-plan.md section 7).
@@ -56,17 +71,51 @@ def cmd_validate(args: argparse.Namespace) -> int:
     issues = find_issues(batch)
     if not issues:
         print(f"Batch {batch.batch_id!r}: no issues found ({len(batch.proposals)} proposals).")
-        return EXIT_OK
+        exit_code = EXIT_OK
+    else:
+        errors = [i for i in issues if i.severity == "error"]
+        conflicts = [i for i in issues if i.severity == "unresolved_conflict"]
+        print(f"Batch {batch.batch_id!r}: {len(errors)} error(s), {len(conflicts)} unresolved conflict(s).")
+        for issue in issues:
+            print(f"  - [{issue.proposal_id}] {issue.severity}: {issue.message}")
+        # Per docs/03 section 2.5: validate reports and exits cleanly even with
+        # unresolved conflicts (those are expected mid-review) - only structural
+        # errors are a hard failure at this stage.
+        exit_code = EXIT_VALIDATION_ERROR if errors else EXIT_OK
 
-    errors = [i for i in issues if i.severity == "error"]
-    conflicts = [i for i in issues if i.severity == "unresolved_conflict"]
-    print(f"Batch {batch.batch_id!r}: {len(errors)} error(s), {len(conflicts)} unresolved conflict(s).")
-    for issue in issues:
-        print(f"  - [{issue.proposal_id}] {issue.severity}: {issue.message}")
-    # Per docs/03 section 2.5: validate reports and exits cleanly even with
-    # unresolved conflicts (those are expected mid-review) - only structural
-    # errors are a hard failure at this stage.
-    return EXIT_VALIDATION_ERROR if errors else EXIT_OK
+    if args.staging:
+        _write_preview(args, batch, issues)
+
+    return exit_code
+
+
+def _write_preview(args: argparse.Namespace, batch: StagingBatch, issues: list[Issue]) -> None:
+    """Refresh preview.md next to the staging YAML on every `validate --staging`
+    run (docs/06-staging-preview-design.md section 3). Tier 2's live diff is
+    attempted only if a working .env config happens to be available here; per
+    that design, ANY failure to load config or reach the target system just
+    means the preview falls back to Tier 1 (offline) - it must never affect
+    validate's own exit code or structural report.
+    """
+    current_values = None
+    try:
+        config = load_config(args.env)
+        client = HttpClient(config, AuditLog(config.local_audit_log_dir))
+        # fetch_current_values() never raises (its own docstring/tests guarantee
+        # this - every per-proposal failure already becomes a ProposalCurrentState
+        # error), so the only thing this except needs to catch is a genuinely
+        # unavailable/broken .env.
+        current_values = fetch_current_values(batch, MutationApi(client))
+    except ConfigError:
+        current_values = None
+
+    try:
+        markdown = render_preview_markdown(batch, issues, current_values=current_values)
+        preview_path = Path(args.staging).parent / "preview.md"
+        preview_path.write_text(markdown, encoding="utf-8")
+        print(f"Preview written to {preview_path}")
+    except OSError as exc:
+        print(f"Warning: could not write preview.md: {exc}", file=sys.stderr)
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
@@ -166,16 +215,16 @@ def build_parser() -> argparse.ArgumentParser:
         group = sub.add_mutually_exclusive_group(required=True)
         group.add_argument("--staging", help="Path to a YAML staging file")
         group.add_argument("--input", help="Path to a structured JSON input batch")
+        sub.add_argument(
+            "--env",
+            default=None,
+            help="Path to a .env file (default: standard python-dotenv lookup)",
+        )
         if name == "submit":
             sub.add_argument(
                 "--dry-run",
                 action="store_true",
                 help="Force dry-run even if .env disables it (cannot force it off)",
-            )
-            sub.add_argument(
-                "--env",
-                default=None,
-                help="Path to a .env file (default: standard python-dotenv lookup)",
             )
         sub.set_defaults(func=handler)
 
