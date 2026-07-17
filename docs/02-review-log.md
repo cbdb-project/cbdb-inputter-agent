@@ -754,3 +754,62 @@ whole batch." A follow-up codex pass confirmed this is now accurate against
 `cmd_validate()`/`_write_preview()`/`load_config()`'s actual behavior, and that
 the per-proposal distinction holds regardless of how `--env` was supplied.
 Full suite green (166 tests).
+
+## Follow-up — branch-stacking gap + comprehensive sweep
+
+After the SKILL.md fix above, the user directly asked for a full repo-wide
+sweep before considering Milestone 8/the project "done" — the two prior gaps
+(missing `__main__.py`, stale `SKILL.md`) were only caught because the user
+pushed back on a premature "done" claim, not because anything in the review
+process itself surfaced them. Dispatched a broad audit (README.md, AGENTS.md,
+SKILL.md beyond the Milestone-8 fix, all of `docs/00`-`06`, `.env.sample` vs
+`config.py`, `pyproject.toml`, git/PR branch structure) with instructions to
+report even non-findings explicitly, so the sweep's completeness could be
+trusted rather than assumed.
+
+Findings:
+1. **Must-fix**: `feat/staging-preview` itself was missing `__main__.py` — the
+   fix for that bug (see the "Bug fix" entry above) lived only on the sibling
+   `fix/main-entry-point` branch (based directly on `main`), never on this
+   stack (`docs/staging-preview-design` → `feat/staging-preview`, both based on
+   an older `main`). Checking out this branch in isolation would still hit the
+   original bug.
+2. **Must-fix**: `README.md`'s Status section said "7 planned milestones...
+   129 unit tests" — stale by a full milestone and 37 tests; never updated for
+   Milestone 8 despite `docs/01`/`docs/02`/`docs/06` all being current.
+3. Nice-to-have (not acted on): `docs/05-testing-strategy.md` was never
+   extended to mention Milestone 8's test coverage.
+4. Everything else audited (AGENTS.md, SKILL.md's non-Milestone-8 content, all
+   of docs/00-04/06, `.env.sample`/`config.py` parity, `pyproject.toml`, the
+   `skills/` directory structure) checked out accurate — reported as explicit
+   non-findings per category, not just omitted.
+
+Resolution for #1: merged `fix/main-entry-point` into `main` first (PR #5),
+then rebased `docs/staging-preview-design` onto the updated `main`, resolved a
+`docs/02-review-log.md` merge conflict (both branches had appended independent
+entries at the same location — kept both, in order), then rebased
+`feat/staging-preview` onto the rebased `docs/staging-preview-design` (same
+conflict pattern, resolved the same way), force-pushed both. Verified
+`__main__.py` present and `python -m cbdb_agent validate --staging ...`
+actually runs on the rebased branch; full suite green (167 tests, +1 from the
+`__main__.py` regression test now included). Confirmed both open PRs (#3, #4)
+report `mergeStateStatus: CLEAN` after the force-pushes.
+
+Resolution for #2: updated README.md's early-stage disclaimer ("Milestones
+1-7" → "1-8"), the `validate` usage line (added the `--env` flag it was
+missing), the Status section ("7 planned milestones... 129 unit tests" → "8...
+167"), and added a "Start here" bullet for `docs/06-staging-preview-design.md`
+(implemented but never linked from README).
+
+### Review-agent pass (README fix)
+No issues found. Independently re-summed the test count (167, matching), and
+cross-checked every claim (milestone count, `--env` flag placement, the new
+doc bullet's description, the unrelated-but-adjacent "13 supported resources"
+claim) against `docs/01`, `cli.py`'s `build_parser()`, and `models.py`'s
+`RESOURCE_SPECS` — all accurate.
+
+### codex exec pass (README fix)
+Independently re-verified the same claims (milestone count, `--env` on both
+subcommands, the 167 test count via `rg` since `grep` wasn't available in this
+PowerShell environment). No must-fix or nice-to-have issues. Full suite green
+(167 tests, docs-only change).
