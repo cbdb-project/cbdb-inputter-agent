@@ -4,12 +4,15 @@ from pydantic import ValidationError
 from cbdb_agent.staging import (
     Conflict,
     ConflictOption,
+    Issue,
     Proposal,
+    ProposalCurrentState,
     StagingBatch,
     StagingError,
     find_issues,
     load_input_batch,
     load_staging_file,
+    render_preview_markdown,
     resolve_target_pk,
     save_staging_file,
     submittable_proposals,
@@ -492,3 +495,263 @@ def test_load_staging_file_rejects_bad_operation(tmp_path):
     )
     with pytest.raises(ValidationError):
         load_staging_file(str(path))
+
+
+# -- render_preview_markdown (docs/06-staging-preview-design.md Tier 1) --
+
+
+def test_preview_status_line_ready_when_no_issues():
+    batch = StagingBatch(batch_id="b1", proposals=[make_person_create()])
+    md = render_preview_markdown(batch)
+    assert "1 proposal(s)" in md
+    assert "ready to submit" in md
+    assert "NOT ready to submit" not in md
+
+
+def test_preview_status_line_not_ready_with_unresolved_conflict():
+    p1 = make_person_create()
+    p1.conflicts.append(
+        Conflict(id="c1", field="c_name_chn", description="x", resolution=None)
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    md = render_preview_markdown(batch)
+    assert "1 unresolved conflict(s)" in md
+    assert "NOT ready to submit" in md
+
+
+def test_preview_status_line_counts_structural_errors():
+    p1 = make_person_create(changes={"c_not_a_real_field": "x"})
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    md = render_preview_markdown(batch)
+    assert "1 error(s)" in md
+    assert "NOT ready to submit" in md
+    assert "🛑 **error**" in md
+
+
+def test_preview_never_edited_disclaimer_present():
+    batch = StagingBatch(batch_id="b1", proposals=[make_person_create()])
+    md = render_preview_markdown(batch)
+    assert "do not edit" in md.lower()
+
+
+def test_preview_includes_source_excerpt_and_batch_notes():
+    batch = StagingBatch(
+        batch_id="b1",
+        source_excerpt="line one\nline two",
+        proposals=[make_person_create()],
+        batch_notes="some notes",
+    )
+    md = render_preview_markdown(batch)
+    assert "> line one" in md
+    assert "> line two" in md
+    assert "> some notes" in md
+
+
+def test_preview_shows_conflict_options_and_agent_suggestion():
+    p1 = make_person_create()
+    p1.conflicts.append(
+        Conflict(
+            id="c1",
+            field="c_name_chn",
+            description="ambiguous",
+            options=[ConflictOption(value="A", rationale="ra"), ConflictOption(value="B", rationale="rb")],
+            agent_suggestion="A",
+            agent_reasoning="because ra",
+            resolution=None,
+        )
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    md = render_preview_markdown(batch)
+    assert "⚠️ **c1**" in md
+    assert "UNRESOLVED" in md
+    assert "`A` (ra)" in md
+    assert "`B` (rb)" in md
+    assert "agent suggests: `A`" in md
+    assert "because ra" in md
+
+
+def test_preview_shows_resolved_conflict_with_checkmark():
+    p1 = make_person_create()
+    p1.conflicts.append(
+        Conflict(id="c1", field="c_name_chn", description="x", resolution="A")
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    md = render_preview_markdown(batch)
+    assert "✅ **c1**" in md
+    assert "resolved as `A`" in md
+    assert "UNRESOLVED" not in md
+
+
+def test_preview_offline_shows_not_fetched_for_update_proposal():
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="update", person_id=900001,
+        changes={"c_notes": "new text"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    md = render_preview_markdown(batch)  # no current_values supplied - Tier 1 only
+    assert "not fetched — offline preview" in md
+    assert "new text" in md
+
+
+def test_preview_create_proposal_never_shows_current_line():
+    """Create proposals have nothing to diff against - no 'current:' line at all,
+    even if current_values happens to have an (irrelevant) entry for it."""
+    p1 = make_person_create()
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    current_values = {p1.id: ProposalCurrentState(row={"c_name_chn": "should not appear"})}
+    md = render_preview_markdown(batch, current_values=current_values)
+    assert "should not appear" not in md
+    assert "current:" not in md
+
+
+def test_preview_with_live_diff_shows_current_and_proposed():
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="update", person_id=900001,
+        changes={"c_notes": "new text"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    current_values = {"p1": ProposalCurrentState(row={"c_notes": "old text"})}
+    md = render_preview_markdown(batch, current_values=current_values)
+    assert "current:  'old text'" in md
+    assert "proposed: 'new text'" in md
+
+
+def test_preview_with_live_diff_fetch_error_shown():
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="update", person_id=900001,
+        changes={"c_notes": "new text"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    current_values = {"p1": ProposalCurrentState(error="network unreachable")}
+    md = render_preview_markdown(batch, current_values=current_values)
+    assert "⚠️ could not fetch (network unreachable)" in md
+
+
+def test_preview_reuses_precomputed_issues_without_recomputing():
+    """Passing issues explicitly must be honored as-is (e.g. a caller that already
+    ran find_issues() once shouldn't need to re-run it, and a caller passing a
+    deliberately-filtered/empty issues list should see that reflected)."""
+    p1 = make_person_create(changes={"c_not_a_real_field": "x"})  # would normally error
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    md = render_preview_markdown(batch, issues=[])  # pretend it's clean
+    assert "ready to submit" in md
+    assert "NOT ready to submit" not in md
+
+
+def test_preview_empty_batch_renders_without_crashing():
+    batch = StagingBatch(batch_id="b1", proposals=[])
+    md = render_preview_markdown(batch)
+    assert "0 proposal(s)" in md
+    assert "ready to submit" in md
+
+
+def test_preview_proposal_with_no_changes_is_a_noop_for_the_changes_loop():
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="update", person_id=900001,
+        changes={}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    md = render_preview_markdown(batch)
+    assert "p1" in md
+    assert "current:" not in md
+    assert "proposed:" not in md
+
+
+def test_preview_conflict_with_empty_options_and_agent_suggestion():
+    p1 = make_person_create()
+    p1.conflicts.append(
+        Conflict(
+            id="c1", field="c_name_chn", description="x", options=[],
+            agent_suggestion="A", agent_reasoning=None, resolution=None,
+        )
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    md = render_preview_markdown(batch)
+    assert "options:" not in md  # empty options list must not render an "options:" line
+    assert "agent suggests: `A`" in md
+
+
+def test_preview_two_proposals_attribute_errors_to_the_correct_one():
+    """Regression test: each proposal's error section must only show ITS OWN
+    issues, never leak another proposal's errors into the wrong section."""
+    p1 = make_person_create(id_="p1", changes={"c_not_a_real_field": "x"})  # errors
+    p2 = make_person_create(id_="p2", person_id=900002)  # clean
+    batch = StagingBatch(batch_id="b1", proposals=[p1, p2])
+    issues = find_issues(batch)
+    md = render_preview_markdown(batch, issues=issues)
+
+    p1_section, _, p2_section = md.partition("### 2.")
+    assert "🛑 **error**" in p1_section
+    assert "🛑 **error**" not in p2_section
+
+
+def test_preview_multiline_source_quote_stays_on_one_bullet_line():
+    p1 = make_person_create()
+    p1.source_quote = "line one\nline two"
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    md = render_preview_markdown(batch)
+    # Must not contain a raw, unindented continuation line - the newline is
+    # collapsed to a space so it can't break out of the bullet's structure.
+    assert "line one line two" in md
+    assert "line one\nline two" not in md
+
+
+def test_preview_none_current_value_shown_as_empty_not_python_none():
+    p1 = Proposal(
+        id="p1", resource="basicinformation", operation="update", person_id=900001,
+        changes={"c_notes": "new text"}, source_quote="x", confidence="high",
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    current_values = {"p1": ProposalCurrentState(row={"c_notes": None})}
+    md = render_preview_markdown(batch, current_values=current_values)
+    assert "current:  _(empty)_" in md
+    assert "current:  None" not in md
+
+
+def test_preview_unattributed_issue_shown_in_its_own_section():
+    """An Issue whose proposal_id doesn't match any real proposal (e.g. a
+    batch-level cycle-detection finding) must still be visible somewhere, not
+    silently counted in the status line with no explanation anywhere."""
+    p1 = make_person_create()
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    stray_issue = Issue(proposal_id="does_not_exist", severity="error", message="stray finding")
+    md = render_preview_markdown(batch, issues=[stray_issue])
+    assert "1 error(s)" in md
+    assert "## Unattributed issues" in md
+    assert "stray finding" in md
+
+
+def test_preview_backtick_in_conflict_value_is_neutralized():
+    p1 = make_person_create()
+    p1.conflicts.append(
+        Conflict(
+            id="c1", field="c_name_chn", description="x",
+            options=[ConflictOption(value="a`b", rationale="r")],
+            resolution=None,
+        )
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    md = render_preview_markdown(batch)
+    assert "a`b" not in md  # backtick neutralized, doesn't leave an unbalanced code span
+    assert "a'b" in md
+
+
+def test_preview_backtick_in_resolution_is_neutralized():
+    p1 = make_person_create()
+    p1.conflicts.append(
+        Conflict(id="c1", field="c_name_chn", description="x", resolution="a`b\nc")
+    )
+    batch = StagingBatch(batch_id="b1", proposals=[p1])
+    md = render_preview_markdown(batch)
+    assert "a`b" not in md
+    assert "resolved as `a'b c`" in md
+
+
+def test_proposal_current_state_requires_exactly_one_of_row_or_error():
+    with pytest.raises(ValidationError):
+        ProposalCurrentState()  # neither set
+    with pytest.raises(ValidationError):
+        ProposalCurrentState(row={"a": 1}, error="oops")  # both set
+    ProposalCurrentState(row={"a": 1})  # ok
+    ProposalCurrentState(error="oops")  # ok
+    ProposalCurrentState(row={})  # ok - a genuinely empty (but fetched) row

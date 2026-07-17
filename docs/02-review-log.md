@@ -588,3 +588,41 @@ docs 00/01/03 — reported clean, with one minor editorial nit (the plan's heade
 still said "all 7 milestones implemented" despite §10 already showing Milestone 8
 as design-only) which was also fixed. Full suite green (130 tests, docs-only
 change).
+
+### Implementation — Increment 1: Tier 1 offline preview renderer
+
+Added `render_preview_markdown()` + `ProposalCurrentState` to `staging.py`: a
+pure, network-free Markdown summary of a staging batch (status line, per-proposal
+conflict highlighting with ⚠️/✅, options/agent-suggestion display), exactly as
+Tier 1 of `docs/06-staging-preview-design.md` §2 specifies. 22 new tests.
+
+#### Review-agent pass
+Findings: (1) issues whose `proposal_id` didn't match any real proposal (or was
+`None`) were silently dropped from the rendered body, only counted in the status
+line with no explanation anywhere; (2) a missing/`None` current value rendered as
+the literal text `None` instead of the design's `_(empty)_`; (3) `source_quote`/
+`conflict.description`/`agent_reasoning` were interpolated raw with no newline
+handling, unlike `source_excerpt`/`batch_notes`, so a multi-line value would break
+the bullet structure; (4) conflict option values/`agent_suggestion` containing a
+literal backtick could break the inline code span; (5) several test coverage gaps
+(zero proposals, multi-proposal issue attribution, empty `changes`, multi-line
+`source_quote`, empty options list, unattributed-issues section); (6) a minor
+label-spacing inconsistency.
+
+Resolution: added an `## Unattributed issues` fallback section; added
+`_preview_value()` (renders `None` as `_(empty)_`) and `_preview_inline()`
+(collapses newlines, neutralizes backticks), applied consistently; added all 7
+missing tests; fixed the spacing inconsistency. All 6 confirmed fixed by a
+follow-up Explore-agent pass; full suite green (152 tests at that point).
+
+#### codex exec pass
+Finding: the resolved-conflict status line (`` resolved as `{conflict.resolution}` ``)
+still interpolated `resolution` raw, unlike option values/`agent_suggestion` which
+already went through `_preview_inline()` — same backtick/newline risk, just missed
+on this one line. Minor: `ProposalCurrentState`'s docstring claimed "never both
+set" for `row`/`error` but nothing enforced it.
+
+Resolution: routed the resolution status line through `_preview_inline()` too;
+added a `model_validator(mode="after")` enforcing exactly one of `row`/`error` is
+set on `ProposalCurrentState`. Added regression tests for both. A follow-up codex
+pass confirmed both fixed — reported clean. Full suite green (152 tests).
