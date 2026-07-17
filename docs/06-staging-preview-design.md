@@ -1,7 +1,9 @@
-# Staging Batch Preview — Design (not yet implemented)
+# Staging Batch Preview — Design
 
-Status: design only, no code. This is Milestone 8 — see `01-implementation-plan.md`
-§10. Written after a real review friction point during actual use (2026-07-17,
+Status: implemented and reviewed (Tier 1, Tier 2, and CLI integration). This is
+Milestone 8 — see `01-implementation-plan.md` §10 and `docs/02-review-log.md`'s
+Milestone 8 entry for the implementation/review history. Written after a real
+review friction point during actual use (2026-07-17,
 the 陳俊卿/陳文龍 kinship-note batch): reviewing a staging batch by opening its raw
 YAML meant manually cross-referencing nested `conflicts[].options[]`, and manually
 having to remember to check the *current* server value of a field before trusting

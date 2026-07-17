@@ -664,3 +664,47 @@ Resolution: changed the check from `if row is None:` to
 regression test. A follow-up codex pass confirmed the fix closes the gap, found
 no other similar gaps, and confirmed the new test genuinely exercises the fixed
 path. Full suite green (162 tests).
+
+### Implementation — Increment 3: CLI integration
+
+Wired both tiers into `cli.py` per `docs/06-staging-preview-design.md` §3:
+`validate --staging <path>` now also writes/refreshes `preview.md` next to the
+staging YAML on every run via a new `_write_preview()` helper. Tier 2's live
+diff is attempted only if `load_config()` succeeds; any `ConfigError` falls
+back to a Tier-1-only (offline) preview. A separate, narrower `except OSError`
+guards the actual file write so a disk error only prints a warning rather than
+affecting `validate`'s exit code. `--env` was added to the `validate`
+subcommand's parser (previously `submit`-only) so Tier 2 can point at a
+non-default `.env`. `validate --input` deliberately skips preview generation —
+there's no "next to the file" location for a JSON input batch the way there is
+for a staging YAML. 4 new tests, plus one pre-existing test updated to pass an
+explicit `--env` now that `validate --staging` touches `load_config()`.
+
+#### Review-agent pass
+Findings: none must-fix. One nice-to-have — the original `except Exception`
+guarding Tier 2 was broader than necessary, since `fetch_current_values()`
+already never raises internally; only `load_config()`'s `ConfigError` can
+realistically reach that except.
+
+Resolution: narrowed `except Exception` to `except ConfigError`, matching
+`cmd_submit`'s existing error-handling convention. This required updating one
+pre-existing Increment-1 test (`test_validate_staging_unresolved_conflict_
+still_returns_zero`) to pass an explicit `--env`, since it predated
+`_write_preview()` and previously never touched `load_config()` at all — without
+the narrowing, this went unnoticed because the old broad `except Exception` had
+been silently swallowing the test-only ambient-dotenv-lookup guard's
+`AssertionError` (see `conftest.py`'s `_forbid_ambient_dotenv_lookup`). Full
+suite green (166 tests).
+
+#### codex exec pass
+Findings: none must-fix. Confirmed the `ConfigError` narrowing is safe (checked
+`AuditLog.__init__`/`HttpClient.__init__`/`MutationApi.__init__` — none raise
+anything else), confirmed the preview path/OSError guard/`--input` skip all
+match the design. One nice-to-have (env var leakage risk in the "without env"
+test) was already covered by `conftest.py`'s existing autouse
+`_clean_cbdb_env` fixture, so no change needed. Full suite green (166 tests).
+
+Milestone 8 (staging batch preview) is now fully implemented: Tier 1, Tier 2,
+and CLI integration are all done and reviewed. Tier 3 (optional Artifact
+rendering) is explicitly out of scope for the Python package per the design
+doc's §2 — it's documented as agent-level `SKILL.md` behavior, not code.

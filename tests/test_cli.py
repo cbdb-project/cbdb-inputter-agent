@@ -88,11 +88,107 @@ def test_validate_staging_unresolved_conflict_still_returns_zero(tmp_path, capsy
         ),
         encoding="utf-8",
     )
-    rc = cli.main(["validate", "--staging", str(staging_path)])
+    # --env points at a nonexistent path so this test doesn't depend on (or try
+    # to load) any real .env - preview.md's Tier 2 live diff isn't what this
+    # test is about; see test_validate_staging_writes_preview_md_without_env.
+    rc = cli.main(
+        ["validate", "--staging", str(staging_path), "--env", str(tmp_path / "does-not-exist.env")]
+    )
     # unresolved conflicts are reported but don't fail `validate` per docs/03 sec 2.5
     assert rc == 0
     out = capsys.readouterr().out
     assert "unresolved_conflict" in out
+
+
+def _write_kinship_staging(tmp_path):
+    staging_path = tmp_path / "proposal.yaml"
+    staging_path.write_text(
+        yaml.safe_dump(
+            {
+                "batch_id": "b1",
+                "proposals": [
+                    {
+                        "id": "p1",
+                        "resource": "kinship",
+                        "operation": "update",
+                        "person_id": 900001,
+                        "target_pk": {"c_kin_id": 900002, "c_kin_code": 243},
+                        "changes": {"c_notes": "new note"},
+                        "source_quote": "x",
+                        "confidence": "high",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return staging_path
+
+
+def test_validate_staging_writes_preview_md_without_env(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    staging_path = _write_kinship_staging(tmp_path)
+    # --env points at a path with nothing there: load_config() raises ConfigError
+    # (missing CBDB_API_BASE_URL) - _write_preview must swallow it and still
+    # write a Tier-1-only preview rather than letting `validate` crash.
+    rc = cli.main(["validate", "--staging", str(staging_path), "--env", str(tmp_path / "does-not-exist.env")])
+    assert rc == 0
+    preview_path = staging_path.parent / "preview.md"
+    assert preview_path.exists()
+    content = preview_path.read_text(encoding="utf-8")
+    assert "b1" in content
+    assert "not fetched — offline preview" in content
+    assert "Preview written to" in capsys.readouterr().out
+
+
+@responses.activate
+def test_validate_staging_writes_preview_md_with_live_diff(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    env_path = write_env(tmp_path)
+    staging_path = _write_kinship_staging(tmp_path)
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/get",
+        json={"ok": True, "result": {"row": {"c_notes": "old note"}}},
+        status=200,
+    )
+    rc = cli.main(["validate", "--staging", str(staging_path), "--env", str(env_path)])
+    assert rc == 0
+    content = (staging_path.parent / "preview.md").read_text(encoding="utf-8")
+    assert "old note" in content
+    assert "new note" in content
+
+
+def test_validate_staging_preview_falls_back_when_env_is_broken(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # Malformed .env (missing the required CBDB_API_BASE_URL) - load_config()
+    # raises ConfigError; _write_preview must swallow it and still write a
+    # Tier-1-only preview rather than letting `validate` crash.
+    env_path = write_env(tmp_path, CBDB_API_BASE_URL="")
+    staging_path = _write_kinship_staging(tmp_path)
+    rc = cli.main(["validate", "--staging", str(staging_path), "--env", str(env_path)])
+    assert rc == 0
+    content = (staging_path.parent / "preview.md").read_text(encoding="utf-8")
+    assert "not fetched — offline preview" in content
+
+
+def test_validate_input_does_not_write_preview(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    input_path = write_input_json(
+        tmp_path,
+        [
+            {
+                "id": "p1",
+                "resource": "basicinformation",
+                "operation": "create",
+                "person_id": 900001,
+                "changes": {"c_name_chn": "x"},
+            }
+        ],
+    )
+    rc = cli.main(["validate", "--input", str(input_path)])
+    assert rc == 0
+    assert not (tmp_path / "preview.md").exists()
 
 
 def test_submit_requires_staging_or_input(capsys):
