@@ -813,3 +813,52 @@ Independently re-verified the same claims (milestone count, `--env` on both
 subcommands, the 167 test count via `rg` since `grep` wasn't available in this
 PowerShell environment). No must-fix or nice-to-have issues. Full suite green
 (167 tests, docs-only change).
+
+## Real-world finding — kinship/associations c_notes mirror-sync (2026-07-17)
+
+Discovered while actually submitting a real data correction (the 陳俊卿/陳文龍
+kinship-note batch, prepared earlier this session) end-to-end: first to a local
+test instance, then to production. Two proposals in one batch wrote *different*
+`c_notes` text to the two directions of the same `kinship` pair
+(`c_kin_code=243`/`62`); both mutate calls returned `200 ok:true`, but a
+follow-up `GET` on both rows showed identical (and, for one direction,
+backwards-reading) content — the second write's server-side mirror sync had
+silently overwritten the first's. Root-caused by reading the target repo's
+source directly: `KinshipMutationHandler::afterDirectUpdate()` (and the
+equivalent in `AssociationMutationHandler.php` for `associations`) propagates
+`c_notes`/`c_source`/`c_pages` (+ assoc year fields) to the mirror row on every
+direct update; the server's own conflict-detection guard doesn't catch two
+same-batch writes racing each other, because each write's baseline is computed
+*after* the other's mirror-sync already ran.
+
+Recovered by rewriting both proposals to write identical, unified text (so the
+mirror sync becomes a no-op regardless of write order), re-submitting locally
+to fix the corrupted test data, then separately building a proper
+`data/staging/2026-07-17-prod-kinship-note-append/proposal.yaml` (single
+proposal, single direction — relying on the confirmed mirror-sync to propagate
+to the other) to append this finding's own citation to the *production*
+record's pre-existing `c_notes` (added by Hongsu Wang on 2026-06-18, listing
+several sources' differing terms) — verified byte-for-byte preservation of the
+existing text before appending (it contained U+00A0 non-breaking spaces at two
+spots, not plain spaces) and confirmed via a live `GET` on both directions that
+the append landed correctly and identically on both.
+
+Documented in `AGENTS.md` (new "Reverse-pair mirror sync" section) and
+`skills/cbdb-data-entry/SKILL.md` (a pointer bullet under "Hard constraints"),
+per the same principle as every other stopping-point-of-friction being written
+down that has been applied all session: check both directions of a `kinship`/
+`associations` pair before writing shared content fields; if they already
+diverge, get a human decision rather than letting write order silently decide.
+
+### Review-agent pass
+No issues found. Independently traced the exact race condition through the
+target repo's actual `conflictBaselines()`/mirror-sync code to confirm the
+documented mechanism is correct; confirmed the `CONTENT_CONFLICT_FIELDS` lists
+match; confirmed the guidance stays scoped to `kinship`/`associations` with no
+overclaim to other resources; confirmed SKILL.md's pointer doesn't drift from
+what AGENTS.md actually says.
+
+### codex exec pass
+Independently re-verified the same points from the target repo's source and
+this client's `mutation_api.py`. No must-fix or nice-to-have issues. Full
+suite green (167 tests, docs-only change).
