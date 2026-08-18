@@ -16,6 +16,9 @@ Start here:
 - [`docs/00-target-system-brief.md`](docs/00-target-system-brief.md) — what we know
   about the target system's auth, API, and audit logging (includes facts confirmed
   live against a real instance during Milestone 7).
+- [`docs/07-api-md-digest.md`](docs/07-api-md-digest.md) — the target system's own
+  `API.md` (which is under continuing revision upstream), digested down to what
+  actually binds this client, with a sync stamp and a re-sync procedure.
 - [`docs/01-implementation-plan.md`](docs/01-implementation-plan.md) — this repo's
   architecture and milestone-by-milestone build plan.
 - [`docs/03-extraction-review-workflow.md`](docs/03-extraction-review-workflow.md) —

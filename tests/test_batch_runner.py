@@ -491,3 +491,216 @@ def test_fetch_current_values_uses_full_merged_target_pk_for_multi_field_pk(tmp_
     sent = json.loads(captured["body"])
     assert sent["target"]["pk"] == {"c_personid": 900001, "c_kin_id": 900002, "c_kin_code": 243}
     assert sent["person_id"] == 900001
+
+
+# --- auth failure aborts the batch --------------------------------------------
+# AGENTS.md rule 10 / API.md 1.3: failed Bearer attempts are counted per SOURCE
+# IP at 60/minute and shared with every other client behind the same egress IP.
+# Isolating a 401 per-record would turn one dead token into N failed attempts.
+
+
+def _altname(pid, person_id=5000):
+    return Proposal(
+        id=pid,
+        resource="altnames",
+        operation="create",
+        person_id=person_id,
+        changes={"c_alt_name_chn": "\u5b57", "c_alt_name_type_code": 4},
+        source_quote="q",
+        confidence="high",
+    )
+
+
+@responses.activate
+def test_run_batch_aborts_the_whole_batch_on_401(tmp_path):
+    api = make_api(tmp_path)
+    responses.add(
+        responses.POST,
+        "http://localhost:8000/api/v2/create",
+        json={"ok": False, "message": "Invalid API token."},
+        status=401,
+    )
+    batch = StagingBatch(
+        batch_id="b", proposals=[_altname("p1"), _altname("p2"), _altname("p3")]
+    )
+    results = run_batch(batch, api)
+
+    assert [r.status for r in results] == [
+        "failed",
+        "skipped_auth_aborted",
+        "skipped_auth_aborted",
+    ]
+    # Exactly ONE request was sent, not one per proposal - that's the whole point.
+    assert len(responses.calls) == 1
+    assert "authentication/authorization failed" in results[1].error
+    assert "p1" in results[1].error  # names which proposal stopped the batch
+
+
+@responses.activate
+def test_run_batch_aborts_the_whole_batch_on_403(tmp_path):
+    """403 = account not active / lacks canWriteDirectly(): also batch-wide."""
+    api = make_api(tmp_path)
+    responses.add(
+        responses.POST,
+        "http://localhost:8000/api/v2/create",
+        json={"ok": False, "message": "\u5e33\u865f\u672a\u555f\u7528\u6216\u5df2\u505c\u7528\u3002"},
+        status=403,
+    )
+    batch = StagingBatch(batch_id="b", proposals=[_altname("p1"), _altname("p2")])
+    results = run_batch(batch, api)
+    assert [r.status for r in results] == ["failed", "skipped_auth_aborted"]
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_run_batch_still_isolates_a_409_per_record(tmp_path):
+    """Guard the opposite direction: a data conflict must NOT abort the batch."""
+    api = make_api(tmp_path)
+    responses.add(
+        responses.POST,
+        "http://localhost:8000/api/v2/create",
+        json={"ok": False, "errors": {"target.pk": ["conflict"]}},
+        status=409,
+    )
+    responses.add(
+        responses.POST,
+        "http://localhost:8000/api/v2/create",
+        json={"ok": True, "result": {"pk": {}, "operation_id": 1}},
+        status=200,
+    )
+    batch = StagingBatch(batch_id="b", proposals=[_altname("p1"), _altname("p2")])
+    results = run_batch(batch, api)
+    assert [r.status for r in results] == ["failed", "success"]
+
+
+@responses.activate
+def test_fetch_current_values_stops_probing_after_one_auth_failure(tmp_path):
+    api = make_api(tmp_path)
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/get",
+        json={"ok": False, "message": "Invalid API token."},
+        status=401,
+    )
+    updates = [
+        Proposal(
+            id=f"p{i}",
+            resource="altnames",
+            operation="update",
+            person_id=5000,
+            target_pk={"c_alt_name_chn": "\u5b57", "c_alt_name_type_code": 4},
+            changes={"c_notes": "n"},
+            source_quote="q",
+            confidence="high",
+        )
+        for i in range(1, 4)
+    ]
+    states = fetch_current_values(StagingBatch(batch_id="b", proposals=updates), api)
+
+    assert len(responses.calls) == 1  # not one 401 per proposal
+    assert set(states) == {"p1", "p2", "p3"}
+    assert all("live diff unavailable" in s.error for s in states.values())
+
+
+@responses.activate
+def test_auth_failure_during_person_id_allocation_aborts_the_batch(tmp_path):
+    """allocate_person_id() makes AUTHENTICATED reads before any write happens.
+
+    A batch of N "NEW" persons with a dead token would otherwise produce N
+    failed-auth attempts without ever sending a mutating request - the exact
+    shared-per-IP-budget harm AGENTS.md rule 10 exists to prevent.
+    """
+    api = make_api(tmp_path)
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/persons",
+        json={"ok": False, "message": "Invalid API token."},
+        status=401,
+    )
+    people = [
+        Proposal(
+            id=f"person{i}",
+            resource="basicinformation",
+            operation="create",
+            person_id="NEW",
+            changes={"c_name_chn": "\u738b", "c_dy": 18},
+            source_quote="q",
+            confidence="high",
+        )
+        for i in range(1, 4)
+    ]
+    results = run_batch(StagingBatch(batch_id="b", proposals=people), api)
+
+    assert [r.status for r in results] == [
+        "failed",
+        "skipped_auth_aborted",
+        "skipped_auth_aborted",
+    ]
+    assert len(responses.calls) == 1  # one lookup, not one per person
+    assert "person1" in results[2].error
+
+
+@responses.activate
+def test_auth_failure_on_the_last_proposal_leaves_earlier_successes_intact(tmp_path):
+    api = make_api(tmp_path)
+    responses.add(
+        responses.POST,
+        "http://localhost:8000/api/v2/create",
+        json={"ok": True, "result": {"pk": {}, "operation_id": 1}},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        "http://localhost:8000/api/v2/create",
+        json={"ok": False, "message": "Invalid API token."},
+        status=401,
+    )
+    batch = StagingBatch(batch_id="b", proposals=[_altname("p1"), _altname("p2")])
+    results = run_batch(batch, api)
+    # Nothing left to skip - the abort must not invent phantom results.
+    assert [r.status for r in results] == ["success", "failed"]
+    assert len(results) == 2
+
+
+@responses.activate
+def test_auth_abort_marks_dependent_subresources_as_auth_skipped(tmp_path):
+    """A person create succeeds, then the token dies on its first sub-resource.
+
+    The remaining sub-resources must report the AUTH reason, not the misleading
+    "a sibling proposal this one depends on did not succeed" - the parent create
+    did succeed.
+    """
+    api = make_api(tmp_path)
+    mock_persons_page(max_id=900000)
+    mock_get_not_taken()
+    responses.add(
+        responses.POST,
+        "http://localhost:8000/api/v2/create",
+        json={"ok": True, "result": {"pk": {"c_personid": 900001}, "operation_id": 1}},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        "http://localhost:8000/api/v2/create",
+        json={"ok": False, "message": "Invalid API token."},
+        status=401,
+    )
+    person = Proposal(
+        id="person1",
+        resource="basicinformation",
+        operation="create",
+        person_id="NEW",
+        changes={"c_name_chn": "\u738b", "c_dy": 18},
+        source_quote="q",
+        confidence="high",
+    )
+    batch = StagingBatch(
+        batch_id="b",
+        proposals=[person, _altname("a1", person_id="person1"), _altname("a2", person_id="person1")],
+    )
+    results = run_batch(batch, api)
+    by_id = {r.proposal_id: r for r in results}
+    assert by_id["person1"].status == "success"
+    assert by_id["a1"].status == "failed"
+    assert by_id["a2"].status == "skipped_auth_aborted"
+    assert "authentication/authorization failed" in by_id["a2"].error

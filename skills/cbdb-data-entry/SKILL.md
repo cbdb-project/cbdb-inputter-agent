@@ -141,9 +141,21 @@ does when invoked this way:
 
 ## Hard constraints from AGENTS.md (do not relax them for this skill)
 
-- Only `/api/v2/create|mutate|delete|get` (`mode: "direct"` for writes) and the
-  read-only `/api/v2/persons`/`/api/v2/operations` — never legacy `/basicinformation/*`
-  routes or other undocumented endpoints.
+- For **writes**: only `/api/v2/create|mutate|delete` with `mode: "direct"`, plus
+  `/api/v2/get` — never legacy `/basicinformation/*` routes or other undocumented
+  endpoints. For **reads**, additionally allowed: `/api/v2/persons`,
+  `/api/v2/operations`, and the public code-lookup endpoints (`/api/v2/texts`,
+  `/api/select/*`, `/api/code/addr`, `/api/name`) used to turn a book title, place
+  name or office name into a code. Call those with `get(..., public=True)` so a stale
+  token can't turn them into failed-auth attempts, and treat whatever they return as a
+  **suggested** code that still goes through staging review — never straight into a
+  `changes` payload. See AGENTS.md rule 1 and `docs/07-api-md-digest.md` §2.1.
+- **Never create a code-table row or an entity aggregate (`text-codes`, `office`,
+  `social-institution`, `merged-person`) to unblock a batch.** If a book title or
+  office code the source needs doesn't exist, that is a *finding to report to the
+  user*, with the evidence — they decide. These writes are global, referenced by
+  potentially tens of thousands of person rows, and have **no delete path**
+  (AGENTS.md rule 12).
 - `c_personid` is client-assigned — for a `"NEW"` proposal, only
   `batch_runner.allocate_person_id()` may pick the real value (it's the only code
   path that calls `person_id.py`'s validation/existence checks); for a

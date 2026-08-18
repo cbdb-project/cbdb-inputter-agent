@@ -399,3 +399,223 @@ def test_rate_limiter_no_wait_if_interval_already_elapsed():
     clock_time[0] += 5.0  # plenty of time has passed
     limiter.wait_for_slot()
     assert sleeps == []
+
+
+# --- public (credential-less) lookup endpoints -------------------------------
+# API.md 14.1/14.4 + AGENTS.md rules 1 and 10: these endpoints need no token, and
+# sending a stale one both fails and spends the shared per-source-IP failed-auth
+# budget. See docs/07-api-md-digest.md 1.4, 2.1.
+
+
+@responses.activate
+def test_public_get_sends_no_authorization_header(tmp_path):
+    client, _ = make_client(tmp_path)
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/dynasty", json=[], status=200
+    )
+    client.get("/api/select/dynasty", public=True)
+    assert "Authorization" not in responses.calls[0].request.headers
+    # Accept stays required even without credentials (API.md 1.4).
+    assert responses.calls[0].request.headers["Accept"] == "application/json"
+
+
+@responses.activate
+def test_non_public_get_still_sends_the_token(tmp_path):
+    """Guard against public=True becoming the accidental default."""
+    client, _ = make_client(tmp_path)
+    responses.add(
+        responses.GET, "http://localhost:8000/api/v2/get", json={"ok": True}, status=200
+    )
+    client.get("/api/v2/get")
+    assert responses.calls[0].request.headers["Authorization"] == "Bearer test-token"
+
+
+def test_public_is_rejected_for_a_mutating_request(tmp_path):
+    client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
+    with pytest.raises(ValueError, match="public=True is not allowed"):
+        client.post("/api/v2/create", json_body={}, mutating=True, public=True)
+
+
+@responses.activate
+def test_bare_array_response_is_wrapped_under_raw(tmp_path):
+    """Whole code tables return a bare JSON array, not the v2 object envelope."""
+    client, _ = make_client(tmp_path)
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/select/dynasty",
+        json=[{"c_dy": 18, "c_dynasty_chn": "\u5143"}],
+        status=200,
+    )
+    body = client.get("/api/select/dynasty", public=True)
+    assert body == {"raw": [{"c_dy": 18, "c_dynasty_chn": "\u5143"}]}
+
+
+@responses.activate
+def test_lookup_paths_are_classified_read_only(tmp_path):
+    """_check_mutating_flag must now fail closed on the lookup endpoints too."""
+    client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
+    for path in ("/api/v2/texts", "/api/select/search/text", "/api/code/addr", "/api/name"):
+        with pytest.raises(MutatingFlagMismatch):
+            client.post(path, json_body={}, mutating=True)
+
+
+@responses.activate
+def test_public_response_is_truncated_in_the_audit_log(tmp_path):
+    """logs/*.jsonl is append-only (rule 8), so a whole code table must not land
+    in it verbatim - but the row count and the envelope's other keys must survive.
+    """
+    from cbdb_agent.http_client import PUBLIC_RESPONSE_LOG_MAX_ROWS
+
+    client, audit_log = make_client(tmp_path)
+    rows = [{"c_dy": i} for i in range(PUBLIC_RESPONSE_LOG_MAX_ROWS + 40)]
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/dynasty", json=rows, status=200
+    )
+    body = client.get("/api/select/dynasty", public=True)
+
+    # The CALLER still gets every row - truncation is logging-only.
+    assert len(body["raw"]) == PUBLIC_RESPONSE_LOG_MAX_ROWS + 40
+
+    # The log stores the SUMMARIZED body directly. The {"raw": ...} wrapper is a
+    # return-shape concern of get() (its contract is a dict), not a log format.
+    logged = read_audit_records(audit_log)[0]["response_payload"]
+    assert logged["_truncated"] is True
+    assert logged["total_rows"] == PUBLIC_RESPONSE_LOG_MAX_ROWS + 40
+    assert len(logged["rows"]) == PUBLIC_RESPONSE_LOG_MAX_ROWS
+
+
+@responses.activate
+def test_paginator_response_keeps_sibling_keys_when_truncated(tmp_path):
+    from cbdb_agent.http_client import PUBLIC_RESPONSE_LOG_MAX_ROWS
+
+    client, audit_log = make_client(tmp_path)
+    rows = [{"c_addr_id": i} for i in range(PUBLIC_RESPONSE_LOG_MAX_ROWS + 3)]
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/code/addr",
+        json={"current_page": 1, "data": rows, "total": 999},
+        status=200,
+    )
+    client.get("/api/code/addr", params={"q": "x"}, public=True)
+    logged = read_audit_records(audit_log)[0]["response_payload"]
+    assert logged["total"] == 999  # the interpretable metadata is preserved
+    assert logged["data"]["total_rows"] == PUBLIC_RESPONSE_LOG_MAX_ROWS + 3
+
+
+@responses.activate
+def test_v2_responses_are_never_truncated(tmp_path):
+    """Only public lookups are summarized; the audit trail for /api/v2/* stays full."""
+    from cbdb_agent.http_client import PUBLIC_RESPONSE_LOG_MAX_ROWS
+
+    client, audit_log = make_client(tmp_path)
+    rows = [{"c_personid": i} for i in range(PUBLIC_RESPONSE_LOG_MAX_ROWS + 10)]
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/persons",
+        json={"ok": True, "data": rows},
+        status=200,
+    )
+    client.get("/api/v2/persons")
+    logged = read_audit_records(audit_log)[0]["response_payload"]
+    assert len(logged["data"]) == PUBLIC_RESPONSE_LOG_MAX_ROWS + 10
+
+
+# --- rate limiter: serialization, not just spacing ---------------------------
+# API.md 1.3: "等上一個請求回應之後再發下一個" - wait for the PREVIOUS RESPONSE.
+
+
+def test_slot_measures_the_interval_from_the_previous_response_not_its_start():
+    """A slow request must delay the next one by its own duration + the interval.
+
+    wait_for_slot()'s old behaviour stamped the clock BEFORE the request, so a
+    3-second request would be followed immediately by the next one - two requests
+    inside one second, which is exactly what the contract forbids.
+    """
+    now = [0.0]
+    slept = []
+
+    def clock():
+        return now[0]
+
+    def sleep(seconds):
+        slept.append(seconds)
+        now[0] += seconds
+
+    limiter = RateLimiter(60, clock=clock, sleep=sleep)  # 1/sec
+    with limiter.slot():
+        now[0] += 3.0  # the request itself takes 3 seconds
+    assert slept == []  # first call never waits
+
+    with limiter.slot():
+        pass
+    # Interval counted from t=3.0 (completion), so a full 1.0s wait is required.
+    assert slept == [1.0]
+
+
+def test_slot_stamps_completion_even_when_the_request_raises():
+    """A burst of connection errors must not become a burst of retries at full speed."""
+    now = [0.0]
+    slept = []
+
+    def clock():
+        return now[0]
+
+    def sleep(seconds):
+        slept.append(seconds)
+        now[0] += seconds
+
+    limiter = RateLimiter(60, clock=clock, sleep=sleep)
+    with pytest.raises(RuntimeError):
+        with limiter.slot():
+            raise RuntimeError("connection reset")
+    with limiter.slot():
+        pass
+    assert slept == [1.0]
+
+
+def test_slot_holds_the_lock_for_the_duration_of_the_request():
+    """A second thread must not send while the first thread's request is in flight."""
+    import threading
+
+    limiter = RateLimiter(6000)  # negligible interval; the lock is what's under test
+    inside = threading.Event()
+    release = threading.Event()
+    overlapped = []
+
+    def first():
+        with limiter.slot():
+            inside.set()
+            release.wait(timeout=5)
+
+    def second():
+        inside.wait(timeout=5)
+        # If slot() did not hold a lock, this would acquire immediately while
+        # `first` is still inside its own slot.
+        acquired = limiter._lock.acquire(timeout=0.2)
+        overlapped.append(acquired)
+        if acquired:
+            limiter._lock.release()
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    t2.start()
+    t2.join(timeout=5)
+    release.set()
+    t1.join(timeout=5)
+
+    assert overlapped == [False], "a concurrent caller got a slot mid-request"
+
+
+@responses.activate
+def test_request_path_uses_slot_so_retries_are_also_spaced(tmp_path):
+    """The retry loop must go through the limiter on every attempt, not just the first."""
+    sleeps = []
+    client, _ = make_client(tmp_path, sleep=sleeps.append)
+    for _ in range(3):
+        responses.add(
+            responses.GET, "http://localhost:8000/api/v2/get", json={}, status=500
+        )
+    with pytest.raises(ServerError):
+        client.get("/api/v2/get")
+    assert len(responses.calls) == 3

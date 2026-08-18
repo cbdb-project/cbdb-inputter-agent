@@ -862,3 +862,91 @@ what AGENTS.md actually says.
 Independently re-verified the same points from the target repo's source and
 this client's `mutation_api.py`. No must-fix or nice-to-have issues. Full
 suite green (167 tests, docs-only change).
+
+---
+
+## API.md sync 2026-08-18 — record the target system's published API spec
+
+Scope: the user pointed at the target system's own `API.md`
+(<https://github.com/cbdb-project/cbdb-online-main-server/blob/develop/API.md>), noted it
+**keeps being updated**, and asked for it to be recorded in `AGENTS.md`. Synced against
+`origin/develop` `fd747aba` / blob `948585d1` (2026-08-18). Delivered as a new derived
+doc `docs/07-api-md-digest.md` (with a sync stamp + re-sync procedure) plus binding
+restatements in `AGENTS.md`: hard rule 1 extended with the read-only lookup endpoints,
+and new hard rules 9 (write rate ceiling), 10 (never retry a 401), 11 (`ok: true` ≠
+written), 12 (code-table / entity-aggregate writes need explicit approval).
+
+Two code changes fell out of the review, both fixing gaps the doc work exposed:
+- `http_client.py`: `get()/post()` gained `public=True` (sends no credentials, for the
+  public lookup endpoints); lookup paths added to `_KNOWN_READ_ONLY_PATHS`; bulk lookup
+  responses summarized before entering the append-only audit log; `RateLimiter.slot()`
+  added — a locking context manager that stamps completion, so "serialized" is now
+  actually implemented rather than assumed.
+- `batch_runner.py`: 401/403 now abort the whole batch (`_ABORTING_ERRORS`) instead of
+  being isolated per proposal, in the write stage, the person-ID-allocation stage, and
+  `fetch_current_values()`.
+
+167 → 191 tests.
+
+### Review-agent pass (two agents: upstream fact-check, internal consistency)
+Findings — 2 SERIOUS, 11 MINOR from the fact-checker; 2 SERIOUS, ~14 MINOR from the
+consistency reviewer. The ones worth remembering:
+1. **SERIOUS (fact)** — the digest claimed `kinship.update` *never* back-fills a missing
+   mirror row. `API.md` §9.8 does say that, but §12.2/§12.4 carve out the **pair-only**
+   repair path (`changes` = `c_kinship_pair` alone, no `KIN_DATA` column), which **does**
+   back-fill — i.e. it can insert a row under a person you weren't editing. Reading §9.8
+   alone is the trap; the digest author fell into it. Fixed in the digest and written
+   into `AGENTS.md`'s reverse-pair section, since this repo already writes `kinship`
+   against production.
+2. **SERIOUS (fact)** — the digest justified not implementing `batch_mutate` by
+   referring to "the 18-person batch in `data/staging/`", which does not exist. Removed;
+   a fabricated supporting detail is worse than no justification.
+3. **SERIOUS (code)** — `batch_runner.run_batch()` caught `AuthenticationError` under its
+   per-record isolation handler, so one dead token became one failed-auth attempt *per
+   proposal*. Since `API.md` §1.3's failed-auth cap is counted **per source IP** and
+   shared with every other Bearer client behind the same NAT, that is other people's
+   blast radius, not just ours. Now aborts.
+4. **SERIOUS (code)** — no way to make an unauthenticated call, on exactly the public
+   lookup endpoints rule 1 had just legalized: a stale token would turn harmless code
+   lookups into failed-auth attempts. Added `public=True`.
+Also fixed: a self-inconsistent sync stamp (blob SHA from `origin/develop`, line count
+from the stale local HEAD — evidence the body had been drafted against the wrong file);
+an unhedged "the write endpoints never 429"; `is_admin` described as a boolean when it is
+a 4-valued role code (`2` = crowdsourcing, i.e. *not* direct-capable — reading it as a
+boolean inverts the answer); "a wrong `TEXT_CODES` row cannot be cleaned up" (it is
+un-*deletable*, but `c_title` is updatable); `opposite-edges` mis-filed as a
+proposal-amendment endpoint (it is a read-only mirror probe); the code-table delete
+refusal being table × *mode*, not table alone; `SKILL.md` still restating the
+pre-change rule 1 as authoritative; and `docs/00`'s three "rate limit unspecified"
+statements, now settled and propagated.
+
+### codex exec pass
+Findings — 2 SERIOUS, 2 MINOR:
+1. **SERIOUS** — the auth-abort fix missed the **person-ID allocation stage**:
+   `allocate_person_id()` makes authenticated reads (`GET /api/v2/persons`,
+   `GET /api/v2/get`), and its failure was still caught by the broad
+   `(CbdbApiError, PersonIdError)` handler. A batch of N `person_id: NEW` creates would
+   therefore still emit N 401s *before sending a single write*. Fixed; the skip-remainder
+   logic is now one helper (`_skip_rest_of_batch`) shared by both stages, indexed by
+   loop **position** rather than `order.index(proposal)` — `Proposal` is a pydantic model
+   with structural equality, so two value-identical proposals would have mis-sliced the
+   remainder.
+2. **SERIOUS** — the "serialized" claim was not actually implemented: `RateLimiter` had
+   no lock and stamped `_last_call` *before* the request, so a 3-second request could be
+   followed immediately by the next one, and a synchronous `Session` is not a
+   cross-thread serialization mechanism. Upstream is explicit —
+   「等上一個請求回應之後再發下一個」. Added `RateLimiter.slot()`: holds a lock for the
+   duration of the send and stamps the clock on completion (in a `finally`, so a failed
+   request still counts and an error burst can't become a full-speed retry burst).
+3. MINOR — the digest still described the `sources` alias gap as an outstanding
+   contradiction after the same pass had already fixed `docs/04`. Reworded.
+4. MINOR — missing coverage for auth failure at allocation, on the *last* proposal, and
+   after a successful parent create with dependents. All three added.
+codex confirmed no further factual errors in the digest sections it re-checked
+(§1.2, §1.5, §1.7, §2.1, §2.2, §3) against `origin/develop:API.md`.
+
+### Sign-off
+191 tests green. One process note worth keeping: the fact-checking agent caught that the
+digest's line count came from the *stale local HEAD* while its blob SHA came from
+`origin/develop` — the local checkout was 2 commits behind. When re-syncing, read
+`git show origin/develop:API.md`, not the working tree.
