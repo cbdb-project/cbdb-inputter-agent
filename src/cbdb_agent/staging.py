@@ -23,7 +23,12 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .models import FieldWhitelistError, find_spec_by_alias, get_resource_spec
+from .models import (
+    FieldWhitelistError,
+    find_spec_by_alias,
+    get_resource_spec,
+    is_missing_value,
+)
 
 STAGING_PERSONID_FIELD = "c_personid"
 
@@ -40,7 +45,14 @@ class StagingError(ValueError):
 
 
 class ConflictOption(BaseModel):
-    value: str | int | float
+    # `Any`, not docs/03 section 2.5's literal str|int|float. A conflict can be about
+    # ANY field a proposal can set, and Proposal.changes was already loosened to
+    # dict[str, Any] for exactly this reason: the address pseudo-fields are LISTS
+    # (postings' c_addr, events'/possessions' c_addr_id). A conflict over which
+    # addresses a posting should carry - e.g. whether 慶紹所 means [慶元路, 紹興路] -
+    # is not expressible with a scalar-only option value, and the file fails to load
+    # with a pydantic type error rather than anything an editor can act on.
+    value: Any
     rationale: str
 
 
@@ -49,9 +61,13 @@ class Conflict(BaseModel):
     field: str
     description: str
     options: list[ConflictOption] = Field(default_factory=list)
-    agent_suggestion: str | int | float | None = None
+    # Same widening as ConflictOption.value, and for the same reason. `resolution`
+    # stays None-by-default and `None` still means "unresolved" - that is what
+    # find_issues() checks and what blocks submission; widening the non-None type
+    # does not weaken the blocker.
+    agent_suggestion: Any = None
     agent_reasoning: str | None = None
-    resolution: str | int | float | None = None  # None = unresolved, blocks submit
+    resolution: Any = None  # None = unresolved, blocks submit
 
 
 class Proposal(BaseModel):
@@ -70,6 +86,13 @@ class Proposal(BaseModel):
     source_quote: str
     confidence: Literal["high", "medium", "low"]
     conflicts: list[Conflict] = Field(default_factory=list)
+    # AGENTS.md rule 12 gate. Only consulted for resources whose ResourceSpec sets
+    # requires_explicit_approval (today: `text-codes`) - global reference data with
+    # no server-side delete path. A named human must own the decision, in writing,
+    # in the file; the agent must never fill this in on its own initiative. It is
+    # also forwarded into the request's meta.comment so the approval is visible in
+    # the server's own `operations` row, not just in this repo.
+    approved_by: str | None = None
 
     @field_validator("target_pk")
     @classmethod
@@ -166,6 +189,10 @@ def load_input_batch(path: str, *, batch_id: str | None = None) -> StagingBatch:
                 source_quote="(structured input, no extraction)",
                 confidence="high",
                 conflicts=[],
+                # Forward it rather than dropping it: without this, a JSON record
+                # that DOES carry an approval fails validation with "it needs an
+                # explicit approved_by" - an error that contradicts the input.
+                approved_by=record.get("approved_by"),
             )
         )
     return StagingBatch(batch_id=batch_id or path, proposals=proposals)
@@ -180,6 +207,14 @@ def save_staging_file(batch: StagingBatch, path: str) -> None:
     # the regenerated file is to read by hand. Worth a custom YAML representer if
     # this becomes a real friction point during Milestone 6/7 usage.
     data = batch.model_dump(exclude_none=False)
+    # exclude_none=False is deliberate overall - `resolution: null` MUST stay visible,
+    # since it is the submission blocker a human is meant to see and fill in. But
+    # `approved_by: null` is different: it applies to almost no proposal, and leaving
+    # it on every row is both noise and an invitation for an agent to fill it in,
+    # which rule 12 forbids. Drop it only where it is unset.
+    for proposal in data.get("proposals", []):
+        if proposal.get("approved_by") is None:
+            proposal.pop("approved_by", None)
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
 
@@ -281,6 +316,51 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
             spec.resolve_alias(p.resource, p.operation)
         except FieldWhitelistError as exc:
             issues.append(Issue(proposal_id=p.id, severity="error", message=str(exc)))
+
+        # AGENTS.md rule 12: global reference data (code tables, entity aggregates)
+        # is a different risk class from one person's record - it is referenced by
+        # potentially tens of thousands of rows and the server offers NO delete path,
+        # so a wrong row is permanent. Require a named human to have signed off, in
+        # the file. This is an `error`, not a `conflict`: an unresolved conflict is a
+        # normal mid-review state that `validate` reports and exits 0 on, whereas a
+        # missing approval must make the batch structurally invalid.
+        if spec.requires_explicit_approval and not (p.approved_by or "").strip():
+            issues.append(
+                Issue(
+                    proposal_id=p.id,
+                    severity="error",
+                    message=(
+                        f"resource {p.resource!r} is global reference data, not one "
+                        "person's record (AGENTS.md rule 12) - it needs an explicit "
+                        "`approved_by: <name of the human who decided>` on this "
+                        "proposal before it can be submitted. Never fill that in on "
+                        "the agent's own initiative."
+                    ),
+                )
+            )
+
+        # Some creates are meaningless without specific content - and for a resource
+        # with no delete path (the code tables; API.md 13.3) permanently so - even
+        # though the server accepts an empty `changes` on create (API.md 4.3).
+        # Front-run that here so it surfaces in `validate`, not only at submit time
+        # in mutation_api.
+        if p.operation == "create" and spec.required_create_fields:
+            blank = sorted(
+                f for f in spec.required_create_fields
+                if is_missing_value(p.changes.get(f))
+            )
+            if blank:
+                issues.append(
+                    Issue(
+                        proposal_id=p.id,
+                        severity="error",
+                        message=(
+                            f"{spec.key} create needs a non-empty {blank} - the server "
+                            "would accept the row without it, and this resource has no "
+                            "delete path, so a blank row would be permanent"
+                        ),
+                    )
+                )
 
         # target_pk: structural completeness against pk_fields minus c_personid.
         non_personid_pk = tuple(f for f in spec.pk_fields if f != STAGING_PERSONID_FIELD)
@@ -621,6 +701,26 @@ def render_preview_markdown(
             pk_str = ", ".join(f"{k}={v}" for k, v in proposal.target_pk.items())
             meta_bits.append(f"target_pk: {pk_str}")
         lines.append("- " + " · ".join(meta_bits))
+        # Surface the rule-12 signature in the artifact humans actually review. A
+        # sign-off recorded only in raw YAML is not much of a sign-off - and the
+        # MISSING case matters even more, since it is what blocks the batch.
+        try:
+            needs_approval = find_spec_by_alias(proposal.resource).requires_explicit_approval
+        except FieldWhitelistError:
+            needs_approval = False  # unknown resource is already an `error` issue
+        if needs_approval or proposal.approved_by:
+            signature = (proposal.approved_by or "").strip()
+            if signature:
+                lines.append(
+                    f"- 🔓 **approved_by: {_preview_inline(signature)}** "
+                    "(global reference data — AGENTS.md rule 12)"
+                )
+            else:
+                lines.append(
+                    "- 🔒 **approved_by: _(not set)_** — global reference data; this "
+                    "proposal cannot be submitted until a named human signs off "
+                    "(AGENTS.md rule 12)"
+                )
 
         state = current_values.get(proposal.id)
         for field, proposed_value in proposal.changes.items():

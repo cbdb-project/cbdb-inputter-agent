@@ -16,6 +16,7 @@ import requests
 
 from .audit_log import AuditLog, new_correlation_id
 from .config import Config
+from .models import approval_gated_aliases
 
 
 class CbdbApiError(Exception):
@@ -63,6 +64,19 @@ class NotFoundError(CbdbApiError):
     """404 - e.g. GET /api/v2/get for a row that doesn't exist. Not retried."""
 
 
+class MissingApprovalError(CbdbApiError):
+    """A write to an approval-gated resource carried no human approval signature.
+
+    AGENTS.md rule 12: code-table and entity-aggregate writes are global reference
+    data, not one person's record. mutation_api.py already refuses these without an
+    `approved_by`, and staging.py refuses to even validate such a batch - this is the
+    last, unskippable gate, at the layer that actually puts bytes on the wire. Same
+    fail-closed reasoning as MutatingFlagMismatch: a defense that only works when the
+    caller went through the intended wrapper is not a defense for a write with no
+    server-side undo.
+    """
+
+
 class MutatingFlagMismatch(ValueError):
     """Raised when a caller's `mutating` flag contradicts a known endpoint's nature.
 
@@ -75,11 +89,14 @@ class MutatingFlagMismatch(ValueError):
 
 
 _KNOWN_MUTATING_PATHS = ("/api/v2/create", "/api/v2/mutate", "/api/v2/delete")
-# Every path this client is allowed to read from (AGENTS.md rule 1). The lookup
-# endpoints below are the public code/name-resolution surface documented in
-# API.md 14.1/14.4 - listing them here is what makes _check_mutating_flag's
-# fail-closed defense actually cover them, instead of letting an unrecognized
-# path slip past with mutating=True.
+# Every path this client is allowed to read from (AGENTS.md rule 1). Listing them
+# here is what makes _check_mutating_flag's fail-closed defense actually cover them,
+# instead of letting an unrecognized path slip past with mutating=True. Two groups:
+#   - the public code/name-resolution lookups (API.md 14.1/14.4), in the `api`
+#     middleware group, 600 req/min;
+#   - /cbdbapi/person (API.md 14.7), the read-a-whole-person endpoint, which is in
+#     the `web` group with NO application-layer throttle - so it does not share that
+#     600/min budget, and self-restraint is the only limit on it.
 _KNOWN_READ_ONLY_PATHS = (
     "/api/v2/get",
     "/api/v2/persons",
@@ -88,18 +105,20 @@ _KNOWN_READ_ONLY_PATHS = (
     "/api/select/",
     "/api/code/addr",
     "/api/name",
+    "/cbdbapi/person",
 )
 
-# Public lookup endpoints (API.md 14.1/14.4): no credentials required, and
-# sending a stale Bearer token to them both fails (401) and consumes the
-# per-source-IP failed-auth budget shared with every other Bearer client behind
-# the same egress IP (API.md 1.3; AGENTS.md rule 10). Callers should pass
+# Public endpoints (API.md 14.1/14.4 lookups, plus 14.7's /cbdbapi/person): none
+# require credentials, and sending a stale Bearer token to them both fails (401) and
+# consumes the per-source-IP failed-auth budget shared with every other Bearer client
+# behind the same egress IP (API.md 1.3; AGENTS.md rule 10). Callers should pass
 # public=True for these; this tuple is only a sanity aid, not an enforcement.
 PUBLIC_LOOKUP_PATHS = (
     "/api/v2/texts",
     "/api/select/",
     "/api/code/addr",
     "/api/name",
+    "/cbdbapi/person",
 )
 
 # Cap on how much of a public-lookup response body is copied into the local
@@ -109,6 +128,30 @@ PUBLIC_LOOKUP_PATHS = (
 # /api/v2/* request and response is still logged in full, because those are the
 # ones the audit trail exists to reconstruct.
 PUBLIC_RESPONSE_LOG_MAX_ROWS = 5
+
+
+def _check_approval(json_body: Any, mutating: bool, approval_signature: str | None) -> None:
+    """Fail closed if the envelope targets an approval-gated resource unsigned.
+
+    Reads the resource straight out of the request body rather than trusting a
+    caller-supplied label, so it applies equally to MutationApi and to any direct
+    HttpClient.post() - which is exactly the hole this closes.
+    """
+    if not mutating or not isinstance(json_body, dict):
+        return
+    resource = json_body.get("resource")
+    if not isinstance(resource, str):
+        return
+    if resource.strip().lower() not in approval_gated_aliases():
+        return
+    if not (approval_signature or "").strip():
+        raise MissingApprovalError(
+            f"refusing to write resource {resource!r} without an approval signature: "
+            "this is global reference data, not one person's record, and the server "
+            "offers no way to undo it (AGENTS.md rule 12). Pass approved_by= through "
+            "MutationApi, or approval_signature= if calling HttpClient directly. "
+            "Never supply this on the agent's own initiative."
+        )
 
 
 def _check_mutating_flag(path: str, mutating: bool) -> None:
@@ -329,8 +372,14 @@ class HttpClient:
         operation: str | None = None,
         mode: str | None = None,
         public: bool = False,
+        approval_signature: str | None = None,
     ) -> dict[str, Any]:
         """mutating=True for create/mutate/delete; False for the POST form of GET.
+
+        approval_signature is the human `approved_by` value, required for writes to
+        approval-gated resources (AGENTS.md rule 12) and ignored otherwise. It is
+        checked against the resource named in `json_body`, so it cannot be skipped by
+        going around MutationApi.
 
         public=True (credential-less) is accepted for symmetry with get(), but is
         rejected for mutating calls: an unauthenticated write is never something
@@ -350,6 +399,7 @@ class HttpClient:
             operation=operation,
             mode=mode,
             public=public,
+            approval_signature=approval_signature,
         )
 
     def _request(
@@ -364,8 +414,10 @@ class HttpClient:
         operation: str | None,
         mode: str | None,
         public: bool = False,
+        approval_signature: str | None = None,
     ) -> dict[str, Any]:
         _check_mutating_flag(path, mutating)
+        _check_approval(json_body, mutating, approval_signature)
         if public and mutating:
             raise ValueError("public=True is not allowed for a mutating request")
         correlation_id = new_correlation_id()

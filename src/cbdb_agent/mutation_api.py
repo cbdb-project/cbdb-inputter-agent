@@ -49,6 +49,43 @@ def _build_envelope(
     return envelope
 
 
+# Approval strings longer than this are almost certainly a mistake (a pasted
+# paragraph, a whole YAML block) rather than a person's name, and the value is
+# interpolated into meta.comment which the server stores on the operations row.
+# API.md doesn't publish a cap for __note, but 13.1's 255-char limit on code-table
+# values is a hint that these columns aren't generous.
+MAX_APPROVED_BY_LEN = 120
+
+
+def _require_approval(spec, approved_by: str | None, operation: str) -> str | None:
+    """Fail closed on an approval-gated resource (AGENTS.md rule 12).
+
+    staging.py already refuses to *validate* a batch whose approval-gated proposal
+    has no `approved_by`. This is the second, independent gate: the whole point of
+    rule 12 is that these writes are globally visible and (for code tables) have no
+    delete path, so the check must not live only in the layer a caller can skip.
+    Same reasoning as http_client._check_mutating_flag - fail closed at the layer
+    that actually sends the request, rather than trusting the caller.
+    """
+    if not spec.requires_explicit_approval:
+        return None
+    signature = (approved_by or "").strip()
+    if not signature:
+        raise FieldWhitelistError(
+            f"{spec.key}: {operation} on this resource is global reference data and "
+            "requires approved_by=<name of the human who decided> (AGENTS.md rule "
+            "12). Never fill this in on the agent's own initiative."
+        )
+    if len(signature) > MAX_APPROVED_BY_LEN:
+        raise FieldWhitelistError(
+            f"{spec.key}: approved_by is {len(signature)} characters, over the "
+            f"{MAX_APPROVED_BY_LEN}-character limit - it should be the approving "
+            "person's name, not prose. Put the reasoning in meta.comment or the "
+            "staging file's batch_notes."
+        )
+    return signature
+
+
 class MutationApi:
     """Generic create/update/delete/get methods for any resource in models.RESOURCE_SPECS.
 
@@ -76,10 +113,12 @@ class MutationApi:
         changes: dict[str, Any],
         resource_string: str | None = None,
         comment: str | None = None,
+        approved_by: str | None = None,
     ) -> dict[str, Any]:
         spec = get_resource_spec(resource_key)
         alias = resource_string or spec.key
         spec.resolve_alias(alias, "create")
+        _require_approval(spec, approved_by, "create")
         spec.validate_target_pk_for_create(target_pk)
 
         merged_changes = dict(changes)
@@ -109,6 +148,7 @@ class MutationApi:
             "/api/v2/create",
             json_body=envelope,
             mutating=True,
+            approval_signature=approved_by,
             resource=spec.key,
             operation="create",
             mode="direct",
@@ -123,10 +163,12 @@ class MutationApi:
         changes: dict[str, Any],
         resource_string: str | None = None,
         comment: str | None = None,
+        approved_by: str | None = None,
     ) -> dict[str, Any]:
         spec = get_resource_spec(resource_key)
         alias = resource_string or spec.key
         spec.resolve_alias(alias, "update")
+        _require_approval(spec, approved_by, "update")
         spec.validate_target_pk_for_update_or_delete(target_pk)
         spec.validate_changes("update", changes)
 
@@ -143,6 +185,7 @@ class MutationApi:
             "/api/v2/mutate",
             json_body=envelope,
             mutating=True,
+            approval_signature=approved_by,
             resource=spec.key,
             operation="update",
             mode="direct",
@@ -156,10 +199,12 @@ class MutationApi:
         target_pk: dict[str, Any],
         resource_string: str | None = None,
         comment: str | None = None,
+        approved_by: str | None = None,
     ) -> dict[str, Any]:
         spec = get_resource_spec(resource_key)
         alias = resource_string or spec.key
         spec.resolve_alias(alias, "delete")
+        _require_approval(spec, approved_by, "delete")
         spec.validate_target_pk_for_update_or_delete(target_pk)
 
         envelope = _build_envelope(
@@ -175,6 +220,7 @@ class MutationApi:
             "/api/v2/delete",
             json_body=envelope,
             mutating=True,
+            approval_signature=approved_by,
             resource=spec.key,
             operation="delete",
             mode="direct",

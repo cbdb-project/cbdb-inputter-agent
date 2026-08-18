@@ -207,6 +207,17 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
 
         spec = find_spec_by_alias(proposal.resource)
         full_target_pk = resolve_target_pk(proposal, resolved_person_id=resolved_pid, spec_key=spec.key)
+        # Carry an approval-gated proposal's signer into meta.comment, so the
+        # sign-off lands in the SERVER's own `operations` row and is not only
+        # recorded in this repo's staging file (AGENTS.md rule 12; the comment is
+        # what `direct` mode writes to that row's `__note`, per API.md 4.3).
+        approved_by = (proposal.approved_by or "").strip() or None
+        comment = None
+        if approved_by:
+            comment = (
+                f"approved_by: {approved_by} "
+                f"(batch {batch.batch_id}, proposal {proposal.id})"
+            )
 
         try:
             if proposal.operation == "create":
@@ -216,6 +227,8 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                     target_pk=full_target_pk,
                     changes=proposal.changes,
                     resource_string=proposal.resource,
+                    comment=comment,
+                    approved_by=approved_by,
                 )
             elif proposal.operation == "update":
                 response = api.update(
@@ -224,6 +237,8 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                     target_pk=full_target_pk,
                     changes=proposal.changes,
                     resource_string=proposal.resource,
+                    comment=comment,
+                    approved_by=approved_by,
                 )
             else:  # delete
                 response = api.delete(
@@ -231,6 +246,8 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                     person_id=resolved_pid,
                     target_pk=full_target_pk,
                     resource_string=proposal.resource,
+                    comment=comment,
+                    approved_by=approved_by,
                 )
         except _ABORTING_ERRORS as exc:
             # NOT per-record isolation: the credentials are broken, so every

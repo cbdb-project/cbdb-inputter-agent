@@ -307,6 +307,53 @@ same batch.
   match create/update's canonical empty-`c_pages` representation.
 - `c_main_source`/`c_self_bio` are boolean flags.
 
+## 14. text_codes (`TEXT_CODES`) — a code table, not person data ⚠️
+
+**Read `AGENTS.md` rule 12 before using this.** This is the only code-table write this
+client models, and it exists only because a citation for a book CBDB doesn't yet know
+cannot be recorded any other way. It is global reference data: referenced by potentially
+tens of thousands of person rows, and **the server has no delete path for it** — `403`
+for `mode=direct`, `501` for `mode=proposal` (`API.md` §13.3). A wrong row is permanent.
+Afterwards only `c_title` (the romanization) is editable; `c_title_chn` is frozen.
+
+- Resource strings registered for create: **`text-codes`** (what the client actually
+  sends) and **`text_codes`**. The server accepts a third, `textcodes`, which
+  `models.py` deliberately omits. `text_codes` is registered not because we send it but
+  because `MutationApi.create()` falls back to `spec.key` when no `resource_string` is
+  given, so a key that is not one of its own aliases makes the generic API unusable for
+  the resource — a `tests/test_models.py` invariant now guards that for every resource.
+- **`create` only.** `update` is not modelled (the server allows just `c_title`, via the
+  different alias `text_codes`); `delete` is disabled server-side.
+- PK: `c_textid`, **server-assigned** (`max+1`) when `target.pk` is `{}`. The `target`
+  key itself must still be present — a fully omitted `target` is a controller-level 422.
+  `API.md` §13.2 also allows supplying an explicit `c_textid` (in `target.pk` *or* in
+  `changes`), but **`models.py` deliberately blocks both paths**: `c_textid` is in
+  `server_assigned_pk_fields` and is not in `create_fields`, so the only reachable
+  behaviour is "let the server pick". Choosing an id by hand risks a `409` on a live
+  collision and gains nothing.
+- **`c_title_chn` is required by `models.py`, though not by the server.** The server
+  accepts `changes: {}` on a create (`API.md` §4.3) and would mint a blank row at
+  `max+1` — which then cannot be deleted, and cannot even be given a title afterwards,
+  since `update` reaches only `c_title`. `ResourceSpec.required_create_fields` enforces
+  it in both `staging.find_issues()` and `mutation_api`.
+- **Create** whitelist (`API.md` §13.2): `c_title_chn`, `c_title`, `c_title_trans`,
+  `c_text_type_id`, `c_text_year`, `c_text_nh_code`, `c_text_nh_year`,
+  `c_text_range_code`, `c_bibl_cat_code`, `c_extant`, `c_text_country`, `c_text_dy`,
+  `c_source`, `c_pages`, `c_url_api`, `c_url_api_coda`, `c_url_homepage`, `c_notes`,
+  `c_title_alt_chn`.
+- `mode` must be `direct`; `proposal` returns **501**.
+- `person_id` is still required in the envelope (convention: `0` for a global table).
+  Note the asymmetry in `API.md` §13.1 vs §13.2 — code-table *updates* always record
+  `c_personid = 0` in `operations` regardless of what you send, but *creates* record what
+  you sent.
+- `requires_explicit_approval = True`: `staging.find_issues()` errors until a named human
+  is in `approved_by`, and `batch_runner` forwards that into `meta.comment`.
+- **Before proposing one, search for the title by pinyin as well as by Chinese
+  characters.** Variant characters are the norm in CBDB's titles — 《俟庵集》 is stored as
+  《俟菴集》 (菴 U+83F4), and a Chinese-title search for 俟庵 returns zero hits while the
+  pinyin `Sian ji` finds it immediately. Searching one way only is how you create a
+  duplicate of a book that already exists, which cannot then be deleted.
+
 ## Source citations
 
 - `app/Support/CompositePrimaryKey.php` (`SCHEMAS` const) — authoritative PK schema

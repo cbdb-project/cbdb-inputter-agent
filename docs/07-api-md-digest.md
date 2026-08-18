@@ -218,6 +218,7 @@ without a database dump. **All public, no auth**, in the `api` group (600 req/mi
 | `GET /api/select/search/{table}?q=…` | **Laravel paginator** (`{current_page, data:[…], total,…}`) | keyword search: `addr`, `assoccode`, `assocpair`, `biog`, `entry`, `event`, `kincode`, `kinpair`, `office`, `officetype`, `pinyin`, `socialinst`, `socialinstaddr`, `socialinstcode`, `status`, `text`, `textauthor`, `textperson` |
 | `GET /api/code/addr` | Laravel paginator | address code lookup |
 | `GET /api/name` (`GET` or `POST`) | Laravel paginator | find persons by name/conditions |
+| `GET /cbdbapi/person?id=N&mode=json` | `{Package:{PersonAuthority:{PersonInfo:…}}}` | **a whole person in one read** — see below |
 
 Response-shape exceptions to watch for: `search/kinpair` and `search/assocpair` return
 **bare arrays** like the whole-table endpoints (not paginators), and `search/pinyin`
@@ -234,6 +235,18 @@ Bulk lookup responses are also summarized before they reach `logs/*.jsonl`
 (`PUBLIC_RESPONSE_LOG_MAX_ROWS`), since that log is append-only (`AGENTS.md` rule 8) and
 a whole code table would bloat it permanently; `/api/v2/*` traffic is still logged in
 full.
+
+**`GET /cbdbapi/person` (§14.7) is the answer to "what does this person already have?"**
+`/api/v2/get` fetches exactly one row by its full composite PK, so it cannot enumerate a
+person's rows — which is what you need before proposing changes (to avoid duplicating an
+existing altname/address/posting, and to spot that a "new" person is not new). This one
+returns everything: `BasicInfo`, `PersonSources`, `PersonSourcesAs`, `PersonAliases`,
+`PersonAddresses`, `PersonEntryInfo`, `PersonPostings`, `PersonSocialStatus`,
+`PersonKinshipInfo`, `PersonSocialAssociation`, `PersonTexts`. Two traps:
+`mode=json` is **mandatory** — omitting or misspelling it yields an **HTML page**, not an
+error (`mode`/`o` are the accepted parameter names); and empty collections are **stripped
+from the payload**, so an absent key means "this person has none", not "not returned".
+Values come back stringified. Accepts `id` (1–7 digits) or `name`; neither given → 422.
 
 ⚠️ Upstream's own caveat: these serve the site's UI, **their response format is not
 guaranteed stable**, and they are not v2 endpoints. Treat them as a *lookup aid for a

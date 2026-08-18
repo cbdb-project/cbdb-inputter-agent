@@ -246,6 +246,7 @@ class Proposal(BaseModel):
     source_quote: str
     confidence: Literal["high", "medium", "low"]
     conflicts: list[Conflict] = []
+    approved_by: str | None = None   # AGENTS.md rule 12 gate; see rule 7 below
 
 class StagingBatch(BaseModel):
     batch_id: str
@@ -296,7 +297,20 @@ free (all of these produce a structured error list, not a first-error-and-stop):
    for an earlier create in this batch (see the "read the assigned ID back" flow in
    `04-field-whitelists.md`), or a pre-existing ID the human explicitly supplied, not
    a value the agent invented.
-7. **Ordering derivable, not required in file order** — `staging.py` topologically
+7. **`approved_by` required for approval-gated resources** — a proposal whose resource
+   has `ResourceSpec.requires_explicit_approval` (today only `text-codes`) is a
+   structural **error** until a named human is recorded in `approved_by`. These are
+   global reference-data writes — referenced by potentially tens of thousands of person
+   rows, so a different risk class from person data (`AGENTS.md` rule 12). For the code
+   tables there is additionally no server-side delete path at all; the `office` /
+   `social-institution` aggregates *are* deletable, but the approval requirement is
+   about reach, not only about reversibility. It is deliberately an `error` and
+   not a `conflict`: an unresolved conflict is an expected mid-review state that
+   `validate` reports while still exiting `0`, whereas a missing approval must make the
+   batch invalid. `batch_runner` forwards the value into `meta.comment` so the sign-off
+   is also visible in the server's own `operations` row. The agent must never write this
+   field on its own initiative.
+8. **Ordering derivable, not required in file order** — `staging.py` topologically
    sorts proposals by `person_id` sibling-reference at submit time, so a human
    reordering rows while editing never breaks the person-before-sub-resource
    requirement (`AGENTS.md` rule 7); the file's on-disk order is for human

@@ -197,3 +197,140 @@ def test_get_sends_full_envelope_as_json_body(tmp_path):
     assert sent["resource"] == "basicinformation"
     assert sent["person_id"] == 900001
     assert sent["target"]["pk"] == {"c_personid": 900001}
+
+
+# --- text-codes: the wire envelope, and the second approval gate ---------------
+# AGENTS.md rule 12 / API.md 13.2. The envelope details below are load-bearing:
+# omitting `target` entirely is a controller-level 422, and mode=proposal is a 501.
+
+
+def _ok_create():
+    responses.add(
+        responses.POST,
+        "http://localhost:8000/api/v2/create",
+        json={"ok": True, "result": {"pk": {"c_textid": 99001}, "status": "created"}},
+        status=200,
+    )
+
+
+@responses.activate
+def test_text_codes_create_envelope(tmp_path):
+    api = make_api(tmp_path)
+    _ok_create()
+    api.create(
+        "text_codes",
+        person_id=0,
+        target_pk={},
+        changes={"c_title_chn": "聽雪先生集", "c_title": "Tingxue xiansheng ji"},
+        resource_string="text-codes",
+        approved_by="Hongsu Wang",
+        comment="approved_by: Hongsu Wang (batch b, proposal tc1)",
+    )
+    sent = json.loads(responses.calls[0].request.body)
+    assert sent["resource"] == "text-codes"
+    assert sent["mode"] == "direct"          # proposal mode would be a 501
+    assert sent["operation"] == "create"
+    assert sent["person_id"] == 0            # global code table convention
+    # The `target` KEY must be present even though its pk is empty - a fully
+    # omitted `target` is rejected at the controller layer.
+    assert "target" in sent and sent["target"] == {"pk": {}}
+    assert sent["changes"]["c_title_chn"] == "聽雪先生集"
+    assert "c_textid" not in sent["changes"]  # server assigns it
+    assert sent["meta"]["comment"].startswith("approved_by: Hongsu Wang")
+
+
+@responses.activate
+def test_text_codes_create_refuses_without_approval(tmp_path):
+    """The gate must not live only in staging.py - mutation_api is the layer that
+    actually sends the request, and this write has no server-side undo."""
+    api = make_api(tmp_path)
+    _ok_create()
+    with pytest.raises(FieldWhitelistError, match="approved_by"):
+        api.create(
+            "text_codes",
+            person_id=0,
+            target_pk={},
+            changes={"c_title_chn": "聽雪先生集"},
+            resource_string="text-codes",
+        )
+    assert len(responses.calls) == 0  # nothing reached the wire
+
+
+@responses.activate
+def test_text_codes_create_refuses_blank_approval(tmp_path):
+    api = make_api(tmp_path)
+    with pytest.raises(FieldWhitelistError, match="approved_by"):
+        api.create(
+            "text_codes",
+            person_id=0,
+            target_pk={},
+            changes={"c_title_chn": "x"},
+            resource_string="text-codes",
+            approved_by="   ",
+        )
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_text_codes_create_refuses_an_over_long_approval(tmp_path):
+    """approved_by is a person's name, not prose - it lands in operations.__note."""
+    from cbdb_agent.mutation_api import MAX_APPROVED_BY_LEN
+
+    api = make_api(tmp_path)
+    with pytest.raises(FieldWhitelistError, match="over the"):
+        api.create(
+            "text_codes",
+            person_id=0,
+            target_pk={},
+            changes={"c_title_chn": "x"},
+            resource_string="text-codes",
+            approved_by="a" * (MAX_APPROVED_BY_LEN + 1),
+        )
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_text_codes_create_refuses_an_empty_changes(tmp_path):
+    """A blank TEXT_CODES row would be permanent AND un-titleable afterwards."""
+    api = make_api(tmp_path)
+    with pytest.raises(FieldWhitelistError, match="c_title_chn"):
+        api.create(
+            "text_codes",
+            person_id=0,
+            target_pk={},
+            changes={},
+            resource_string="text-codes",
+            approved_by="Hongsu Wang",
+        )
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_text_codes_create_works_through_the_generic_api_without_resource_string(tmp_path):
+    """MutationApi.create() falls back to spec.key as the alias, so spec.key must be
+    one of the resource's own create aliases."""
+    api = make_api(tmp_path)
+    _ok_create()
+    api.create(
+        "text_codes",
+        person_id=0,
+        target_pk={},
+        changes={"c_title_chn": "聽雪先生集"},
+        approved_by="Hongsu Wang",
+    )
+    assert json.loads(responses.calls[0].request.body)["resource"] == "text_codes"
+
+
+@responses.activate
+def test_approval_is_not_demanded_for_ordinary_person_resources(tmp_path):
+    """The gate must not leak: an altnames create needs no approval."""
+    api = make_api(tmp_path)
+    _ok_create()
+    api.create(
+        "altnames",
+        person_id=5000,
+        target_pk={"c_personid": 5000, "c_alt_name_chn": "季理", "c_alt_name_type_code": 4},
+        changes={"c_alt_name_chn": "季理", "c_alt_name_type_code": 4},
+    )
+    sent = json.loads(responses.calls[0].request.body)
+    assert "meta" not in sent  # no comment, no approval bookkeeping
