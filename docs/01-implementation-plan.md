@@ -117,6 +117,10 @@ CBDB_MAX_REQUESTS_PER_MINUTE=60
 
 # Local audit log location (JSONL, one line per API call attempt).
 CBDB_LOCAL_AUDIT_LOG_DIR=./logs
+
+# Absolute path to a local clone of the target system's source repo
+# (cbdb-online-main-server), read-only. Optional — leave empty. Folder, not a file.
+CBDB_ONLINE_MAIN_SERVER_REPO_DIR=
 ```
 
 `config.py` responsibilities:
@@ -128,6 +132,10 @@ CBDB_LOCAL_AUDIT_LOG_DIR=./logs
   (not a plain boolean) means changing `CBDB_API_BASE_URL` — e.g. from a local dev
   server to production — automatically invalidates the previous confirmation, so a
   silent target switch can never inherit an earlier "yes, go live" decision.
+- Expose `CBDB_ONLINE_MAIN_SERVER_REPO_DIR` as `Config.online_main_server_repo_dir`
+  (`Path | None`). Empty/unset → `None`, never guessed from cwd; when set it is
+  `expanduser()`-ed (so `~/...` works on macOS) and must be an existing directory,
+  otherwise `ConfigError` — a typo would otherwise surface much later.
 
 `.gitignore` (kept in sync with the committed root `.gitignore` — see that file for
 the authoritative version):
