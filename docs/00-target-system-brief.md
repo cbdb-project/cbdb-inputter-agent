@@ -1,10 +1,18 @@
 # CBDB Online Main Server — Target System Brief
 
-Source: local checkout of `cbdb-project/cbdb-online-main-server` (develop branch) at
-`C:\Users\sudos\OneDrive\document\GitHub\cbdb-online-main-server`, read directly on
-2026-07-08. This is the reference brief for everything in `01-implementation-plan.md`.
+Source: local checkout of `cbdb-project/cbdb-online-main-server` (develop branch),
+read directly on 2026-07-08. The checkout's location is not hardcoded here: set
+`CBDB_ONLINE_MAIN_SERVER_REPO_DIR` in `.env` to your local clone folder (see
+`.env.sample`), exposed as `Config.online_main_server_repo_dir`. This is the
+reference brief for everything in `01-implementation-plan.md`.
 Re-verify against the live repo before relying on this for anything security-critical —
 it is a snapshot, not a live contract.
+
+**Companion document:** this brief was written by reading the target system's *source*.
+`docs/07-api-md-digest.md` digests the target system's own published *specification*
+(`API.md`, kept under continuing revision upstream) and carries a sync stamp. Where the
+two disagree, `API.md` is authoritative; several sections below are marked with what the
+2026-08-18 sync added or sharpened.
 
 ## 1. Tech stack
 
@@ -30,8 +38,14 @@ it is a snapshot, not a live contract.
   (`$this->middleware('auth')`, default guard `web`) — a Bearer token does **not**
   authenticate against them. **Our agent must not use these routes.**
 - Global `api` middleware group throttles at 600 req/min; no explicit throttle was found
-  on `/api/v2/*` (registered under the `web` group) — treat this as "unspecified," not
-  "unlimited," and self-throttle regardless.
+  on `/api/v2/*` (registered under the `web` group).
+  **SETTLED as of the 2026-08-18 `API.md` sync — do not treat this as unspecified any
+  more:** `API.md` §1.3 publishes an explicit *caller-side* contract of **≤ 1 write
+  request/second, serialized, across the whole client**, while confirming the server
+  really does have no application-layer throttle on those routes. So the number is
+  known; it just isn't enforced by the server. See `docs/07-api-md-digest.md` §1.1 and
+  `AGENTS.md` rule 9. Separately, failed *Bearer* authentication attempts are capped at
+  60/minute **per source IP** and blocked before auth runs (`AGENTS.md` rule 10).
 
 ## 3. API surface to use — `/api/v2/*` Mutation API only
 
@@ -145,8 +159,12 @@ before/after payloads, without us needing to build any of our own server-side lo
   `c_personid` (`PersonListController::index()`'s `orderBy(...,'asc')`), so the
   highest existing ID is always on the *last* page — fetch page 1 to learn
   `last_page`, then fetch that page directly, rather than scanning every page.
-- Self-throttle bulk writes even though no explicit limit was found on `/api/v2/*`
-  (global `api` group elsewhere throttles 600/min) — respect `429` with backoff.
+- Self-throttle bulk writes to **≤ 1/second, serialized** — `API.md` §1.3's published
+  contract, not a guess (this bullet formerly said "no explicit limit was found").
+  Respect `429` with backoff regardless: the write routes won't 429 you for rate, but
+  the failed-auth gate and any proxy/WAF can. For bulk work the sanctioned answer is a
+  bigger `batch_mutate` (≤ 500 rows), not a faster loop — not implemented here yet, see
+  `docs/07-api-md-digest.md` §1.2.
 - Use `GET /api/v2/get` to check for existing rows before create, for idempotency.
   **Confirmed live (Milestone 7):** this endpoint requires the *same* envelope
   shape as the write endpoints — `resource`, `person_id`, **and** a nested
@@ -176,7 +194,9 @@ before/after payloads, without us needing to build any of our own server-side lo
 
 - No fully-audited server-side path exists for issuing tokens non-interactively — token
   bootstrap is manual (human logs in once, creates a token at `/profile`).
-- Whether `/api/v2/*` has a dedicated rate limit is unconfirmed either way.
+- ~~Whether `/api/v2/*` has a dedicated rate limit is unconfirmed either way.~~
+  **Resolved 2026-08-18:** no server-side throttle on the write routes, but a published
+  caller-side contract of 1 write/second serialized (`API.md` §1.3). See §2 and §6 above.
 - Full per-resource field whitelists (`AltnameCreateHandler`, `PostingCreateHandler`,
   etc.) were not exhaustively read for every one of the ~13 sub-resources; read the
   specific handler file before wiring a new resource's field mapping into the client.

@@ -6,6 +6,10 @@ module - `--input`'s already-structured JSON records are converted into a
 StagingBatch first (see load_input_batch below) precisely so both paths share this
 one execution engine instead of duplicating submission logic.
 
+One deliberate exception to per-record isolation: an authentication or
+authorization failure is a WHOLE-BATCH condition, not a per-record one - see
+_ABORTING_ERRORS below.
+
 Per-record failure isolation (docs/01-implementation-plan.md section 7): a runtime
 failure (409/422/etc.) on one proposal stops processing THAT proposal only; the
 batch continues with the next one. This is distinct from validate_for_submit()'s
@@ -21,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .http_client import CbdbApiError
+from .http_client import AuthenticationError, AuthorizationError, CbdbApiError
 from .models import FieldWhitelistError, find_spec_by_alias
 from .mutation_api import MutationApi
 from .person_id import PersonIdError, get_max_person_id, is_person_id_taken, validate_new_person_id
@@ -37,11 +41,51 @@ from .staging import (
 @dataclass
 class ProposalResult:
     proposal_id: str
-    status: Literal["success", "failed", "skipped_dependency_failed"]
+    status: Literal[
+        "success", "failed", "skipped_dependency_failed", "skipped_auth_aborted"
+    ]
     response: dict[str, Any] | None = None
     error: str | None = None
     resolved_person_id: int | None = None
     resolved_target_pk: dict[str, Any] | None = None
+
+
+# Errors that mean "the credentials are broken", not "this record is broken".
+# Retrying the next 17 proposals with the same dead token cannot succeed, and each
+# attempt spends one slot of the per-source-IP failed-auth budget (60/minute,
+# counted per IP and shared with every other Bearer client behind the same egress
+# IP - API.md 1.3, AGENTS.md rule 10). So the correct behaviour is to stop the
+# batch immediately and report the remainder as skipped, rather than to isolate
+# the failure per record the way a 409/422 is isolated.
+#   - AuthenticationError (401): token invalid/expired/revoked.
+#   - AuthorizationError (403): account not active, or lacks canWriteDirectly().
+# Both are properties of the account, identical for every proposal in the batch.
+_ABORTING_ERRORS = (AuthenticationError, AuthorizationError)
+
+
+def _skip_rest_of_batch(
+    order: list[Proposal], stopped_at_index: int, exc: Exception, failed_id: str
+) -> list[ProposalResult]:
+    """Mark every proposal after `stopped_at_index` as skipped by an auth abort.
+
+    Indexed by POSITION, deliberately - `order.index(proposal)` would be wrong
+    here: Proposal is a pydantic model with structural equality, so two proposals
+    that happen to carry identical field values (entirely possible for, say, two
+    identical altname rows on different people before person_id resolution) would
+    make index() return the FIRST match and silently mis-slice the remainder.
+    """
+    return [
+        ProposalResult(
+            proposal_id=later.id,
+            status="skipped_auth_aborted",
+            error=(
+                "batch aborted: authentication/authorization failed on proposal "
+                f"{failed_id!r} ({exc}). Fix the token or the account's permissions "
+                "and re-run; nothing after that proposal was attempted."
+            ),
+        )
+        for later in order[stopped_at_index + 1 :]
+    ]
 
 
 def allocate_person_id(
@@ -117,7 +161,7 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
     person_id_map: dict[str, int] = {}
     results: list[ProposalResult] = []
 
-    for proposal in order:
+    for index, proposal in enumerate(order):
         resolved_pid = _resolve_person_id(proposal, person_id_map)
 
         if resolved_pid is None:
@@ -134,6 +178,18 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                 try:
                     resolved_pid = allocate_person_id(api, already_claimed=set(person_id_map.values()))
                     person_id_map[proposal.id] = resolved_pid
+                except _ABORTING_ERRORS as exc:
+                    # allocate_person_id() makes AUTHENTICATED reads
+                    # (GET /api/v2/persons, GET /api/v2/get - see person_id.py), so
+                    # a dead token fails here too, before any write is attempted. A
+                    # batch of N "NEW" persons would otherwise produce N failed-auth
+                    # attempts against the shared per-IP budget without ever sending
+                    # a single mutating request. Same abort as the write stage.
+                    results.append(
+                        ProposalResult(proposal_id=proposal.id, status="failed", error=str(exc))
+                    )
+                    results.extend(_skip_rest_of_batch(order, index, exc, proposal.id))
+                    return results
                 except (CbdbApiError, PersonIdError) as exc:
                     results.append(
                         ProposalResult(proposal_id=proposal.id, status="failed", error=str(exc))
@@ -176,6 +232,24 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                     target_pk=full_target_pk,
                     resource_string=proposal.resource,
                 )
+        except _ABORTING_ERRORS as exc:
+            # NOT per-record isolation: the credentials are broken, so every
+            # remaining proposal would fail identically while burning the shared
+            # per-IP failed-auth budget (see _ABORTING_ERRORS). Record this one as
+            # failed, mark the rest as skipped, and stop.
+            results.append(
+                ProposalResult(
+                    proposal_id=proposal.id,
+                    status="failed",
+                    error=str(exc),
+                    resolved_person_id=resolved_pid,
+                    resolved_target_pk=full_target_pk,
+                )
+            )
+            if spec.key == "basicinformation" and proposal.operation == "create":
+                person_id_map.pop(proposal.id, None)  # never record a failed create
+            results.extend(_skip_rest_of_batch(order, index, exc, proposal.id))
+            return results
         except (CbdbApiError, FieldWhitelistError) as exc:
             # Per-record isolation (AGENTS.md rule 5): never retry with modified
             # data, never let one proposal's failure raise out of the batch loop.
@@ -221,10 +295,14 @@ def fetch_current_values(batch: StagingBatch, api: MutationApi) -> dict[str, Pro
     fetch the row's current values, for staging.render_preview_markdown() to
     diff against the proposed `changes`.
 
-    Never raises - every failure mode (network, auth, 404, an unresolved
-    person_id, an unknown resource alias) is caught and reported as a
+    Never raises - every failure mode (network, 404, an unresolved person_id, an
+    unknown resource alias) is caught and reported as a
     `ProposalCurrentState(error=...)` for that one proposal, so a preview can
     always render something rather than fail outright over one broken lookup.
+    An auth failure is the one case handled batch-wide instead of per-proposal:
+    it stops further probing and marks every remaining update/delete proposal with
+    the same reason, so one dead token costs one failed request rather than one
+    per proposal (see _ABORTING_ERRORS). The preview still renders either way.
     This is presentational-only support for a nicer review experience - it must
     never be treated as a stand-in for `validate_for_submit()`'s hard structural
     checks, and callers must not skip that just because this ran successfully.
@@ -252,6 +330,17 @@ def fetch_current_values(batch: StagingBatch, api: MutationApi) -> dict[str, Pro
                 proposal, resolved_person_id=resolved_pid, spec_key=spec.key
             )
             body = api.get(spec.key, person_id=resolved_pid, target_pk=full_target_pk)
+        except _ABORTING_ERRORS as exc:
+            # Broken credentials are a batch-wide condition: stop probing rather
+            # than 401 once per update/delete proposal and spend N slots of the
+            # shared per-IP failed-auth budget (see _ABORTING_ERRORS). The preview
+            # still renders - every proposal from here on just shows this reason
+            # instead of a live diff.
+            reason = f"live diff unavailable: {exc} (stopped after first auth failure)"
+            for later in batch.proposals:
+                if later.operation in ("update", "delete") and later.id not in results:
+                    results[later.id] = ProposalCurrentState(error=reason)
+            return results
         except Exception as exc:  # noqa: BLE001 - intentionally broad, see docstring:
             # this is best-effort presentational support, and it must degrade to
             # "couldn't fetch" for ANY failure mode rather than ever propagate and

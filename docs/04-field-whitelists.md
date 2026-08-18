@@ -37,7 +37,7 @@ their own quirks noted below):
 | texts | `texts`, `text`, `biog_text_data`, `text_data` | 3 | `c_personid` | No |
 | postings / offices | `postings`, `posting`, `posted_to_office_data` (⚠️ server also accepts `offices`, but our client deliberately doesn't — see §11) | 2 | none (same list, incl. `c_office_id`) | **Yes** — `c_posting_id` |
 | social_institutions | create/delete: + `socialinst`; **update: missing `socialinst`, see §12** | 4 | `c_personid` | No |
-| sources | `sources` (no aliases) | 3 (`c_pages` optional) | none (identical create/update list) | No, but `c_textid`/`c_pages` re-keyable |
+| sources | create/update: `sources` only; **delete also accepts `source`, `biog_source_data`** | 3 (`c_pages` optional) | none (identical create/update list) | No, but `c_textid`/`c_pages` re-keyable |
 
 **⚠️ Bug/gap in the target system to design around (§12):** the `social_institutions`
 update handler's alias list is `['social_institutions', 'social_institution',
@@ -281,7 +281,11 @@ same batch.
 
 ## 13. sources (`BIOG_SOURCE_DATA`) — single unified handler, no separate create class
 
-- Resource string: `sources` only — no aliases, and unlike every other resource,
+- Resource string: **asymmetric by operation** — `create`/`update` accept `sources`
+  only, but `delete` additionally accepts `source` and `biog_source_data`
+  (`API.md` §4.5/§9.13; an earlier version of this document said "no aliases" full
+  stop, which was true only of the write side). `models.py` deliberately keeps
+  `delete_aliases={"sources"}` — a safe subset. Unlike every other resource,
   **create and update share one handler** (`SourceMutationHandler`, which handles
   both operations by delegating to `BiogSourceRepository`).
 - PK: `c_personid`, `c_textid`, `c_pages` (`c_pages` is optional/nullable at the PK

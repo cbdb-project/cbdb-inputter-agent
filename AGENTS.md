@@ -6,10 +6,39 @@ authenticated CBDB user, in place of manually clicking through the web UI. Any a
 (Claude Code or otherwise) working in this repo must follow the rules below.
 
 Background reading, in order: `docs/00-target-system-brief.md` (facts about the target
-system — auth, API, audit logging), `docs/01-implementation-plan.md` (this repo's
+system — auth, API, audit logging), `docs/07-api-md-digest.md` (**the target system's
+own `API.md`, digested — read this before any endpoint/field question**),
+`docs/01-implementation-plan.md` (this repo's
 architecture and milestones), `docs/03-extraction-review-workflow.md` (source-text →
 staging-file → human-review pipeline), `docs/04-field-whitelists.md` (per-resource
 allowed fields), `docs/05-testing-strategy.md` (mocking/fixture conventions).
+
+## The target system's API contract — where it lives, and keeping it in sync
+
+The authoritative API specification is **the target system's own `API.md`**, not
+anything in this repo:
+
+- Canonical: <https://github.com/cbdb-project/cbdb-online-main-server/blob/develop/API.md>
+- Locally: `${CBDB_ONLINE_MAIN_SERVER_REPO_DIR}/API.md` (path comes from `.env` —
+  see `.env.sample`; exposed as `Config.online_main_server_repo_dir`). That checkout
+  is **read-only to us** — never modify the target repo.
+- Digested for this repo, with a sync stamp and a re-sync procedure:
+  **`docs/07-api-md-digest.md`** (last synced against `origin/develop` `fd747aba`,
+  2026-08-18).
+
+`API.md` **is under active, continuing revision** (§1.3's write-throttling contract and
+the failed-auth rate cap were both added in the days before that sync). So:
+
+- Before answering any "can the API do X / what fields does Y take" question from
+  memory, check the digest's sync stamp; if the work is consequential (a production
+  write, a new resource, a field you haven't used before), `git fetch origin develop`
+  in that checkout and diff `API.md` against the stamped SHA first.
+- When you do re-sync: update `docs/07-api-md-digest.md`'s stamp *and* the affected
+  section, propagate anything that changes a hard rule into this file, propagate
+  field/endpoint facts into `docs/00-target-system-brief.md` /
+  `docs/04-field-whitelists.md`, and log the sync in `docs/02-review-log.md`.
+- `docs/07-api-md-digest.md` is a *summary*. Where it and upstream `API.md` disagree,
+  upstream wins and the digest is the thing that's wrong — fix it.
 
 ## Hard rules
 
@@ -27,6 +56,31 @@ allowed fields), `docs/05-testing-strategy.md` (mocking/fixture conventions).
    way, the `/api/v2/*` endpoints are the ones *confirmed* to write `audit_log` +
    `operations` inside one DB transaction — staying on them is what makes every write
    from this agent traceable back to the token's user. See brief §3–4.
+
+   **Read-only lookup endpoints are additionally allowed, for coding source material
+   into codes — reads only, never as part of a write payload without human review.**
+   `API.md` §14.1/§14.4 documents a set of public, unauthenticated lookup endpoints
+   that are how a book title, place name, office name or kinship term gets turned into
+   the numeric code a `changes` payload needs. Allowed:
+   `GET /api/v2/texts` and `GET /api/v2/texts/{id}` (`c_textid` → title),
+   `GET /api/select/{table}` (whole small code table),
+   `GET /api/select/search/{table}` (keyword search),
+   `GET /api/code/addr`, and `GET /api/name`.
+   Three conditions, all of them binding:
+   (a) they must still go through `http_client.py` (rule 2 — they're rate-limited and
+   audit-logged like everything else);
+   (b) `/api/select/*`, `/api/code/addr` and `/api/name` are **site-UI endpoints whose
+   response shape upstream explicitly does not guarantee** (some return a bare array,
+   some a Laravel paginator, `search/pinyin` returns plain text) — parse defensively,
+   and never let a submission depend on one silently;
+   (c) **a code that came out of a lookup is a *suggestion*, not an answer** — it goes
+   into a staging proposal with its `source_quote`/`confidence` and gets human review
+   before it is ever submitted. Anything else in `/api/*` that isn't named here or in
+   the paragraph above stays off-limits, in particular the old crowdsourcing channel
+   `/api/operations/*` (no whitelist, no PK validation, **no `audit_log`**) and
+   `POST /api/v1/user/login` (a dead OAuth-era route that always 404s — and, because it
+   runs on the *session* guard, will leave a logged-in session cookie behind first if the
+   credentials happen to validate and a session is active).
 2. **Never bypass `http_client.py` for outbound requests.** All HTTP calls to the
    target system — reads included — must go through the shared client so local audit
    logging (`audit_log.py`) and rate limiting apply uniformly. Do not write a "quick"
@@ -52,8 +106,9 @@ allowed fields), `docs/05-testing-strategy.md` (mocking/fixture conventions).
    candidate ID (nonzero, not already taken, within `max(existing)+10000`) via
    `person_id.py` before sending a create — see brief §3. **Exception:** two
    sub-resources have their own, *server*-assigned surrogate ID in their composite
-   PK — `possessions` (`c_possession_record_id`) and `postings`/`offices`
-   (`c_posting_id`). Never try to allocate or predict these client-side; read them
+   PK — `possessions` (`c_possession_record_id`) and `postings`
+   (`c_posting_id`; the server also answers to the alias `offices` here, but never use
+   it — see rule 12(b)). Never try to allocate or predict these client-side; read them
    back from the server's create response. See `docs/04-field-whitelists.md`.
 7. **Person before sub-resources.** Never submit a sub-resource
    (`altnames`/`addresses`/`kinship`/etc.) referencing a `person_id` that hasn't been
@@ -61,6 +116,58 @@ allowed fields), `docs/05-testing-strategy.md` (mocking/fixture conventions).
 8. **Local audit log is append-only.** Never delete or rewrite a `logs/*.jsonl` file.
    It exists specifically so a human can reconstruct what this agent attempted, even if
    the target server's own log has a gap or the request never arrived.
+9. **`CBDB_MAX_REQUESTS_PER_MINUTE=60` is a ceiling, not a tuning knob.** `API.md` §1.3
+   caps *writes* at **1 request/second, serialized, across the whole client** — not per
+   endpoint, per resource, per thread, or per machine. 60/min is exactly that limit, and
+   `RateLimiter.slot()` is what makes it serialized: it holds a lock across the whole
+   request and measures the interval from the previous *response*, not from the previous
+   send — "wait for the previous response", not "fire on a metronome". One honest limit
+   remains: the limiter is per-`HttpClient` **instance**, so two concurrent
+   `python -m cbdb_agent` processes would each hold their own 1 req/s budget — don't run
+   them concurrently. And nothing will 429 you for exceeding the *write rate*
+   specifically (no application-layer throttle there), so this contract is enforced by
+   us or not at all. That is not "these endpoints never 429" — the failed-auth gate in
+   rule 10 covers all endpoints, and a proxy/WAF can 429 anytime, so keep handling 429
+   with backoff. Never raise this number to speed up reads; add a separate read limiter
+   instead.
+10. **Never retry a 401, and treat one as a whole-batch stop.** As of `API.md` §1.3
+    (upstream `fd747aba`, 2026-08-18), failed *Bearer-authenticated* attempts are counted
+    **per source IP at 60/minute** and blocked before authentication even runs, turning a
+    stale token into a `429` with a longer backoff. The counter is per-IP, not
+    per-account: retrying a dead token behind an institutional NAT blocks other people's
+    clients too. So a 401/403 is a property of the *credentials*, never of the record —
+    `batch_runner.py` aborts the batch on either (`_ABORTING_ERRORS`) rather than
+    isolating it per proposal, and public lookups use `get(..., public=True)` so they
+    send no token to spend. Stop and get a new token.
+11. **`ok: true` does not mean the field was written.** On `basicinformation`
+    create *and* update, `postings` create, `possessions` create, and `sources`
+    create/update, the server **silently drops** unknown or blacklisted fields and still
+    returns `200 ok:true` (`API.md` §4.6). A typo'd column name on those paths is not an
+    error, it's a missing value. `models.py`'s client-side whitelist is what protects
+    these paths — it is enforced before every `create`/`update` in `mutation_api.py`, so
+    never work around it. **Note the client does not yet verify writes for you**:
+    `batch_runner.run_batch()` records a `200` as `status="success"` without inspecting
+    `result.row`. After a real (non-dry-run) write that matters, read the row back
+    yourself via `/api/v2/get` and compare — don't infer it from the exit code.
+12. **Code-table and entity-aggregate writes are a different, higher risk class than
+    person data — never do one without explicit, specific user approval.** This covers
+    `text-codes` (new `TEXT_CODES` rows), `char-variant-map`, the `office` and
+    `social-institution` entity aggregates, and `merged-person`. They are **global
+    reference data** referenced by potentially tens of thousands of person rows, and
+    **there is no delete path at all** — a wrong row is un-deletable and only partly
+    correctable. So a missing book title or office code is something you **report to the
+    user as a finding**, with the evidence; you create it only if they say to. It is
+    never a gap you close on your own initiative to unblock a batch.
+    Mechanics and traps: `docs/07-api-md-digest.md` §2.2–2.4.
+    **Two things to be precise about.** (a) *This rule is not enforced by code.* Those
+    resource strings simply aren't in `models.py`'s `RESOURCE_SPECS`, so a staging YAML
+    naming one is rejected today as an unknown alias — which is the right outcome by
+    accident, not by design. The moment someone models one of them for a legitimate
+    reason, nothing in the code will ask for approval. (b) *Two near-identical strings
+    mean entirely different resources*: `office` is the entity aggregate (needs approval)
+    while `offices` resolves to the **postings sub-resource** (routine); likewise
+    `social-institution` (hyphen, entity, needs approval) vs `social_institution`
+    (underscore, the person sub-resource `BIOG_INST_DATA`, routine). Read the separator.
 
 ## Review workflow for changes in this repo
 
@@ -162,6 +269,21 @@ first**, then:
   space instead of U+0020; a naive "same-looking" retype can silently normalize
   these and count as an unintended edit to content you were only supposed to
   leave alone).
+
+**A `kinship` update whose `changes` contains *only* `c_kinship_pair` is not a
+narrow edit — it can create a row under the other person.** `API.md` §9.8 says
+flatly that `kinship.update` (unlike `associations.update`) never back-fills a
+missing mirror row. That is true only of an *ordinary* update: §12.2's table and
+§12.4 both carve out the "pair-only" repair path — `changes` holding
+`c_kinship_pair` and **no** `KIN_DATA` column — which **does** back-fill. Reading
+§9.8 alone and concluding "kinship never back-fills" is how you'd unknowingly
+insert a brand-new `KIN_DATA` row under someone you weren't editing. Treat any
+pair-only kinship write as a two-person change: `GET` both directions first, same
+as for the content fields above. Two related traps from the same chapter: if the
+forward code has no authoritative reverse in the code table, the mirror row is
+still created with the reverse code as sentinel `0` (未詳) and **no divergence
+detection at all**; and `meta.force` on a multi-candidate drift converges only the
+*first* candidate, leaving the rest. See `docs/07-api-md-digest.md` §3.
 
 **Also:** a live *write* against production (`CBDB_DRY_RUN=false`), even from a
 correctly-argued ad-hoc verification script using `http_client.py`/`mutation_api.py`
