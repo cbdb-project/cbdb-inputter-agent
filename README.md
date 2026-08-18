@@ -26,6 +26,10 @@ Start here:
   human-reviewable, bulk-editable staging file before anything is submitted.
 - [`docs/04-field-whitelists.md`](docs/04-field-whitelists.md) — per-resource allowed
   fields and composite primary keys for all 13 supported resources.
+- [`docs/08-review-interface-design.md`](docs/08-review-interface-design.md) — the
+  offline review page (`tools/review/index.html`) that loads a batch's `review.json`,
+  lets a human resolve conflicts and edit values in bulk, and exports a
+  `decisions.json` that `apply-review` writes back into the YAML.
 - [`docs/06-staging-preview-design.md`](docs/06-staging-preview-design.md) — the
   generated, read-only `preview.md` (with a best-effort live old-vs-new diff)
   that `validate --staging` refreshes on every run, for reviewing a batch without

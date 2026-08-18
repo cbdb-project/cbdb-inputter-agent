@@ -1,8 +1,9 @@
 """`python -m cbdb_agent` entry point.
 
 Subcommands:
-  validate --staging <path> | --input <path>  [--env <path>]
-  submit   --staging <path> | --input <path>  [--dry-run] [--env <path>]
+  validate     --staging <path> | --input <path>  [--env <path>]
+  submit       --staging <path> | --input <path>  [--dry-run] [--env <path>]
+  apply-review --staging <path> --decisions <path>
 
 See docs/01-implementation-plan.md section 7 and docs/03-extraction-review-
 workflow.md section 2.3 for the intended interaction flow. Both --staging and
@@ -11,7 +12,12 @@ same submission engine (batch_runner.py) - see load_input_batch()'s docstring fo
 why.
 
 `validate --staging` additionally refreshes a `preview.md` file next to the
-staging YAML on every run (docs/06-staging-preview-design.md section 3);
+staging YAML on every run (docs/06-staging-preview-design.md section 3), plus a
+`review.json` for the offline review page in `tools/review/`
+(docs/08-review-interface-design.md). `apply-review` is the return leg of that
+round trip: it reads the page's exported `decisions.json` and writes the choices
+back into the staging YAML - the YAML remains the only source of truth and the
+only thing `submit` ever reads. `--env` there is unused;
 `--env` there is only used for that preview's best-effort Tier 2 live diff, not
 for validation itself, which never touches the network. `validate --input` has
 no persistent file location to write a preview next to, so it skips this.
@@ -31,6 +37,7 @@ from .batch_runner import ProposalResult, fetch_current_values, run_batch
 from .config import ConfigError, load_config
 from .http_client import HttpClient
 from .mutation_api import MutationApi
+from .review import apply_decisions, export_review_json
 from .staging import (
     Issue,
     StagingBatch,
@@ -39,6 +46,7 @@ from .staging import (
     load_input_batch,
     load_staging_file,
     render_preview_markdown,
+    save_staging_file,
     validate_for_submit,
 )
 
@@ -116,6 +124,19 @@ def _write_preview(args: argparse.Namespace, batch: StagingBatch, issues: list[I
         print(f"Preview written to {preview_path}")
     except OSError as exc:
         print(f"Warning: could not write preview.md: {exc}", file=sys.stderr)
+
+    # review.json rides along with preview.md for the same reason preview.md is tied
+    # to validate: a review surface that can go stale relative to the file it claims
+    # to describe is worse than no review surface. Both are generated and disposable.
+    try:
+        review_path = Path(args.staging).parent / "review.json"
+        review_path.write_text(
+            export_review_json(batch, issues, current_values=current_values),
+            encoding="utf-8",
+        )
+        print(f"Review data written to {review_path}  (open tools/review/index.html)")
+    except OSError as exc:
+        print(f"Warning: could not write review.json: {exc}", file=sys.stderr)
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
@@ -206,6 +227,51 @@ def _archive_batch(
     print(f"Archived to {dest_dir}/")
 
 
+def cmd_apply_review(args: argparse.Namespace) -> int:
+    """Apply the review page's decisions.json back into the staging YAML.
+
+    Prints every change it made. Does NOT validate afterwards - run
+    `validate --staging` next, which is also what regenerates preview.md/review.json
+    from the newly-written file.
+    """
+    try:
+        batch = load_staging_file(args.staging)
+    except (StagingError, OSError, ValueError) as exc:
+        print(f"Could not load {args.staging}: {exc}", file=sys.stderr)
+        return EXIT_LOAD_ERROR
+
+    try:
+        decisions = json.loads(Path(args.decisions).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"Could not load {args.decisions}: {exc}", file=sys.stderr)
+        return EXIT_LOAD_ERROR
+
+    try:
+        applied = apply_decisions(batch, decisions)
+    except StagingError as exc:
+        # Deliberately a hard failure, not a partial apply: a decisions file that
+        # doesn't match the batch means one of the two has moved on, and applying
+        # only the half that still matches would leave the reviewer believing they
+        # settled something they didn't.
+        print(f"Refusing to apply: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION_ERROR
+
+    if not applied:
+        print("No changes - every decision already matched the staging file.")
+        return EXIT_OK
+
+    for change in applied:
+        print(f"  [{change.proposal_id}] {change.kind}: {change.detail}")
+    try:
+        save_staging_file(batch, args.staging)
+    except OSError as exc:
+        print(f"Applied nothing - could not write {args.staging}: {exc}", file=sys.stderr)
+        return EXIT_LOAD_ERROR
+    print(f"{len(applied)} change(s) written to {args.staging}")
+    print("Next: python -m cbdb_agent validate --staging " + args.staging)
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m cbdb_agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -227,6 +293,16 @@ def build_parser() -> argparse.ArgumentParser:
                 help="Force dry-run even if .env disables it (cannot force it off)",
             )
         sub.set_defaults(func=handler)
+
+    apply_review = subparsers.add_parser(
+        "apply-review",
+        help="Write the review page's decisions.json back into a staging YAML",
+    )
+    apply_review.add_argument("--staging", required=True, help="Path to the YAML staging file")
+    apply_review.add_argument(
+        "--decisions", required=True, help="decisions.json exported by tools/review/index.html"
+    )
+    apply_review.set_defaults(func=cmd_apply_review)
 
     return parser
 

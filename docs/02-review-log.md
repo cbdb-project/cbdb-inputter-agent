@@ -950,3 +950,112 @@ codex confirmed no further factual errors in the digest sections it re-checked
 digest's line count came from the *stale local HEAD* while its blob SHA came from
 `origin/develop` — the local checkout was 2 commits behind. When re-syncing, read
 `git show origin/develop:API.md`, not the working tree.
+
+---
+
+## text-codes support + AGENTS.md rule 12 gate (2026-08-18)
+
+Context: a real 元代 batch needed a `TEXT_CODES` row for 《聽雪先生集》, which does not
+exist in CBDB. The previous increment's rule 12 said "never create a code-table row
+without explicit user approval" but was **not enforced by code** — it happened to work
+only because the resource wasn't modelled. The user approved creating this one row, so
+the gate had to become real before the resource became reachable.
+
+Delivered: `RESOURCE_SPECS["text_codes"]` (create only), `ResourceSpec.
+requires_explicit_approval` + `required_create_fields`, `Proposal.approved_by`, and a
+gate at **three** layers — `staging.find_issues()` (structural error),
+`mutation_api` (`_require_approval`), and `http_client._check_approval` (reads the
+resource straight out of the envelope). 201 → 226 tests.
+
+### Review-agent pass — 3 SERIOUS, 8 MINOR
+1. **SERIOUS** — nothing required a `text-codes` create to contain anything. The
+   server makes `changes` optional on create (API.md §4.3), so a proposal with
+   `changes: {}` passed validation and would have minted a **permanent, blank,
+   undeletable** `TEXT_CODES` row at `max+1` — on the one resource where that cannot
+   be undone, and whose `c_title_chn` is not even editable afterwards. Added
+   `required_create_fields={"c_title_chn"}`, enforced in both validation layers.
+2. **SERIOUS** — `text_codes` was the only spec whose `key` was not one of its own
+   `create_aliases`, and `MutationApi.create()` falls back to `alias = spec.key` when
+   no `resource_string` is passed. So the generic API was unusable for this resource;
+   only `batch_runner` worked, by accident. Fixed, plus a test asserting the invariant
+   `key in create_aliases` for *every* resource so it cannot regress.
+3. **SERIOUS** — the gate lived only in `staging.py`, so `MutationApi.create()` would
+   perform an unapproved, irreversible write. Added `_require_approval` there too.
+Minors fixed: `load_input_batch` silently dropped `approved_by` (so a JSON record that
+*had* an approval failed with "it needs an approval"); `save_staging_file` wrote
+`approved_by: null` onto every ordinary proposal (noise, and an invitation for an agent
+to fill in the one field it must never fill in) — now dropped only where unset, while
+`resolution: null` is deliberately kept because it is the blocker a human must see;
+`preview.md` didn't show the signature at all; a docs cross-reference pointed at the
+wrong rule number; the flag's own docstring asserted "no delete path", which is true
+for the code tables but **false** for the `office`/`social-institution` aggregates that
+rule 12 also covers.
+
+### codex exec pass — 2 SERIOUS, 2 MINOR
+1. **SERIOUS** — `HttpClient.post()` bypassed everything: it takes an arbitrary JSON
+   body and only checked whether the path was mutating, so direct library code could
+   post an unsigned `text-codes` create. Added `_check_approval()`, which reads
+   `resource` out of the envelope itself (so it cannot be evaded by going around
+   `MutationApi`) and raises `MissingApprovalError`. Same fail-closed reasoning as
+   `_check_mutating_flag`.
+2. **SERIOUS** — the required-field test was `value in (None, "")`, so `"   "`, `0`,
+   `False`, `[]` and `{}` all passed. A whitespace title matters specifically: the
+   server's `TrimStrings` + `ConvertEmptyStringsToNull` middleware (API.md §1.4) turns
+   `"   "` into NULL, i.e. exactly the blank permanent row finding 1 was about.
+   Replaced with `models.is_missing_value()`, which documents why each case counts and
+   deliberately does *not* treat `0` as missing (it is CBDB's "unknown" sentinel).
+3–4. MINOR — the "no delete path" wording had propagated into AGENTS.md rule 12,
+docs/03, SKILL.md and a staging comment; corrected everywhere to say the shared
+property is **blast radius**, with reversibility called out per resource. And docs/04
+claimed only `text-codes` was registered, which finding 2 of the agent pass had just
+changed.
+
+### Sign-off
+226 tests green. Worth remembering: every one of the four serious findings was a
+*gate that only worked if the caller cooperated*. For a write with no server-side undo
+that is not a gate. It now fails closed at the transport layer, which is the only one
+no caller can skip.
+
+---
+
+## Review interface (2026-08-18) — Milestone 9
+
+The 元代 batch came out at **78 proposals / 41 conflicts**, at which point
+`preview.md` (67 KB, linear, read-only) stopped being a usable review surface — and
+the user's requirement was explicitly 「縱覽式的看大量數據」 with 「在界面裡面進行互動或者
+修改」. Design and rationale: `docs/08-review-interface-design.md`.
+
+Delivered: `src/cbdb_agent/review.py` (`export_review_json` / `apply_decisions`),
+`tools/review/index.html` (single file, no dependencies, no network, opens from
+`file://`, contains **no data**), `validate --staging` now also writes `review.json`
+beside `preview.md`, and a new `apply-review --staging <yaml> --decisions <json>`
+subcommand. 226 → 247 tests.
+
+Two decisions worth recording:
+- **A reusable page that loads JSON, not a page generated per batch.** `docs/06`'s
+  Tier 3 suggested rendering the preview as an Artifact; that is a nicer read, not a
+  review tool, and it has to be regenerated and re-trusted every batch. A committed
+  page accumulates its improvements, is reviewed as code once, holds no data, and
+  handles the `update`/`delete` batches the user has said are coming.
+- **The YAML is still the only write path.** The page cannot write it (it is a
+  `file://` document), and `submit` still reads only the YAML. The round trip is
+  `validate` → `review.json` → page → `decisions.json` → `apply-review`, which prints
+  every change it made. `docs/06` §4's "no editing via the preview" constraint is
+  therefore satisfied, not relaxed — it just has a front end now. `docs/06` carries a
+  pointer saying so.
+
+The feature that actually justified the work: **bulk resolution of repeated
+questions**. Conflicts are fingerprinted by `field` + option set, and any fingerprint
+appearing more than once surfaces at the top as a single row with a count. This batch
+has 5 identical `c_index_year` conflicts and 3 reign-year checks — 8 clicks become 2.
+
+Also fixed during self-review of the page: the header's "structural errors" counter
+was static from the export, so it kept reporting an error after the reviewer had typed
+their name into the approval box; the same staleness affected the per-group badge, the
+row highlight, and the inline issue lines for already-settled conflicts. All four now
+recompute from the live decisions.
+
+Verified: round trip exercised end to end on the real batch (41 → 38 conflicts after
+three resolutions plus a field edit, then restored to the pre-test state so no
+agent-invented decision was left in the user's file); page JS syntax-checked; no
+external references and no `fetch`/`XHR` in the file.
