@@ -107,3 +107,77 @@ def test_invalid_max_requests_per_minute_raises(tmp_path, monkeypatch):
     )
     with pytest.raises(ConfigError):
         load_config(env_path)
+
+
+def test_online_main_server_repo_dir_defaults_to_none(tmp_path, monkeypatch):
+    """Empty/unset is the normal case and must not be guessed at."""
+    for key in ("CBDB_API_BASE_URL", "CBDB_ONLINE_MAIN_SERVER_REPO_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    env_path = write_env(tmp_path, "CBDB_API_BASE_URL=http://localhost:8000\n")
+    assert load_config(env_path).online_main_server_repo_dir is None
+
+    env_path = write_env(
+        tmp_path,
+        "CBDB_API_BASE_URL=http://localhost:8000\nCBDB_ONLINE_MAIN_SERVER_REPO_DIR=\n",
+    )
+    assert load_config(env_path).online_main_server_repo_dir is None
+
+
+def test_online_main_server_repo_dir_accepts_existing_directory(tmp_path, monkeypatch):
+    for key in ("CBDB_API_BASE_URL", "CBDB_ONLINE_MAIN_SERVER_REPO_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    repo_dir = tmp_path / "cbdb-online-main-server"
+    repo_dir.mkdir()
+    env_path = write_env(
+        tmp_path,
+        "CBDB_API_BASE_URL=http://localhost:8000\n"
+        # Forward slashes even on Windows - the form the .env comments recommend.
+        f"CBDB_ONLINE_MAIN_SERVER_REPO_DIR={repo_dir.as_posix()}\n",
+    )
+    config = load_config(env_path)
+    assert config.online_main_server_repo_dir == repo_dir
+
+
+def test_online_main_server_repo_dir_expands_user(tmp_path, monkeypatch):
+    for key in ("CBDB_API_BASE_URL", "CBDB_ONLINE_MAIN_SERVER_REPO_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    home = tmp_path / "home"
+    (home / "GitHub" / "cbdb-online-main-server").mkdir(parents=True)
+    # Path.expanduser() reads HOME on POSIX and USERPROFILE on Windows.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    env_path = write_env(
+        tmp_path,
+        "CBDB_API_BASE_URL=http://localhost:8000\n"
+        "CBDB_ONLINE_MAIN_SERVER_REPO_DIR=~/GitHub/cbdb-online-main-server\n",
+    )
+    config = load_config(env_path)
+    assert config.online_main_server_repo_dir == home / "GitHub" / "cbdb-online-main-server"
+
+
+def test_online_main_server_repo_dir_rejects_nonexistent_path(tmp_path, monkeypatch):
+    for key in ("CBDB_API_BASE_URL", "CBDB_ONLINE_MAIN_SERVER_REPO_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    missing = (tmp_path / "not-a-real-clone").as_posix()
+    env_path = write_env(
+        tmp_path,
+        "CBDB_API_BASE_URL=http://localhost:8000\n"
+        f"CBDB_ONLINE_MAIN_SERVER_REPO_DIR={missing}\n",
+    )
+    with pytest.raises(ConfigError, match="CBDB_ONLINE_MAIN_SERVER_REPO_DIR"):
+        load_config(env_path)
+
+
+def test_online_main_server_repo_dir_rejects_a_file(tmp_path, monkeypatch):
+    """Must point at the folder itself, not a file inside it."""
+    for key in ("CBDB_API_BASE_URL", "CBDB_ONLINE_MAIN_SERVER_REPO_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    a_file = tmp_path / "AGENTS.md"
+    a_file.write_text("x", encoding="utf-8")
+    env_path = write_env(
+        tmp_path,
+        "CBDB_API_BASE_URL=http://localhost:8000\n"
+        f"CBDB_ONLINE_MAIN_SERVER_REPO_DIR={a_file.as_posix()}\n",
+    )
+    with pytest.raises(ConfigError, match="not an existing directory"):
+        load_config(env_path)

@@ -41,6 +41,7 @@ class Config:
     confirm_prod: str
     max_requests_per_minute: int
     local_audit_log_dir: Path
+    online_main_server_repo_dir: Path | None = None
 
     @property
     def live_writes_confirmed(self) -> bool:
@@ -113,6 +114,25 @@ def load_config(env_path: str | Path | None = None) -> Config:
         os.environ.get("CBDB_LOCAL_AUDIT_LOG_DIR", "./logs").strip() or "./logs"
     )
 
+    # Optional read-only pointer to a local clone of the target system's source
+    # (cbdb-online-main-server), for verifying endpoint/field behaviour offline.
+    # Unset stays None - never guessed from cwd, since the agent's own checkout is
+    # a different repo. expanduser() lets a macOS/Linux "~/..." value work; a
+    # Windows "C:/..." or "C:\..." path is already absolute and passes through.
+    repo_dir_raw = os.environ.get("CBDB_ONLINE_MAIN_SERVER_REPO_DIR", "").strip()
+    online_main_server_repo_dir: Path | None = None
+    if repo_dir_raw:
+        online_main_server_repo_dir = Path(repo_dir_raw).expanduser()
+        # Only validated when explicitly set: a typo here would otherwise surface
+        # much later as a confusing missing-file error.
+        if not online_main_server_repo_dir.is_dir():
+            raise ConfigError(
+                "CBDB_ONLINE_MAIN_SERVER_REPO_DIR is set to "
+                f"{repo_dir_raw!r} but that is not an existing directory. Point it "
+                "at the local clone folder of cbdb-online-main-server, or leave "
+                "it empty."
+            )
+
     return Config(
         api_base_url=api_base_url,
         api_token=api_token,
@@ -120,4 +140,5 @@ def load_config(env_path: str | Path | None = None) -> Config:
         confirm_prod=confirm_prod,
         max_requests_per_minute=max_rpm,
         local_audit_log_dir=audit_log_dir,
+        online_main_server_repo_dir=online_main_server_repo_dir,
     )
