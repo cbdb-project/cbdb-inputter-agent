@@ -26,6 +26,10 @@ Start here:
   human-reviewable, bulk-editable staging file before anything is submitted.
 - [`docs/04-field-whitelists.md`](docs/04-field-whitelists.md) — per-resource allowed
   fields and composite primary keys for all 13 supported resources.
+- [`docs/09-code-labels-and-snapshot.md`](docs/09-code-labels-and-snapshot.md) — how
+  every code in a batch gets a human-readable name (and an address its full parent
+  chain), using CBDB's weekly SQLite build, plus the hard line between what that
+  snapshot may and may not be used for.
 - [`docs/08-review-interface-design.md`](docs/08-review-interface-design.md) — the
   offline review page (`tools/review/index.html`) that loads a batch's `review.json`,
   lets a human resolve conflicts and edit values in bulk, and exports a

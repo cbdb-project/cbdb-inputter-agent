@@ -34,6 +34,15 @@ from pathlib import Path
 
 from .audit_log import AuditLog
 from .batch_runner import ProposalResult, fetch_current_values, run_batch
+from .code_lookup import CodeResolver, collect_code_values
+from .snapshot import (
+    autodownload_from_env,
+    ensure_snapshot,
+    open_snapshot,
+    snapshot_age_days,
+    snapshot_dir_from_env,
+    snapshot_is_stale,
+)
 from .config import ConfigError, load_config
 from .http_client import HttpClient
 from .mutation_api import MutationApi
@@ -106,6 +115,8 @@ def _write_preview(args: argparse.Namespace, batch: StagingBatch, issues: list[I
     validate's own exit code or structural report.
     """
     current_values = None
+    config = None
+    client = None
     try:
         config = load_config(args.env)
         client = HttpClient(config, AuditLog(config.local_audit_log_dir))
@@ -116,6 +127,8 @@ def _write_preview(args: argparse.Namespace, batch: StagingBatch, issues: list[I
         current_values = fetch_current_values(batch, MutationApi(client))
     except ConfigError:
         current_values = None
+
+    code_labels = _resolve_code_labels(batch, config, client)
 
     try:
         markdown = render_preview_markdown(batch, issues, current_values=current_values)
@@ -131,12 +144,79 @@ def _write_preview(args: argparse.Namespace, batch: StagingBatch, issues: list[I
     try:
         review_path = Path(args.staging).parent / "review.json"
         review_path.write_text(
-            export_review_json(batch, issues, current_values=current_values),
+            export_review_json(
+                batch,
+                issues,
+                current_values=current_values,
+                code_labels=code_labels,
+            ),
             encoding="utf-8",
         )
         print(f"Review data written to {review_path}  (open tools/review/index.html)")
     except OSError as exc:
         print(f"Warning: could not write review.json: {exc}", file=sys.stderr)
+
+
+def _resolve_code_labels(
+    batch: StagingBatch, config: object | None, client: HttpClient | None
+) -> dict:
+    """Human-readable names for every code in the batch (docs/08 section 3).
+
+    Prefers the weekly SQLite snapshot, which answers the hierarchy joins - an
+    address's full parent chain, an office's type-tree ancestry - in one local query
+    instead of one HTTP request per level. Falls back to the public lookup endpoints,
+    and to nothing at all when neither is available.
+
+    Best-effort by contract, exactly like the Tier-2 live diff: `validate` must keep
+    working with no network, no .env and no snapshot, so nothing here may raise or
+    affect the exit code.
+    """
+    # Fall back to the environment when there is no Config: `validate --staging` is
+    # required to work with no .env, and that is exactly when a user who does not want
+    # a 132 MB download most needs to be able to say so. Reading only Config here
+    # meant CBDB_SQLITE_AUTODOWNLOAD was silently ignored in that case.
+    snapshot_dir = getattr(config, "sqlite_dir", None) or snapshot_dir_from_env()
+    allow_download = getattr(config, "sqlite_autodownload", None)
+    if allow_download is None:
+        allow_download = autodownload_from_env()
+    try:
+        snapshot_path = ensure_snapshot(
+            snapshot_dir, allow_download=allow_download, progress=print
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail validate over a cache
+        print(f"Warning: snapshot unavailable ({exc})", file=sys.stderr)
+        snapshot_path = None
+
+    resolver = None
+    connection = None
+    try:
+        if snapshot_path is not None:
+            connection = open_snapshot(snapshot_path)
+            resolver = CodeResolver(snapshot=connection)
+            age = snapshot_age_days(snapshot_path)
+            age_text = f", built {age:.0f} day(s) ago" if age is not None else ""
+            print(f"Code labels from the SQLite snapshot ({snapshot_path.name}{age_text})")
+            if snapshot_is_stale(snapshot_path):
+                # Reference tables drift slowly, but the reviewer should know the
+                # names they are reading come from a build this old.
+                print(
+                    "  note: that snapshot is over two weeks old - delete it to "
+                    "re-download, or ignore if the code tables haven't moved.",
+                    file=sys.stderr,
+                )
+        elif client is not None:
+            resolver = CodeResolver(client=client)
+            print("Code labels from the public lookup API (no local snapshot)")
+
+        if resolver is None:
+            return {}
+        return resolver.resolve_values(collect_code_values(batch))
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        print(f"Warning: could not resolve code labels ({exc})", file=sys.stderr)
+        return {}
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def cmd_submit(args: argparse.Namespace) -> int:

@@ -125,6 +125,19 @@ understand, rather than mis-rendering a newer shape.
 - **Replacing `preview.md`.** It still stands alone with no browser, and is what a
   terminal-only or CI context reads. Tier 1 must keep working (`docs/06` §2).
 
+## 4a. One coupling to keep in mind
+
+`review.REVIEW_JSON_SCHEMA_VERSION` and the page's `const SCHEMA` must match. The page
+refuses to load an export whose version it doesn't recognise, which is the right
+behaviour — better a clear refusal than a silent mis-render — but it also means
+bumping one and forgetting the other turns the page into a blank screen that passes
+every syntax check. `tests/test_review_page.py::test_page_declares_the_same_schema_version_as_the_exporter`
+exists precisely because that happened.
+
+Bump both together, and add a line to the `//` history next to the constant saying
+what changed, so a future reader can tell whether an old `review.json` lying around is
+merely stale or actually incompatible.
+
 ## 5. Files
 
 ```
@@ -133,6 +146,7 @@ tools/review/index.html          the page (no data, no dependencies, no network)
 src/cbdb_agent/cli.py            validate --staging also writes review.json;
                                  new `apply-review --staging <yaml> --decisions <json>`
 tests/test_review.py             export shape, apply strictness, round trip
+tests/test_review_page.py        the page itself, driven in headless Chromium
 ```
 
 `apply_decisions()` is **strict**: an unknown proposal or conflict id, a foreign

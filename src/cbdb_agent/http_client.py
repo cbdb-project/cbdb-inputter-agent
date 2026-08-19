@@ -106,6 +106,11 @@ _KNOWN_READ_ONLY_PATHS = (
     "/api/code/addr",
     "/api/name",
     "/cbdbapi/person",
+    # Undocumented legacy dumps, used only as the no-snapshot fallback for office
+    # type hierarchy (AGENTS.md rule 1). Listed so _check_mutating_flag covers them
+    # too - the fail-closed guard is only as complete as this tuple.
+    "/api/OFFICE_TYPE_TREE",
+    "/api/OFFICE_CODE_TYPE_REL",
 )
 
 # Public endpoints (API.md 14.1/14.4 lookups, plus 14.7's /cbdbapi/person): none
@@ -119,6 +124,8 @@ PUBLIC_LOOKUP_PATHS = (
     "/api/code/addr",
     "/api/name",
     "/cbdbapi/person",
+    "/api/OFFICE_TYPE_TREE",
+    "/api/OFFICE_CODE_TYPE_REL",
 )
 
 # Cap on how much of a public-lookup response body is copied into the local

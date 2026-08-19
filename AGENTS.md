@@ -41,6 +41,44 @@ the failed-auth rate cap were both added in the days before that sync). So:
   `docs/04-field-whitelists.md`, and log the sync in `docs/02-review-log.md`.
 - `docs/07-api-md-digest.md` is a *summary*. Where it and upstream `API.md` disagree,
   upstream wins and the digest is the thing that's wrong — fix it.
+- For **reference data** (what a code means, what an address is inside), prefer the
+  weekly SQLite snapshot over the API — see the next section, including the hard
+  limit on what a snapshot may decide.
+
+## The weekly CBDB SQLite snapshot — what it's for, and what it must never decide
+
+CBDB publishes a full SQLite build of the database every week at
+<https://huggingface.co/datasets/cbdb/cbdb-sqlite> (`latest.zip`, ~132 MB compressed,
+~557 MB on disk). `src/cbdb_agent/snapshot.py` downloads it on demand, verifies it
+against the `sha256` in its sidecar metadata, and opens it **read-only**.
+
+- Location: `data/cbdb-sqlite/` inside this repo, gitignored. Override with
+  `CBDB_SQLITE_DIR`; disable the download with `CBDB_SQLITE_AUTODOWNLOAD=false`.
+  It lives in the repo rather than a user-cache directory so it is visible and can be
+  removed by deleting the folder — but if your checkout is inside a synced folder
+  (OneDrive/Dropbox), point `CBDB_SQLITE_DIR` outside it.
+- What it buys: reference data and the joins the API cannot do in one call. An
+  address's full parent chain through `ADDR_BELONGS_DATA`, an office's
+  `OFFICE_TYPE_TREE` ancestry through `OFFICE_CODE_TYPE_REL`, book titles, reign
+  periods — one local query instead of one rate-limited HTTP request per level. This
+  is what puts a human-readable name next to every code in the review page.
+
+**It is a weekly snapshot of a database that is written to continuously — including
+by this agent. So it answers "what does this code mean", never "what is currently
+true of this record".** Concretely, it must **never** be used for:
+
+- `max(c_personid)` or any `c_personid` allocation (`person_id.py` stays on the live
+  `GET /api/v2/persons`, per rule 6);
+- a "does this row already exist" check before a create — a row added since the build
+  is invisible in it, so the check can answer "not there" for something that is,
+  which is exactly how you create the duplicate you were checking for;
+- the current-value diff behind `preview.md` / `review.json` (that stays on
+  `GET /api/v2/get`);
+- anything else that gates a write.
+
+For those, the live API is the only acceptable source, and its being slower is the
+price of being right. `snapshot.snapshot_is_stale()` exists so a caller can tell the
+user how old the build is instead of quietly trusting it.
 
 ## Hard rules
 
@@ -68,6 +106,13 @@ the failed-auth rate cap were both added in the days before that sync). So:
    `GET /api/select/{table}` (whole small code table),
    `GET /api/select/search/{table}` (keyword search),
    `GET /api/code/addr`, and `GET /api/name`.
+   Two more are allowed **only** as the no-snapshot fallback for office-type
+   hierarchy: `GET /api/OFFICE_TYPE_TREE` and `GET /api/OFFICE_CODE_TYPE_REL`.
+   `API.md` §14 names these as "still present, not documented here" — they ignore
+   their parameters and dump the whole table (2.7k and 44k rows). Treat them as
+   liable to vanish: `code_lookup.py` fetches each once and treats a failure as
+   "no type tree for this office", never as an error. When the SQLite snapshot is
+   available these are not called at all, which is the better path anyway.
    Also allowed, and necessary for a different job — **reading a person's current
    state before proposing changes to them**: `GET /cbdbapi/person?id=<N>&mode=json`
    (`API.md` §14.7). `/api/v2/get` can only fetch one row by its full composite PK, so

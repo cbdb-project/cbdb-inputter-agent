@@ -2,3 +2,10 @@
 pytest>=8.0,<9
 responses>=0.25,<1
 freezegun>=1.4,<2
+
+# Drives tools/review/index.html in a real browser (tests/test_review_page.py).
+# OPTIONAL: those tests skip themselves when it, or its browser binary, is absent -
+# but they are the only thing that catches a page that parses fine and renders
+# nothing, which has already happened once. After installing, run:
+#     playwright install chromium
+playwright

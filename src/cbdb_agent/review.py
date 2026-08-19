@@ -32,13 +32,18 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .code_lookup import FIELD_CODE_TABLES, LIST_VALUED_FIELDS, code_table_names
 from .models import FieldWhitelistError, find_spec_by_alias
 from .staging import Issue, ProposalCurrentState, StagingBatch, StagingError
 
 # Bumped when the JSON contract changes in a way the page must know about. The page
 # checks it and refuses to load an export it does not understand, rather than
 # silently mis-rendering a newer shape.
-REVIEW_JSON_SCHEMA_VERSION = 1
+#   1: initial
+#   2: + code_labels / field_code_tables / list_valued_fields (human-readable names
+#      for every code, so a reviewer can check `c_office_id: 63057` against what it
+#      actually means rather than re-reading the agent's arithmetic)
+REVIEW_JSON_SCHEMA_VERSION = 2
 
 
 def export_review_json(
@@ -46,6 +51,7 @@ def export_review_json(
     issues: list[Issue],
     *,
     current_values: dict[str, ProposalCurrentState] | None = None,
+    code_labels: dict[str, dict] | None = None,
 ) -> str:
     """Serialize a batch + its issues + any live current values for the review page.
 
@@ -147,6 +153,18 @@ def export_review_json(
     payload = {
         "schema_version": REVIEW_JSON_SCHEMA_VERSION,
         "batch_id": batch.batch_id,
+        # "<table>:<value>" -> {label, sub?, lines?}. Resolved in Python at export
+        # time (code_lookup.py) because the page is opened from file:// and cannot
+        # call these endpoints itself. Empty when the export ran offline - the page
+        # must stay usable without it.
+        "code_labels": code_labels or {},
+        # Which code table each field's value belongs to, so the page can look a
+        # value up in code_labels without duplicating the mapping in JavaScript.
+        "field_code_tables": FIELD_CODE_TABLES,
+        "list_valued_fields": sorted(LIST_VALUED_FIELDS),
+        # table key -> CBDB table name, so the page can name the table a code was
+        # looked for in when it isn't found.
+        "code_table_names": code_table_names(),
         "source_excerpt": batch.source_excerpt,
         "batch_notes": batch.batch_notes,
         "group_labels": group_labels,

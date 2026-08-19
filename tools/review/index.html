@@ -120,6 +120,16 @@
   .fedit:focus{outline:none;border-bottom-color:var(--accent);background:var(--accent-soft)}
   .quote{color:var(--muted);font-size:12px;margin-top:5px;font-style:italic}
 
+  /* Read-only, resolved meaning of a code. Never editable: it is what the code
+     MEANS, not a value - an input would imply it could be saved. */
+  .codeinfo{grid-column:2;margin:0 0 4px;padding:3px 0 3px 9px;
+    border-left:2px solid var(--line);font-size:12px}
+  .codeinfo .cname{color:var(--ink);font-weight:600}
+  .codeinfo .csub{color:var(--muted);margin-left:6px}
+  .codeinfo .cline{color:var(--muted);display:block;margin-top:1px}
+  .codeinfo .cmiss{color:var(--warn);font-style:italic}
+  .opt .clabel{font-family:inherit;margin-left:6px;opacity:.85}
+
   .conflict{border-left:3px solid var(--warn);background:var(--warn-soft);
     padding:8px 10px;margin:7px 0;border-radius:0 6px 6px 0}
   .conflict.done{border-left-color:var(--good);background:var(--good-soft)}
@@ -211,10 +221,14 @@
 
 <script>
 "use strict";
-const SCHEMA = 1;
+const SCHEMA = 2;   // must match review.REVIEW_JSON_SCHEMA_VERSION
+                    //   1: initial
+                    //   2: + code_labels / field_code_tables /
+                    //      list_valued_fields / code_table_names
 let DATA = null;
 // decisions[proposalId] = {conflicts:{cid:value}, fields:{name:value}, approved_by:str}
 let D = {};
+const NL = String.fromCharCode(10);   // newline for title= tooltips
 const $ = (s) => document.querySelector(s);
 const el = (t, cls, txt) => { const n = document.createElement(t);
   if (cls) n.className = cls; if (txt !== undefined) n.textContent = txt; return n; };
@@ -250,6 +264,86 @@ function parseVal(s){
   if (/^-?\d*\.\d+$/.test(t)) return parseFloat(t);
   if (t.startsWith("[") || t.startsWith("{")) { try { return JSON.parse(t); } catch(e){} }
   return s;
+}
+
+/* ---------- code labels ----------
+   Resolved in Python at export time (code_lookup.py) from the weekly CBDB SQLite
+   snapshot, or from the public lookup API when there is no snapshot. The page never
+   fetches: it is opened from file:// and is deliberately network-free. An export
+   made offline simply has no labels, and everything below degrades to the bare code. */
+function codeTable(field){ return (DATA.field_code_tables || {})[field] || null; }
+/* Every CBDB code is an integer. Conflict options share a field with real codes but
+   often hold a DECISION instead - "defer", "new_office_code", "both". Those are not
+   codes, must not be looked up, and must not be flagged as unresolved. */
+function isCodeValue(v){
+  if (v === null || v === undefined || typeof v === "boolean") return false;
+  if (typeof v === "number") return Number.isInteger(v);
+  return typeof v === "string" && /^-?\d+$/.test(v.trim());
+}
+function codeLabel(field, value){
+  const t = codeTable(field);
+  if (!t || !isCodeValue(value)) return null;
+  return (DATA.code_labels || {})[t + ":" + value] || null;
+}
+function hasAnyLabels(){ return Object.keys(DATA.code_labels || {}).length > 0; }
+function isListField(field){
+  return (DATA.list_valued_fields || []).indexOf(field) !== -1;
+}
+/* Every code value present in the batch when review.json was generated. Lets an
+   unresolved value be reported honestly: in this set means the lookup ran and found
+   nothing; not in it means the reviewer has just typed something new. */
+let exportedValues = new Set();
+function indexExportedValues(){
+  exportedValues = new Set();
+  const add = (field, value) => {
+    if (!codeTable(field)) return;
+    for (const item of (Array.isArray(value) ? value : [value]))
+      exportedValues.add(String(item));
+  };
+  for (const p of DATA.proposals){
+    for (const obj of [p.changes || {}, p.target_pk || {}])
+      for (const [f, v] of Object.entries(obj)) add(f, v);
+    for (const c of p.conflicts)
+      for (const o of c.options) add(c.field, o.value);
+  }
+}
+
+/* One read-only block per code value. A list-valued field (postings' c_addr) gets
+   one block per element, since each element is a separate address. */
+function codeInfoNode(field, value){
+  if (!codeTable(field)) return null;
+  const values = Array.isArray(value) ? value : [value];
+  const box = el("div", "codeinfo");
+  let shown = 0;
+  for (const v of values){
+    if (!isCodeValue(v)) continue;
+    const info = codeLabel(field, v);
+    const line = el("div");
+    if (!info){
+      // Say WHY there is no name, rather than leaving the reviewer to guess whether
+      // the code is wrong or the lookup simply never ran.
+      const tableName = (DATA.code_table_names || {})[codeTable(field)] || "the code table";
+      let why;
+      if (!hasAnyLabels()){
+        why = " — not resolved (export ran without a snapshot or network)";
+      } else if (exportedValues.has(String(v))){
+        why = " — no match in " + tableName;   // looked up, genuinely absent
+      } else {
+        // You typed this just now; the export never saw it. A different problem, and
+        // not evidence that the code is wrong.
+        why = " — not in this export; re-run validate --staging to look it up";
+      }
+      line.appendChild(el("span", "cmiss", v + why));
+      box.appendChild(line); shown++;
+      continue;
+    }
+    line.appendChild(el("span", "cname", info.label));
+    if (info.sub) line.appendChild(el("span", "csub", info.sub));
+    box.appendChild(line);
+    for (const extra of (info.lines || [])) box.appendChild(el("span", "cline", extra));
+    shown++;
+  }
+  return shown ? box : null;
 }
 
 /* ---------- decision accessors ---------- */
@@ -320,7 +414,7 @@ function bulkGroups(){
   for (const p of DATA.proposals){
     for (const c of p.conflicts){
       if (conflictValue(p, c)) continue;              // already settled
-      const sig = c.field + " " + c.options.map(o => JSON.stringify(o.value)).join("|");
+      const sig = c.field + "::" + c.options.map(o => JSON.stringify(o.value)).join("|");
       if (!map.has(sig)) map.set(sig, {field: c.field, options: c.options, items: []});
       map.get(sig).items.push({p, c});
     }
@@ -342,7 +436,9 @@ function renderBulk(){
     row.appendChild(el("span", "cnt", "×" + g.items.length + " unresolved"));
     for (const o of g.options){
       const b = el("button", "opt", fmt(o.value));
-      b.title = o.rationale;
+      const oInfo = codeLabel(g.field, Array.isArray(o.value) ? o.value[0] : o.value);
+      if (oInfo) b.appendChild(el("span", "clabel", oInfo.label));
+      b.title = [o.rationale, oInfo && oInfo.sub].filter(Boolean).join(NL);
       b.onclick = () => { for (const it of g.items){
           const d = dec(it.p.id); d.conflicts = d.conflicts || {};
           d.conflicts[it.c.id] = o.value; } save(); render(); };
@@ -372,8 +468,13 @@ function conflictNode(p, c){
     const suggested = JSON.stringify(c.agent_suggestion) === JSON.stringify(o.value);
     const b = el("button", "opt" + (sel ? " sel" : "") + (suggested ? " suggested" : ""));
     b.appendChild(document.createTextNode(fmt(o.value)));
+    // Choosing between 64674 and 63343 is impossible without their names on the
+    // buttons - this is the decision the reviewer is actually being asked to make.
+    const oInfo = codeLabel(c.field, Array.isArray(o.value) ? o.value[0] : o.value);
+    if (oInfo) b.appendChild(el("span", "clabel", oInfo.label));
     if (suggested) b.appendChild(el("span", "why", "· agent suggests"));
-    b.title = o.rationale;
+    b.title = [o.rationale, oInfo && oInfo.sub,
+                oInfo && (oInfo.lines || []).join(NL)].filter(Boolean).join(NL);
     b.onclick = () => setConflict(p.id, c.id, o.value);
     opts.appendChild(b);
   }
@@ -392,7 +493,11 @@ function conflictNode(p, c){
   for (const o of c.options){
     const li = el("li");
     li.appendChild(el("code", null, fmt(o.value)));
+    const oInfo = codeLabel(c.field, Array.isArray(o.value) ? o.value[0] : o.value);
+    if (oInfo) li.appendChild(el("b", null, " " + oInfo.label));
     li.appendChild(document.createTextNode(" — " + o.rationale));
+    if (oInfo) for (const extra of (oInfo.lines || []))
+      li.appendChild(el("span", "cline", extra));
     rats.appendChild(li);
   }
   if (c.options.length) box.appendChild(rats);
@@ -449,10 +554,11 @@ function proposalRow(p){
 
   const c3 = el("td");
   const fields = el("div", "fields");
-  if (Object.keys(p.target_pk).length){
-    fields.appendChild(el("div", "fname", "target_pk"));
-    fields.appendChild(el("div", "fval",
-      Object.entries(p.target_pk).map(([k, v]) => k + "=" + fmt(v)).join("  ")));
+  for (const [k, v] of Object.entries(p.target_pk)){
+    fields.appendChild(el("div", "fname", "pk · " + k));
+    fields.appendChild(el("div", "fval", fmt(v)));
+    const pkInfo = codeInfoNode(k, v);
+    if (pkInfo) fields.appendChild(pkInfo);
   }
   for (const f of p.fields){
     fields.appendChild(el("div", "fname", f.field));
@@ -468,6 +574,11 @@ function proposalRow(p){
     inp.onchange = () => { setField(p.id, f.field, parseVal(inp.value)); render(); };
     v.appendChild(inp);
     fields.appendChild(v);
+    // What this code actually means. Follows the EDITED value, not the exported one,
+    // so retyping a code shows the new code's meaning immediately - which is the
+    // whole point of having it on screen while editing.
+    const info = codeInfoNode(f.field, cur.value);
+    if (info) fields.appendChild(info);
   }
   c3.appendChild(fields);
   if (p.source_quote) c3.appendChild(el("div", "quote", "「" + p.source_quote + "」"));
@@ -561,6 +672,13 @@ function renderStats(){
   const add = (cls, label, n) => {
     const x = el("span", "stat " + cls);
     x.innerHTML = "<b>" + n + "</b> " + label; s.appendChild(x); };
+  if (!hasAnyLabels()){
+    const x = el("span", "stat warn");
+    x.textContent = "code names unavailable";
+    x.title = "review.json was exported without a SQLite snapshot or network, so "
+      + "codes are shown bare. Re-run: python -m cbdb_agent validate --staging <path>";
+    s.appendChild(x);
+  }
   add("", "proposals", DATA.summary.proposals);
   add("", "persons/groups", DATA.summary.groups);
   add(unres ? "warn" : "good", "unresolved", unres);
@@ -604,6 +722,7 @@ function load(text){
     return;
   }
   DATA = d; D = {};
+  indexExportedValues();
   restore();
   $("#drop").hidden = true;
   $("#controls").hidden = false;

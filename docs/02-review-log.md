@@ -1059,3 +1059,101 @@ Verified: round trip exercised end to end on the real batch (41 → 38 conflicts
 three resolutions plus a field edit, then restored to the pre-test state so no
 agent-invented decision was left in the user's file); page JS syntax-checked; no
 external references and no `fetch`/`XHR` in the file.
+
+---
+
+## Code labels + the weekly SQLite snapshot (2026-08-19) — Milestone 10
+
+The review page showed bare numeric codes (`c_office_id: 63057`, `c_addr_id: 18444`),
+which a reviewer cannot check without opening CBDB in another tab 200 times — and the
+decisions the batch actually asks for are *between* codes, so a chooser offering three
+bare integers asks the reviewer to decide nothing. Requested: every code shows its
+name; an office also its `OFFICE_TYPE_TREE` position and `c_dy` with the dynasty's
+Chinese name; an address its full `ADDR_BELONGS_DATA` parent chain plus the leaf's own
+`c_firstyear`/`c_lastyear`; a source its book title. All read-only.
+
+Design and rationale: `docs/09-code-labels-and-snapshot.md`.
+
+The user's suggestion — use CBDB's own weekly SQLite build from HuggingFace — is what
+made this tractable. The two things a reviewer most needs are hierarchy *joins*, and
+the API cannot join: an address's chain is one HTTP request per level, and an office's
+type position needs two **undocumented** legacy endpoints. One local file answers both
+in a query. `snapshot.py` downloads it on demand (~132 MB zip / 557 MB extracted),
+verifies the sha256 in its sidecar, and opens it read-only; the HTTP endpoints remain
+as a fallback. 247 → 328 tests.
+
+**The rule that matters, now in AGENTS.md:** the snapshot answers "what does this code
+mean", never "what is currently true of this record". Never `max(c_personid)`, never a
+pre-create existence check, never the current-value diff — a row created since the
+build is invisible in it, so a duplicate check against it can answer "not there" for
+something that is, which is exactly how you create the duplicate you were checking for.
+
+### A bug the cheap checks all missed
+
+`REVIEW_JSON_SCHEMA_VERSION` was bumped to 2 and the page's `const SCHEMA` was left at
+1. `node --check` passed, the Python suite passed, the diff looked right — and the page
+refused every export and rendered blank. Only opening it in a browser found it. That is
+now `tests/test_review_page.py`: 12 Playwright tests driving the real page (they skip
+themselves when Playwright is absent), plus a pure-Python check that the two constants
+match. Lesson recorded in `docs/05-testing-strategy.md`.
+
+### Review-agent pass — 1 SERIOUS (rebutted), ~20 MINOR
+The SERIOUS finding was that the HTTP fallback "almost certainly cannot resolve
+office/addr/text/entry/status/kinship/assoc at all", since it searches keyword
+endpoints with a numeric id. **Verified against the live endpoints: all seven resolve
+correctly by id**, including the address chain and office type tree — the server's
+search endpoints match on id as well as name. The finding was wrong, but its premise
+was fair: none of it was covered by a test. That gap (its finding #21) was real and is
+now closed with 13 tests covering the walk, the `[[…]]` parser, the legacy endpoints,
+malformed fragments, and snapshot/HTTP agreement.
+
+Real MINORs fixed, the interesting ones:
+- **The parent chosen for a multi-parent address ignored the period window that was
+  sitting right next to it.** Measured on the snapshot: 29 addresses were shown under a
+  parent whose window doesn't overlap their own lifetime while a fitting one existed
+  (6717, 1478~1643, under 6639, 1368~1477, with 6711 unused). Now period-aware, with
+  deterministic tie-breaking so output doesn't depend on SQLite table order.
+- **The membership window was rendered on the parent's label**, so 上京路 displayed as
+  「（隸屬 1189~1212）」 — read as a claim about 上京路, and false; its own span is
+  1121~1234. Chain nodes now show each node's own lifetime.
+- **`_drop_prefix_chains` discarded real classifications**, not just the redundant
+  root+dynasty pair: 687 chains longer than two nodes were being dropped, including
+  mid-level links that are a distinct CBDB claim.
+- The fork warning said "this place" when any *ancestor* forking triggers it (~15% of
+  addresses); depth-cap truncation was silent, presenting a cut chain as complete.
+- `CBDB_SQLITE_DIR`/`CBDB_SQLITE_AUTODOWNLOAD` were read only via `Config`, so with no
+  `.env` — the offline case `validate` is contractually required to support — the
+  opt-out was unreachable and a 132 MB download started unconditionally.
+- Tests silently read the developer's real 557 MB snapshot; the conftest guard patched
+  `download_snapshot` only, which `test_snapshot.py` bypasses by importing it directly.
+
+### codex exec pass — 1 SERIOUS, 4 MINOR
+1. **SERIOUS** — the download extracted an untrusted zip straight into the live
+   snapshot directory and, on a checksum failure, deleted only the one file it had
+   picked. A malformed archive could leave debris that `find_snapshot()` would then
+   present as a good database. Now: download and extract into a temp directory beside
+   the target, drop any member with a path separator, verify, and only then promote
+   the two files — with `shutil.rmtree` in a `finally`, so nothing partial survives any
+   path out.
+2. A download with no sidecar sha256 was accepted, making "verified" untrue for the
+   case that matters. Downloads now require it; a manually placed snapshot is still
+   usable (just undated).
+3. A repeated `(child, parent)` edge for two periods was counted as two parents — 39
+   such edges — producing a "multiple parents" warning that is simply false. Now
+   grouped by distinct parent.
+4. The `[[…]]` parser accepted anything after `[[`, even unterminated or with a
+   non-numeric id, yielding a plausible pseudo-parent instead of a clean absence.
+5. The conftest marker could not enforce that a marked test was actually mocked.
+
+codex also spotted a **NUL byte** in the page: the bulk-grouping fingerprint separator
+was `" "` instead of `"::"`. Harmless to JavaScript, which is why it survived — but it
+made git and grep treat the whole file as binary.
+
+Also fixed: `is_usable()` now rejects a zero-byte or table-less `.sqlite3`, which
+previously made the CLI report "code labels from the SQLite snapshot" while resolving
+nothing, forever (a file was present, so the download that would fix it never ran); and
+the page distinguishes "looked up and absent" from "you just typed this, the export
+never saw it" — previously it claimed the code was missing from the table.
+
+### Sign-off
+328 tests green. Coverage on the real batch: **239 of 239 numeric codes resolved.**
