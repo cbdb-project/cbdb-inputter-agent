@@ -334,3 +334,129 @@ def test_approval_is_not_demanded_for_ordinary_person_resources(tmp_path):
     )
     sent = json.loads(responses.calls[0].request.body)
     assert "meta" not in sent  # no comment, no approval bookkeeping
+
+
+# --- office entity aggregate: the wire envelope, and the approval gate ---------
+
+
+def _office_changes():
+    """A complete office update payload. Every writable field is present because the
+    aggregate update is a full-row overwrite (API.md 13.4)."""
+    return {
+        "name": "知某州事",
+        "name_alt": "攝某州事;知州事",
+        "translation": "Administrator of Prefectural Civil Affairs",
+        "translation_alt": None,
+        "pinyin": "zhi mou zhou shi",
+        "pinyin_alt": "she mou zhou shi;zhi zhou shi",
+        "dynasty_code": 6,
+        "type_ids": ["06", "06091204", "06091202"],
+        "source_id": 3892,
+        "pages": "卷六十八 刺史上",
+        "notes": "Title found in Tang epitaphs.",
+    }
+
+
+@responses.activate
+def test_office_update_envelope(tmp_path):
+    api = make_api(tmp_path)
+    captured = {}
+
+    def callback(request):
+        captured["body"] = json.loads(request.body)
+        return (
+            200,
+            {},
+            json.dumps(
+                {
+                    "ok": True,
+                    "resource": "office",
+                    "operation": "update",
+                    "result": {
+                        "pk": {"c_office_id": 12304},
+                        "status": "updated",
+                        "types_added": ["06", "06091204", "06091202"],
+                        "types_removed": [],
+                        "row": {"c_office_id": 12304, "c_office_chn": "知某州事"},
+                    },
+                }
+            ),
+        )
+
+    responses.add_callback(
+        responses.POST, "http://localhost:8000/api/v2/mutate", callback=callback
+    )
+    api.update(
+        "office",
+        person_id=0,
+        target_pk={"c_office_id": 12304},
+        changes=_office_changes(),
+        resource_string="office",
+        approved_by="Hongsu Wang",
+    )
+
+    body = captured["body"]
+    # `office`, never `offices` - the plural resolves to the postings sub-resource
+    # server-side and would write a person's appointment record instead.
+    assert body["resource"] == "office"
+    assert body["mode"] == "direct"
+    assert body["operation"] == "update"
+    # Global reference data convention (API.md chapter 13 preamble).
+    assert body["person_id"] == 0
+    # A known, pre-existing id - never invented, never server-assigned on an update.
+    assert body["target"]["pk"] == {"c_office_id": 12304}
+    # Semantic short names go on the wire, not OFFICE_CODES column names.
+    assert body["changes"]["name"] == "知某州事"
+    assert body["changes"]["type_ids"] == ["06", "06091204", "06091202"]
+    # An explicit null survives as null: for a full-overwrite update that is how the
+    # author says "leave this empty" out loud.
+    assert body["changes"]["translation_alt"] is None
+    assert "c_office_chn" not in body["changes"]
+
+
+@responses.activate
+def test_office_update_refuses_without_approval(tmp_path):
+    api = make_api(tmp_path)
+    with pytest.raises(FieldWhitelistError, match="approved_by"):
+        api.update(
+            "office",
+            person_id=0,
+            target_pk={"c_office_id": 12304},
+            changes=_office_changes(),
+            resource_string="office",
+        )
+    assert not responses.calls
+
+
+@responses.activate
+def test_office_update_refuses_a_partial_payload(tmp_path):
+    """The full-overwrite guard has to hold at the mutation layer too, not only in
+    staging validation - an omitted field would be written as NULL."""
+    api = make_api(tmp_path)
+    partial = _office_changes()
+    del partial["pages"]
+    with pytest.raises(FieldWhitelistError, match="FULL-ROW OVERWRITE"):
+        api.update(
+            "office",
+            person_id=0,
+            target_pk={"c_office_id": 12304},
+            changes=partial,
+            resource_string="office",
+            approved_by="Hongsu Wang",
+        )
+    assert not responses.calls
+
+
+@responses.activate
+def test_office_create_refuses_the_plural_alias(tmp_path):
+    api = make_api(tmp_path)
+    with pytest.raises(FieldWhitelistError, match="not a valid resource alias"):
+        api.update(
+            "office",
+            person_id=0,
+            target_pk={"c_office_id": 12304},
+            changes=_office_changes(),
+            resource_string="offices",
+            approved_by="Hongsu Wang",
+        )
+    assert not responses.calls

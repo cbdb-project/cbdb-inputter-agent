@@ -25,8 +25,8 @@ anything in this repo:
   see `.env.sample`; exposed as `Config.online_main_server_repo_dir`). That checkout
   is **read-only to us** — never modify the target repo.
 - Digested for this repo, with a sync stamp and a re-sync procedure:
-  **`docs/07-api-md-digest.md`** (last synced against `origin/develop` `fd747aba`,
-  2026-08-18).
+  **`docs/07-api-md-digest.md`** (last synced against `origin/develop` `b2df35f5`,
+  2026-09-04).
 
 `API.md` **is under active, continuing revision** (§1.3's write-throttling contract and
 the failed-auth rate cap were both added in the days before that sync). So:
@@ -139,9 +139,11 @@ user how old the build is instead of quietly trusting it.
    before it is ever submitted. Anything else in `/api/*` that isn't named here or in
    the paragraph above stays off-limits, in particular the old crowdsourcing channel
    `/api/operations/*` (no whitelist, no PK validation, **no `audit_log`**) and
-   `POST /api/v1/user/login` (a dead OAuth-era route that always 404s — and, because it
-   runs on the *session* guard, will leave a logged-in session cookie behind first if the
-   credentials happen to validate and a session is active).
+   `POST /api/v1/user/login` (**retired as of 2026-08 — it now always returns
+   `410 Gone` and no longer verifies a password at all**. Before that it was worse than
+   useless: a live, unthrottled password check that always 404'd afterwards and, because
+   it runs on the *session* guard, would leave a logged-in session cookie behind first if
+   the credentials happened to validate).
 2. **Never bypass `http_client.py` for outbound requests.** All HTTP calls to the
    target system — reads included — must go through the shared client so local audit
    logging (`audit_log.py`) and rate limiting apply uniformly. Do not write a "quick"
@@ -212,8 +214,9 @@ user how old the build is instead of quietly trusting it.
     yourself via `/api/v2/get` and compare — don't infer it from the exit code.
 12. **Code-table and entity-aggregate writes are a different, higher risk class than
     person data — never do one without explicit, specific user approval.** This covers
-    `text-codes` (new `TEXT_CODES` rows), `char-variant-map`, the `office` and
-    `social-institution` entity aggregates, and `merged-person`. What they share is
+    `text-codes` (new `TEXT_CODES` rows), `char-variant-map`, the `office`,
+    `social-institution` and `text-entity` entity aggregates, and `merged-person`. What
+    they share is
     **blast radius**: they are global reference data, referenced by potentially tens of
     thousands of person rows and visible to every other user, so a mistake is not
     confined to one record. Reversibility differs and it is worth knowing which you are
@@ -233,17 +236,36 @@ user how old the build is instead of quietly trusting it.
     into `meta.comment`, so the sign-off lands in the **server's** `operations` row too,
     not only in this repo. **Never fill in `approved_by` yourself** — it exists precisely
     to record that a human, named, made the call.
-    Today exactly one such resource is modelled: **`text-codes`** (create only; `update`
-    is not modelled since the server only allows `c_title`, and `delete` is disabled
-    server-side). The others (`char-variant-map`, `office`, `social-institution`,
-    `merged-person`) are still unmodelled, so a staging file naming one is rejected as an
-    unknown alias — a safe outcome, but by absence rather than by design. If you ever
-    model one, set `requires_explicit_approval=True` on it.
-    **One more trap: two near-identical strings mean entirely different resources.**
+    Two such resources are modelled today:
+    **`text-codes`** (create only; `update` is not modelled since the server only allows
+    `c_title`, and `delete` is disabled server-side), and **`office`** (create + update,
+    no delete — see `docs/04-field-whitelists.md` §15 and
+    `docs/10-office-aggregate-design.md`). Two things about `office` that do not apply to
+    the code tables: its `update` is a **full-row overwrite**, so an omitted field is
+    written as `NULL` (the client refuses a partial payload — `full_overwrite_update`),
+    and **the server has no duplicate-name guard on create**, so
+    `preflight.assert_office_create_is_not_a_duplicate()` runs a *live* check before any
+    office create and must never be replaced by a snapshot lookup.
+    The rest (`char-variant-map`, `social-institution`, `text-entity`, `merged-person`)
+    are still unmodelled, so a staging file naming one is rejected as an unknown alias —
+    a safe outcome, but by absence rather than by design.
+    If you model one, set `requires_explicit_approval=True` on it — and note that
+    the refusal messages in `staging.py` and `http_client.py` still assert the
+    *code-table* rationale ("no delete path", "no way to undo it"), which is false for
+    the three aggregates: those **are** deletable while unreferenced (`API.md` §13.4).
+    See `models.py`'s comment on `requires_explicit_approval`.
+    **One more trap: near-identical strings mean entirely different resources.**
     `office` is the entity aggregate (needs approval) while `offices` resolves to the
-    **postings sub-resource** (routine); likewise `social-institution` (hyphen, entity,
-    needs approval) vs `social_institution` (underscore, the person sub-resource
-    `BIOG_INST_DATA`, routine). Read the separator.
+    **postings sub-resource** (routine — and postings wins the server-side dispatch);
+    likewise `social-institution` (hyphen, entity, needs approval) vs
+    `social_institution` (underscore, the person sub-resource `BIOG_INST_DATA`, routine);
+    and `text-entity` (the document aggregate, needs approval) vs `text`/`texts` (the
+    person's `BIOG_TEXT_DATA` sub-resource, routine) vs `text-codes` (the bare code-table
+    create, needs approval). Read the separator, and prefer the unambiguous spelling.
+    A client-side consequence of the same collision: `approval_gated_aliases()` is built
+    from the gated specs' alias sets, and `http_client` matches it against the raw
+    `resource` string — so registering `offices` as an alias of a gated `office` spec
+    would make **every routine postings write** demand an `approved_by`.
 
 ## Review workflow for changes in this repo
 

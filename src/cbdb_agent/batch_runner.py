@@ -29,6 +29,7 @@ from .http_client import AuthenticationError, AuthorizationError, CbdbApiError
 from .models import FieldWhitelistError, find_spec_by_alias
 from .mutation_api import MutationApi
 from .person_id import PersonIdError, get_max_person_id, is_person_id_taken, validate_new_person_id
+from .preflight import PreflightError, assert_office_create_is_not_a_duplicate
 from .staging import (
     Proposal,
     ProposalCurrentState,
@@ -218,6 +219,32 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                 f"approved_by: {approved_by} "
                 f"(batch {batch.batch_id}, proposal {proposal.id})"
             )
+
+        # Live pre-flight for the one write this client makes where the server has NO
+        # duplicate protection at all: a new office code (OfficeImportService::create()
+        # allocates max+1 and inserts, with no name lookup). See preflight.py for why
+        # this is code rather than a documented procedure, and why it may not use the
+        # weekly snapshot. Failing the proposal rather than the batch matches how every
+        # other per-record problem is handled here.
+        #
+        # Nothing extra is recorded on success: the check is an HTTP GET through
+        # http_client, so its request and full response are already in the append-only
+        # local audit log (AGENTS.md rule 8), which is the evidence that it ran and what
+        # it saw. Cross-dynasty matches are returned but do not block - the same office
+        # name legitimately recurs across dynasties (`知州` exists separately for Tang,
+        # Yuan, Ming and Qing).
+        if spec.key == "office" and proposal.operation == "create":
+            try:
+                assert_office_create_is_not_a_duplicate(
+                    api.client,
+                    name=proposal.changes.get("name"),
+                    dynasty_code=proposal.changes.get("dynasty_code"),
+                )
+            except PreflightError as exc:
+                results.append(
+                    ProposalResult(proposal_id=proposal.id, status="failed", error=str(exc))
+                )
+                continue
 
         try:
             if proposal.operation == "create":
