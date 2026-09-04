@@ -137,8 +137,23 @@ PUBLIC_LOOKUP_PATHS = (
 PUBLIC_RESPONSE_LOG_MAX_ROWS = 5
 
 
+# Resource strings this client must never put on the wire, whatever the caller says.
+#
+# `offices` is a documented server-side alias for the OFFICE entity aggregate - which is
+# approval-gated - AND for the postings sub-resource, which is routine. Which one it hits
+# is decided by MutationHandlerRegistry's registration order, something this client
+# cannot see and upstream can change. So the string is ambiguous in the worst possible
+# direction: `models.approval_gated_aliases()` deliberately does not contain it (adding
+# it would make every routine postings write demand an approved_by), which means a raw
+# `HttpClient.post({"resource": "offices", ...})` would reach the server UNGATED and
+# could land on the gated aggregate. Every legitimate caller here says `office` or
+# `postings`; nothing needs the ambiguous spelling, so refuse it outright.
+_AMBIGUOUS_RESOURCE_STRINGS = frozenset({"offices", "office-load"})
+
+
 def _check_approval(json_body: Any, mutating: bool, approval_signature: str | None) -> None:
-    """Fail closed if the envelope targets an approval-gated resource unsigned.
+    """Fail closed if the envelope targets an approval-gated resource unsigned, or
+    names a resource whose meaning is ambiguous between a gated and an ungated one.
 
     Reads the resource straight out of the request body rather than trusting a
     caller-supplied label, so it applies equally to MutationApi and to any direct
@@ -149,15 +164,29 @@ def _check_approval(json_body: Any, mutating: bool, approval_signature: str | No
     resource = json_body.get("resource")
     if not isinstance(resource, str):
         return
-    if resource.strip().lower() not in approval_gated_aliases():
+    normalized = resource.strip().lower()
+
+    if normalized in _AMBIGUOUS_RESOURCE_STRINGS:
+        raise MissingApprovalError(
+            f"refusing to send resource {resource!r}: the server accepts it for BOTH "
+            "the approval-gated `office` entity aggregate and the routine `postings` "
+            "sub-resource, and which one wins is registration order we cannot see. Say "
+            "which you mean - `office` for the office code, `postings` for a person's "
+            "appointment record."
+        )
+
+    if normalized not in approval_gated_aliases():
         return
     if not (approval_signature or "").strip():
         raise MissingApprovalError(
             f"refusing to write resource {resource!r} without an approval signature: "
-            "this is global reference data, not one person's record, and the server "
-            "offers no way to undo it (AGENTS.md rule 12). Pass approved_by= through "
-            "MutationApi, or approval_signature= if calling HttpClient directly. "
-            "Never supply this on the agent's own initiative."
+            "this is global reference data, not one person's record, and it is visible "
+            "to every other user (AGENTS.md rule 12). Removing it afterwards ranges "
+            "from impossible (the code tables have no delete path, API.md 13.3) to "
+            "conditional (the entity aggregates delete only while nothing references "
+            "the row, API.md 13.4). Pass approved_by= through MutationApi, or "
+            "approval_signature= if calling HttpClient directly. Never supply this on "
+            "the agent's own initiative."
         )
 
 

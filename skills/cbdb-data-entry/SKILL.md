@@ -174,9 +174,28 @@ does when invoked this way:
     《俟菴集》, and searching 俟庵 returns zero hits while `Sian ji` finds it. Reporting
     a false "missing" is how a duplicate gets created for a row that can never be
     deleted.
-  - If the user *does* approve one, `text-codes` (create only) is modelled and goes
-    through the normal staging pipeline — but the proposal needs an explicit
+  - If the user *does* approve one, two are modelled and go through the normal staging
+    pipeline: `text-codes` (create only) and `office` (create + update; see
+    `docs/04-field-whitelists.md` §15). Either way the proposal needs an explicit
     `approved_by: <the human's name>` or validation fails with a structural error.
+  - **An `office` update rewrites the WHOLE row** (`API.md` §13.4) — an omitted field is
+    written as `NULL`, not left alone. Read the current row first
+    (`GET /api/select/search/office?q=<id>`, since `/api/v2/get` cannot read this
+    resource) and carry every value across, or write an explicit `null` to say you mean
+    to clear it. The client refuses a partial payload rather than letting it through.
+  - Use the resource string **`office`**, never `offices` — the plural is matched by the
+    postings handler first, so it would write a person's appointment record instead.
+- **Never write a provisional marker into a submitted field.** No "Need to be checked",
+  "to be verified", "tentative", "temporarily added" in `c_notes` or anywhere else that
+  lands in CBDB. Submitting is what asserts the data is right; such a note describes the
+  editor's workflow, not the record, and it stays public long after the checking is done.
+  Uncertainty belongs in the staging file — `confidence`, a `conflict`, `batch_notes` —
+  which is not submitted. **And when existing data already carries such a marker and your
+  task is the check it asks for, delete it** rather than preserving it: that is the one
+  case where the usual "keep other people's prose byte-for-byte" instinct is wrong.
+  (Real case: office 12304's note read "Temporarily added to office codes. Need to be
+  checked."; the edict being added was that check, the agent preserved the sentence
+  anyway, and the user had to remove it by hand.)
     **You must never fill that field in yourself**; it records that a named human
     made the call, and `batch_runner` forwards it into `meta.comment` so the
     sign-off is visible in the server's own `operations` row too.

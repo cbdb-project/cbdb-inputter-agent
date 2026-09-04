@@ -7,13 +7,15 @@ is the target system's own `API.md`:
 |---|---|
 | Canonical URL | <https://github.com/cbdb-project/cbdb-online-main-server/blob/develop/API.md> |
 | Local path | `${CBDB_ONLINE_MAIN_SERVER_REPO_DIR}/API.md` (see `.env.sample`; `Config.online_main_server_repo_dir`) |
-| **Synced against** | `origin/develop` commit `fd747aba` (2026-08-18 00:39 +0800), `API.md` blob `948585d1` |
-| Upstream length at sync | 2667 lines (v2 chapters 1–14, plus a "舊版 API 文檔" v1 appendix) |
+| **Synced against** | `origin/develop` commit `b2df35f5` (commit date 2026-09-04 16:16:40 +0800), `API.md` blob `ff842de6` |
+| Upstream length at sync | 2701 lines (v2 chapters 1–14, plus a "舊版 API 文檔" v1 appendix from line 1651) |
+| Previous sync | `fd747aba` (commit date 2026-08-18 00:39 +0800), blob `948585d1`, 2667 lines — 8 commits and +50/−16 lines of `API.md` earlier |
+| Stamp convention | **commit** date (`git log -1 --format=%ci`), not author date — they differ by minutes here and by a day for `fd747aba` |
 
 The user has stated `API.md` **will keep being updated**. Treat every claim below as
 carrying that sync stamp: if the stamp is old, re-verify before relying on it. This
 file exists so an agent can answer "what does the API actually allow" without reading
-2667 lines every session — not so it can skip reading upstream when the answer matters.
+2701 lines every session — not so it can skip reading upstream when the answer matters.
 
 **Precedence between this repo's three reference docs**, when they disagree:
 upstream `API.md` > this digest > `docs/04-field-whitelists.md` / `models.py` >
@@ -135,6 +137,15 @@ token turns into `429 Too Many Attempts.` rather than `401`, with a longer backo
 - ✅ `HttpClient.get(..., public=True)` sends no credentials at all, so the public lookup
   endpoints (§2.1) can't be turned into failed-auth attempts by a stale token.
 
+Three more per-IP throttles were added upstream in `32331079` (#1264). **None of them
+binds this client**, because we call none of these endpoints — recorded so that stays a
+conscious fact rather than an assumption: `POST /register` 30/min, `POST /password/email`
+5/min, `POST /password/reset` 10/min (each its own budget, counting *every* request
+including validation failures), and `GET|POST /api/operations/token` at 5/min per
+email+IP plus 20/min per IP. The last one is the crowdsourcing channel's password→token
+exchange (§4) — if we ever did touch it, note that **successful** requests count too, so
+the token must be fetched once and reused, not re-fetched per record.
+
 ### 1.5 Empty string ≡ null; "unknown" is an explicit sentinel (`API.md` §1.4, §4.4, §9)
 
 Global middleware runs `TrimStrings` + `ConvertEmptyStringsToNull` over the JSON body,
@@ -195,6 +206,49 @@ is the only endpoint that would, and it needs CSRF + a session, so Bearer client
 nothing to do with proposals: §12.6 defines it as a *read-only* probe of what the
 mirror row currently looks like.) If we ever hit that `409`, the only fix is a human working
 inside the web UI. Do not treat it as retryable.
+
+### 1.9 The server rewrites your text before storing it — and only sometimes says so
+
+Consolidated here because it grew from an altnames-only quirk into a global one, and
+because it decides how a write is *verified* (rule 11), not just how it is sent. The
+three rewrites that apply to **every** resource happen server-side in this order
+(`API.md` §4.3, §1.5, and `app/Support/VariantReplaceScope.php`) — and see the note
+after the table for the two narrower ones, so "three" does not become a reason to stop
+looking:
+
+| Rewrite | Scope | Announced? |
+|---|---|---|
+| **Unicode NFC folding** (compatibility ideographs → unified, e.g. 慎 U+FA87 → U+614E) | **every text column**, all resources | **No — silent.** It is canonical equivalence, so upstream treats it as the same character |
+| **Variant-character substitution** via `char_variant_map` | every text column *except* the excluded lists: strict (a smaller rule set) on `BIOG_MAIN.c_name_chn`/`c_surname_chn`/`c_mingzi_chn` and `ALTNAME_DATA.c_alt_name_chn`; **lenient (full rule set) everywhere else**, including `c_notes`/`c_pages` on the same row | **Yes** — top-level `notices` array |
+| **Pinyin `v`→`ü`** (only after `l`/`n`, not before `a`/`i`/`o`/`u`) | registered pinyin columns, per-table-per-column | **No — silent** |
+
+**Two more silent rewrites exist, narrower in scope and easy to miss** because
+`API.md` §1.5 lists all of them in one breath 「其他靜默改寫（**Unicode NFC 正規化**、
+拼音 `v→ü`、**括號正規化**、**哨兵值正規化**）**不會**產生 `notices`」:
+*bracket normalization* (`BracketNormalizer`; full-width → half-width, spaces inserted
+around brackets) on `ALTNAME_DATA.c_alt_name_chn`/`c_alt_name` and the `BIOG_MAIN` name
+columns, and *sentinel normalization* (null/`''`/`-999` → `'0'` on code and FK columns),
+which has its own section at §1.5 above. Neither touches the entity aggregates, but both
+are silent, so a value that comes back not-quite-as-sent on a person resource is probably
+one of these rather than a bug.
+
+What changed at this sync, and why it matters to us:
+
+- **`notices` now covers far more than altnames**: person main record and *all* person
+  sub-resources, code-table `create`/`update`, and the office / social-institution
+  aggregates. Previously the digest said "only `c_alt_name_chn` produces `notices`".
+- **`notices` can appear on *failure* responses too** — typically `409` (the replaced
+  text collided with an existing PK) and `422 no_effective_changes` (the replacement made
+  the value identical to what is already stored). Without reading `notices`, both of
+  those look inexplicable.
+- **Strict vs lenient is per *column*, not per row.** So the same character can be
+  preserved in `c_alt_name_chn` and replaced in that row's `c_notes`. Upstream says this
+  is deliberate.
+- **Client status:** nothing in this repo reads `notices`. `http_client.py` returns the
+  whole response body, so it is available to callers, but neither `batch_runner` nor the
+  preview surfaces it. Until that changes, a variant replacement on a write we make is
+  invisible unless a human reads the raw response or the `logs/*.jsonl` entry. Worth
+  fixing when a batch next writes Chinese text into a PK column.
 
 ## 2. Surface beyond the 13 resources this client models
 
@@ -257,6 +311,15 @@ code that a lookup produced still has to be reviewed by a human before it reache
 
 ### 2.2 `TEXT_CODES` can be created through the API (`API.md` §13.2)
 
+**As of this sync there are two live write paths to `TEXT_CODES`**, and upstream is
+explicit that both stay in service: the bare-table `create` described in this section
+("this one row, these columns" — mechanical), and the `text-entity` *aggregate* added in
+`a83b9e5e` (§2.3), which additionally derives the pinyin title, normalizes book-title
+glyphs and punctuation, and manages `TEXT_INSTANCE_DATA` edition rows. Upstream's rule:
+**to create a semantically complete work use the aggregate; to append one raw row use
+this section.** What this client models is the bare-table `create` (`models.py`'s
+`text_codes`).
+
 A missing book title (`c_textid`) is **not** a hard blocker anymore:
 
 - `POST /api/v2/create` with `resource: "text-codes"`, `mode: "direct"` only
@@ -288,22 +351,139 @@ Other code tables (`nianhao`, `office_codes`, `dynasties`, `choronym_codes`,
 `ethnicity_tribe_codes`, `ganzhi_codes`, `addr_codes`, …) support **`update` only**, and
 only for a couple of pinyin/name columns each (§13.1) — `create`/`delete` → `501`.
 
-### 2.3 Entity aggregates: `office`, `social-institution` (`API.md` §13.4)
+### 2.3 Entity aggregates: `office`, `social-institution`, `text-entity` (`API.md` §13.4)
 
-New office codes and new social institutions must go through the aggregate resources
-(`office`, `social-institution`), not by writing `OFFICE_CODES` directly. Two things
-make these dangerous to touch casually:
+**There are now three, not two** — `text-entity` was added in `a83b9e5e`. Each spans
+several tables and is written only through its aggregate resource, never by assembling
+the underlying tables yourself:
 
-- **The aggregate `update` is full-overwrite, not PATCH** — any optional field you omit
-  is written as `null` (e.g. dropping `name_alt`/`pages` wipes them). Read the current
-  row and resend it in full.
-- `offices` (plural) as a resource string hits the **postings sub-resource** handler
-  first, not the office entity. Use `office` (singular) for the entity. This is a
-  sharper version of the warning already in `docs/04-field-whitelists.md` §11.
+| resource | aliases | PK | tables | operations |
+|---|---|---|---|---|
+| `office` | `offices`, `office-load` | `c_office_id` | `OFFICE_CODES` + `OFFICE_CODE_TYPE_REL` | create / update / delete |
+| `social-institution` | `social-institutions`, `social-institution-load`, `socialinst-load` | `c_inst_code` | `SOCIAL_INSTITUTION_CODES` + `SOCIAL_INSTITUTION_NAME_CODES` + `SOCIAL_INSTITUTION_ADDR` | create / update / delete |
+| `text-entity` | `text-entities`, `book`, `books` | `c_textid` | `TEXT_CODES` + `TEXT_INSTANCE_DATA` | create / update / delete |
 
-Referential guards: deleting an office still referenced by postings → `409
-c_office_id: referenced_by_postings` with a `reference_count`; renaming a referenced
-institution → `409 name: rename_blocked_while_referenced`.
+Unlike the code tables (§2.2), these support **both** `direct` and `proposal`, so even a
+crowdsourcing account can file an aggregate proposal. The single-column pinyin fixes that
+§13.1 opens on the underlying tables (`OFFICE_CODES.c_office_pinyin`,
+`SOCIAL_INSTITUTION_NAME_CODES.c_inst_name_py`) remain a legitimate bare-table `update`;
+anything structural goes through the aggregate.
+
+**Two resource strings that mean something else entirely.** `offices` (plural) is also a
+postings alias and **postings wins the dispatch**, so `offices` writes a person's
+appointment record, not an office code — use `office`. Likewise `text`/`texts` are the
+existing `BIOG_TEXT_DATA` person sub-resource aliases and have nothing to do with the
+document entity — use `text-entity`. A sharper version of `docs/04-field-whitelists.md`
+§11's warning, and see the note at the end of this section for a client-side trap the
+same collision creates.
+
+**Input is by semantic short name** (the table column names are accepted too):
+
+- **office** (create and update share one validator, `ResolvesOfficeAggregateInput`).
+  Required: `name`, `type_ids` (array; single `type_id`/`c_office_tree_id` also accepted),
+  `source_id` (must exist in `TEXT_CODES`), `dynasty_code` (or `dynasty_label`, resolved
+  server-side). Optional: `translation`, `name_alt`, `translation_alt`, `pinyin`,
+  `pinyin_alt`, `pages`, `notes`. Pinyin is derived per-character from the corresponding
+  Chinese when omitted. **Note the required set applies to `update` as well**, so an
+  update to an office that has no type rows is forced to give it some.
+- **social-institution create.** Required: `name`, `type_code` (or `type_label`),
+  `dynasty_code`, `addr_id`, `source_id`. **Its `update` takes an `addresses` array
+  instead of `addr_id`**, and needs at least one row, each with `addr_id`.
+- **text-entity** (one shape for create and update). Required: only `title`. Optional:
+  `title_pinyin` (derived if blank), `title_trans`, `title_alt_chn`, `type_id`, `year`,
+  `nh_code`, `nh_year`, `range_code`, `bibl_cat_code`, `extant`, `country`,
+  `dynasty_code`, `source_id` (**nullable** — the citation tree needs a root), `pages`,
+  `url_api`, `url_api_coda`, `url_homepage`, `notes`, plus an `instances` array of
+  edition rows (each requiring `edition_id` + `instance_id`; update reconciles the set).
+
+**Traps, in rough order of how much damage they do:**
+
+- **The aggregate `update` is full-overwrite, not §7's PATCH** — any optional field you
+  omit is written as `null` (dropping `name_alt`/`pages` wipes them). Read the current row
+  and resend it complete. There is no partial-update mode.
+- **`target.pk` is a required key** (send `{}` on create, as in §2.2). It accepts the
+  prefixed or unprefixed name (`c_office_id` or `office_id`); a negative or non-numeric
+  value counts as absent → `422`, while `0` is looked up and therefore `404`s.
+- **`create` has no duplicate-name guard for `office` or `text-entity`.** Both allocate
+  `max+1` and insert, so submitting the same office twice yields two rows with the same
+  name and different ids, with nothing in the response to hint at it. The pre-create
+  existence check is the client's job — and per `AGENTS.md`'s snapshot rule it has to be a
+  *live* check. `social-institution` is only a **partial** exception, and the difference
+  matters: `resolveNameCode()` reuses an existing *name code* rather than minting one
+  (the response says which via `name_created: true|false`), but
+  `SocialInstituteImportService::create()` still calls
+  `allocateNextId('SOCIAL_INSTITUTION_CODES', 'c_inst_code')` unconditionally — so a
+  repeated create mints a **second institution row** under the reused name code. The
+  dedup is also one-directional by upstream's own admission: it cannot match when the
+  input is the reference form and the stored row is a *different* variant form. So all
+  three aggregates need a client-side pre-create check; only the shape of what gets
+  duplicated differs.
+- **`/api/v2/get` cannot read any of them.** `MutationReadService` covers 13 person
+  resources plus `nianhao` (14 definitions in total) and nothing else — `resolve('office')`
+  returns `null`. So rule 11's read-back has to go through
+  `GET /api/select/search/office` (or `socialinst`, or `GET /api/v2/texts`) instead, and
+  `batch_runner.fetch_current_values()` will report "couldn't fetch" for an aggregate
+  proposal — expected, not a bug.
+- **Audit rows multiply.** A `direct` aggregate write records one `operations` +
+  `audit_log` row for the main table **plus one per lower-level row added or removed**
+  (each office type relation, each institution address), but the response returns only the
+  main `operation_id`. A few batched column updates (e.g. syncing the name code when an
+  institution is renamed) are not recorded per row.
+- **`result` is only a partial echo.** Office create/update return `row` (with
+  `type_ids`), update also `types_added`/`types_removed`, delete `rel_deleted` — but `row`
+  carries just `c_office_id`, `c_office_chn`, `c_office_pinyin` and `type_ids`, so the
+  translation, alias, source and pages columns are unconfirmed. Social-institution
+  `create` returns **two** keys in `result.pk` (`c_inst_code` + `c_inst_name_code`),
+  contradicting the single-PK column in the table above — trust the response. Text-entity
+  differs per operation: create returns `instances_added` + `variant_replacements` +
+  `row`; update returns `instances_added`/`instances_removed`/`instances_updated` + `row`
+  but **no** `variant_replacements`; delete returns `instances_deleted`.
+- Office `create`/`update` also run **variant replacement** on `c_office_chn`,
+  `c_office_chn_alt`, `c_notes` and `c_pages` (§1.9) — announced in `notices`, and the
+  landed name is `result.row.c_office_chn`, not what you sent.
+- **Proposal mode stores the *intent*, not a row snapshot** (`__entity_aggregate`,
+  `__entity_resource`, `__entity_operation`, `__entity_pk`, plus the raw `changes`), and
+  replays it as `direct` on approval — so a create proposal's `result.pk` is `null`. In
+  `GET /api/v2/operations`, `resource` holds the **aggregate name**, not a table name.
+  Delete's reference guards fire at *submission* time, so a blocked delete leaves no
+  proposal behind.
+- **Validation errors are semantic keys, not column names**: `name: required`,
+  `type_ids: required` / `not_found_in_office_type_tree`, `source_id: required_integer` /
+  `not_found_in_text_codes`, `dynasty: invalid`, `dynasty_label: not_found`,
+  `addr_id: required_integer` / `not_found_in_addr_codes`, `addresses: required`,
+  `addresses.N.addr_id: required_integer`, `instances.N.key: duplicate`.
+- **No length validation anywhere in these validators.** Most of the columns behind them
+  are `varchar(255)` (`OFFICE_CODES.c_notes` is `longtext`; `c_pages`, `c_office_chn_alt`
+  and `c_office_pinyin_alt` are not), so an overlong value is truncated by MySQL rather
+  than rejected. Live proof: `OFFICE_CODES` 950's `c_office_pinyin_alt` is stored cut off
+  mid-syllable at exactly 255 characters.
+
+**Referential guards** (all `409` unless noted): office `delete` while referenced by
+postings → `c_office_id: referenced_by_postings` with a `reference_count`. ⚠️ A stale ⚠
+comment in `OfficeImportService::referenceCount()` calls that guard load-bearing because
+the FK is `ON DELETE CASCADE`; **it is not** — the schema says
+`POSTED_TO_OFFICE_DATA_ibfk_13 … ON DELETE RESTRICT ON UPDATE CASCADE`, and migration
+`2026_07_23_000000_restrict_fks_referencing_small_code_tables.php` is what flipped it
+(the base schema dump now contains no `ON DELETE CASCADE` at all). A leaked hard delete
+fails closed with errno 1451 instead of destroying postings. For schema facts read the
+schema; a source comment can go stale. Social-institution `delete` while
+referenced → `c_inst_code: referenced_by_person_data`; social-institution `update`
+renaming a referenced institution → `name: rename_blocked_while_referenced` (note **office
+rename is *not* blocked**). Text-entity `delete` while referenced →
+`c_textid: referenced_by_other_records` with a `reference_count` that includes child works
+citing it via `TEXT_CODES.c_source`; text-entity `update` pointing `source_id` at itself or
+a descendant → **`422` `source_id: source_cycle`**.
+
+**A client-side trap the `offices` collision creates, worth writing down here because it
+is not upstream's problem:** `models.approval_gated_aliases()` builds its set from the
+alias fields of every spec with `requires_explicit_approval` (plus each spec's own
+`key`), and `http_client._check_approval()` matches it against the raw, lower-cased
+`resource` string. So
+registering `offices` or `office-load` as an alias of a gated `office` spec would make
+**every routine postings write** demand an `approved_by`. Register the singular only.
+
+Authoritative definitions upstream: `config/entity_aggregates.php` and
+`app/Services/Mutations/EntityAggregate/*AggregateDefinition.php`.
 
 ### 2.4 `merged-person` resource (`API.md` §9.14)
 
@@ -347,15 +527,99 @@ The rest are additions, not conflicts:
 | `possessions` create | never send the surrogate id | `target.pk` is ignored wholesale — a sent id is discarded silently, not rejected |
 | `basicinformation` update | `c_name*` immutable | plus: `c_mingzi_chn`/`c_mingzi` can't be *emptied* if currently non-empty; `c_index_year` ∈ [-3000, 3000]; `c_death_age` ∈ [0, 200]; 13 FK columns write `null` (not `"0"`) on empty |
 | `basicinformation` names | — | `c_name_chn` is **derived** from `c_surname_chn` + `c_mingzi_chn`; edit the parts, not the whole |
-| `altnames` | 3-key PK, legacy 4-key stripped | `c_alt_name_chn` gets **variant-character substitution**, and since it's a PK column, `result.pk` (not what you sent) is the row that exists |
+| `altnames` | 3-key PK, legacy 4-key stripped | `c_alt_name_chn` gets **variant-character substitution** (strict rule set), and since it's a PK column, `result.pk` (not what you sent) is the row that exists. Same row's `c_notes`/`c_pages` get the *lenient* set — see §1.9 |
 | `events` addr-only update | separate code path | that path writes **neither `operations` nor `audit_log`** — the one known audit gap in `/api/v2/*` |
 | `kinship` vs `associations` mirror back-fill | same mirror family | **Not symmetric, and §9.8 alone is misleading — read §12.2/§12.4.** `associations.update` back-fills a missing mirror row whenever any `*_pair` field is sent. `kinship.update` does *not* back-fill in general — **except** on the "pair-only" repair path (`changes` holds `c_kinship_pair` and **no** `KIN_DATA` column), which *does* back-fill. See the expansion below. |
 | assoc `*_pair` pseudo-fields | stripped before validation | **`associations`' three pair fields are not validated at all** — a bogus code is silently written into the mirror row. `kinship`'s `c_kinship_pair` *is* validated (422, `message` only, no `errors`). |
 | `sources` | `c_pages` optional in PK | writable side treats empty `c_pages` as `""`; **`/api/v2/get` does not** — reading such a row back needs different handling |
 
-None of these require a `models.py` change; several rows are agent-behavior warnings,
-and the `basicinformation` range checks are worth adding to client-side validation if we
-ever touch those fields.
+Most of those are agent-behavior warnings, and the `basicinformation` range checks are
+worth adding to client-side validation if we ever touch those fields. **But this sync
+found something that is not a warning: eleven fields in `models.py` name columns that do
+not exist in the database, and six real columns are missing.** That is recorded in §3.1
+rather than the table above, because it is a defect in this client, not a difference of
+documentation.
+
+### 3.1 Whitelist drift: 11 phantom fields, 6 missing ones ⚠️
+
+Upstream removed these names from its own whitelists across **three** commits, only two
+of which touch `API.md` (which is why reading the spec diff alone would have missed
+half of it):
+
+| Upstream commit | What it did |
+|---|---|
+| `8a3c9f04` (2026-08) | 「清掉 v2 白名單裡 6 個資料庫不存在的欄位」 — the `altnames` four and the `texts` two |
+| `b1f4bf44` (2026-09-04) | removed the `basicinformation` five, as collateral in a fix for `/app/office`'s search 500; its message calls it 「與 2026-08『v2 白名單幻影欄』同一失敗模式」 |
+| `b2df35f5` (2026-09-04) | **added** the six real birth/death columns (17 insertions, 0 deletions) and made create/update symmetric |
+
+`docs/04-field-whitelists.md` and `models.py` were transcribed from the *pre-cleanup*
+lists, so they inherited every one of those mistakes.
+
+Verified two ways before writing this down — against the handler source
+(`BiogMainCreateHandler::ALLOWED_FIELDS`, `AltnameCreateHandler::allowedFields()`,
+`AltnameMutationHandler`, `TextCreateHandler`, `TextMutationHandler`) and against the
+actual column list of the 2026-08-15 SQLite snapshot:
+
+| Resource | Phantom — allowed by us, not a column anywhere on that table | Missing — a real column the server accepts and we refused |
+|---|---|---|
+| `basicinformation` (create **and** update) | `c_by_yymm`, `c_by_yymm_day`, `c_dy_yymm`, `c_dy_yymm_day` (the real names are `c_by_month`/`c_by_day`/`c_dy_month`/`c_dy_day`), `c_self_bio` (dropped from `BIOG_MAIN` in 2026_03_13; the column of that name lives only on `BIOG_SOURCE_DATA`) | `c_birthyear`, `c_deathyear`, `c_by_month`, `c_by_day`, `c_dy_month`, `c_dy_day` |
+| `altnames` (create **and** update) | `c_alt_name_pinyin`, `c_alt_name_pinyin2`, `c_alt_name_pinyin3`, `c_alt_name_role` | — |
+| `texts` (create **and** update) | `c_supplement`, `c_text_year` | — |
+
+One clarification on that last row, since a column count invites the wrong conclusion:
+`BIOG_TEXT_DATA` has 14 columns and the corrected whitelist covers 10 of them (6 writable
++ 4 audit). The other four — `c_year`, `c_nh_code`, `c_nh_year`, `c_range_code` — are
+real columns that **the server's own handler does not accept either**, so they are not
+ours to add. Worth knowing anyway, because `c_year` is the genuine analogue of the
+`c_text_year` just removed: if a batch ever needs a per-person date on a `BIOG_TEXT_DATA`
+row, that is an upstream feature request, not a whitelist entry.
+
+Note the scope is wider than `API.md`'s own diff suggests: upstream only spelled out the
+**update** lists for `altnames`/`texts` ("create = 同上再加 `c_personid`"), so reading the
+diff alone would have fixed half of it.
+
+**Why it matters — and the failure mode is not the one you would guess.** It depends on
+whether *upstream's* whitelist still shared the phantom at the moment of the request,
+because both of the server's filters key off its own `allowedFields()`:
+
+- **While upstream shared the phantom (any write before their cleanup): `500`, with SQL
+  disclosure.** A field that is *inside* the server whitelist but is not a column
+  survives every filter, reaches `BiogMain::create()` (the model has `$guarded = []`, so
+  it cannot stop it), and fails at the `INSERT`. Upstream's own commit message for the
+  fix is blunt about the consequence: 「使用者拿到 **500 而不是 422**，錯誤訊息還會把 SQL
+  與主機／資料庫名回吐給呼叫端」 — a 500 that echoes the statement plus the host and
+  database name back to the caller. That applied to `basicinformation` **create** and to
+  `altnames`/`texts` on **both** operations: their handler `array_diff`es `changes`
+  against `allowedFields()`, so a name *in* that list passes validation and is then
+  filtered *in*, not out. It did **not** apply to `basicinformation` update, which is the
+  one path that was safe by construction: `BiogMainMutationHandler::buildMergedPayload()`
+  derives its allow-list from **the live row's own columns**
+  (`array_diff(array_keys($base), self::BLOCKED_FIELDS)`), not from a hand-written
+  constant, so a name that is not a column cannot be in it and was always silently
+  dropped. Upstream's fix touches only `BiogMainCreateHandler.php`, and its commit
+  message scopes the 500 to 「`POST /api/v2/create`（resource=basicinformation）」.
+- **Now that upstream has removed them, the two paths diverge.** `basicinformation`
+  extends `AbstractMutationHandler` directly and filters with `array_intersect_key()`,
+  so a phantom is **silently dropped** and the call still returns `200 ok:true` (§1.7) —
+  the invisible failure this whitelist exists to catch. `altnames` and `texts` extend the
+  `AbstractPersonSubresource{Create,Mutation}Handler` pair, which returns
+  **`422 disallowed_fields`** before writing anything. That is also why `texts` is
+  **not** on §1.7's silent-drop list even though it looks like it belongs there: that
+  list is "handlers extending `AbstractMutationHandler` directly" — `basicinformation`,
+  `postings` create, `possessions` create, `sources` create/update — not "person
+  sub-resources".
+- **The six missing `basicinformation` fields were the expensive part in practice**:
+  birth and death year/month/day could not be sent on a create at all, so recording them
+  needed a create followed by an update. Upstream now guarantees create/update symmetry
+  (`tests/Feature/MutationCreateUpdateParityTest.php`), so that workaround is obsolete.
+
+Fixed in `models.py` and `docs/04-field-whitelists.md` in the same change as this sync;
+see `docs/02-review-log.md`. Upstream now has a schema-drift guard
+(`tests/Feature/MutationAllowedFieldsSchemaDriftTest.php`) that would have caught this on
+their side — we have no equivalent, because our whitelist is a hand-maintained copy with
+no database to compare against. The nearest cheap approximation, if this recurs, is a test
+that diffs `models.py` against the handler sources in
+`${CBDB_ONLINE_MAIN_SERVER_REPO_DIR}` when that checkout is configured.
 
 **Expanding the mirror back-fill row, because it is the one with a live blast radius.**
 `API.md` §9.8's one-liner ("與 `associations` 不同，`kinship` 的 `update` **不會**補建缺失的
@@ -389,7 +653,9 @@ converges only the **first** candidate, leaving the rest for a human.
 - `/api/operations/*` (the old crowdsourcing channel, §14.3) — no whitelist, no PK
   validation, **no `audit_log`**, unreliable status codes. Exactly the kind of path
   `AGENTS.md` rule 1 exists to keep us off.
-- `POST /api/v1/user/login` (§14.2) — dead route, always `404`, but leaves a session
+- `POST /api/v1/user/login` (§14.2) — **retired at this sync: always `410 Gone`, and it
+  no longer verifies a password at all** (`32331079`). Previously it was a live
+  password check that always `404`ed afterwards, and would leave a session
   cookie behind on success. Never call it.
 - `/api/ai/*` (§14.5), `/api/mcp` (§14.6) — session-gated / read-only-different-protocol;
   not part of the write path.

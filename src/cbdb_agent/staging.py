@@ -356,8 +356,12 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
                         severity="error",
                         message=(
                             f"{spec.key} create needs a non-empty {blank} - the server "
-                            "would accept the row without it, and this resource has no "
-                            "delete path, so a blank row would be permanent"
+                            "would accept the row without it, and this is global "
+                            "reference data, so a blank row is visible to every other "
+                            "user. Whether it can be removed afterwards depends on the "
+                            "resource: the code tables have no delete path at all "
+                            "(API.md 13.3), the entity aggregates do, but only while "
+                            "nothing references the row yet (API.md 13.4)"
                         ),
                     )
                 )

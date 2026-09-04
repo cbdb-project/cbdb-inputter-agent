@@ -219,6 +219,12 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                 f"(batch {batch.batch_id}, proposal {proposal.id})"
             )
 
+        # NOTE the office duplicate pre-flight is NOT called here. It lives inside
+        # MutationApi.create(), at the layer that actually sends the request, so a
+        # direct library call cannot walk past it. It raises PreflightError, which is a
+        # CbdbApiError and so lands in the per-proposal isolation below. Nothing extra
+        # is recorded on success: the check is a GET through http_client, so its request
+        # and response are already in the append-only audit log (AGENTS.md rule 8).
         try:
             if proposal.operation == "create":
                 response = api.create(

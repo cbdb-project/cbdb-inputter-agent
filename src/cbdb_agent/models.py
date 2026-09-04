@@ -7,6 +7,28 @@ app/Services/Mutations/*Handler.php files - see docs/04-field-whitelists.md for 
 per-resource citations and worked explanation of the quirks encoded below
 (pseudo-fields, server-assigned surrogate PKs, the social_institutions update alias
 gap, sources' unified create/update handler).
+
+A whitelist here is only as good as the transcription. Upstream removed 11 field names
+from its OWN whitelists (8a3c9f04, 2026-08; b1f4bf44, 2026-09-04) after finding they had
+never been columns in the database, and this file - transcribed from the pre-cleanup
+lists - had inherited every one of them (basicinformation's c_by_yymm/c_by_yymm_day/c_dy_yymm/c_dy_yymm_day/c_self_bio,
+altnames' three c_alt_name_pinyin* plus c_alt_name_role, texts' c_supplement and
+c_text_year) while forbidding six real ones (basicinformation's c_birthyear/c_deathyear/
+c_by_month/c_by_day/c_dy_month/c_dy_day). On the paths where the server silently drops
+unknown fields (API.md 4.6: basicinformation, postings create, possessions create,
+sources - the handlers that extend AbstractMutationHandler directly), a phantom entry
+here turns a 200 ok:true into a value that was never written, which is exactly what this
+file exists to prevent. On the person-subresource handlers (altnames, texts, addresses,
+entries, statuses, events, associations, kinship, social_institutions) the same mistake
+is loud instead - they array_diff the changes keys and return 422 disallowed_fields - so
+a phantom entry there breaks a submission rather than losing data quietly.
+Worth knowing which failure you are looking at, because it changed: while the SERVER's
+whitelist still contained the same phantom, neither filter could catch it, the field
+reached the INSERT, and the caller got a 500 that echoed the SQL plus the host and
+database name. The silent-drop / 422 split above is the post-cleanup behaviour.
+See docs/07-api-md-digest.md section 3.1.
+So when adding or editing a resource, check each field against the target system's
+handler source AND against a real column list - never against another copy of this file.
 """
 
 from __future__ import annotations
@@ -76,6 +98,34 @@ class ResourceSpec:
     # for text_codes, where the server happily accepts `changes: {}` and would mint a
     # permanent, blank, undeletable row at max+1.
     required_create_fields: frozenset[str] = field(default_factory=frozenset)
+    # Same idea for update. Needed because the entity aggregates (API.md 13.4) share
+    # ONE validator between create and update, so `name`/`type_ids`/`source_id`/
+    # `dynasty_code` are required on an update too - unlike every person resource,
+    # where an update may legitimately carry a single field.
+    required_update_fields: frozenset[str] = field(default_factory=frozenset)
+    # The aggregate `update` is a FULL-ROW OVERWRITE, not chapter 7's PATCH: any
+    # writable field absent from `changes` is written as NULL (API.md 13.4). That makes
+    # "I forgot to mention notes" indistinguishable from "clear notes", and silently
+    # destructive. When this is set, validate_changes("update", ...) requires EVERY key
+    # in update_fields to be present - with a real value or an explicit None - so the
+    # author has to state the intent to clear a field where a reviewer can see it, and
+    # deleting a line from a staging file becomes a validation error instead of data
+    # loss. Do NOT set this for a PATCH-semantics resource; it would force every update
+    # to resend the whole row.
+    full_overwrite_update: bool = False
+    # Fields whose VALUE SHAPE is load-bearing: must be a non-empty list of non-empty
+    # strings. `type_ids` is the first such field in this client. The generic whitelist
+    # only ever checked KEYS, never values.
+    #
+    # Not because the server would silently mangle a scalar - it would not.
+    # `resolveOfficeTypeIds()` falls through to `type_id`/`c_office_tree_id` when
+    # `type_ids` is not an array, finds neither, and returns [] for a clean
+    # `422 type_ids: required`. Two reasons that is still not good enough: the 422
+    # arrives after a round trip and says "required" for a field that was present, which
+    # is a confusing thing to debug; and these are varchar node ids where **the leading
+    # zero is significant** ("06", not 6), so pinning them to strings here is what stops
+    # a YAML author writing `type_ids: [06]` and having it arrive as 6.
+    list_fields: frozenset[str] = field(default_factory=frozenset)
 
     def resolve_alias(self, resource_string: str, operation: str) -> None:
         """Raise FieldWhitelistError if resource_string is not a valid alias for
@@ -120,6 +170,45 @@ class ResourceSpec:
                 f"Fields not allowed for {self.key}/{operation}: {sorted(unknown)}"
             )
 
+        for list_field in sorted(self.list_fields & set(changes)):
+            value = changes[list_field]
+            if (
+                not isinstance(value, (list, tuple))
+                or len(value) == 0
+                or any(not isinstance(v, str) or not v.strip() for v in value)
+            ):
+                raise FieldWhitelistError(
+                    f"{self.key}: {list_field!r} must be a non-empty list of non-empty "
+                    f"strings, got {value!r}. A bare scalar is not accepted here - the "
+                    "server takes an array and a wrong shape is not reliably rejected."
+                )
+
+        if operation == "update" and self.full_overwrite_update:
+            # Every writable field, present or explicitly null. See the field's comment:
+            # an omitted field is written as NULL by the server, so silence is not
+            # "leave it alone".
+            absent = sorted(self.update_fields - set(changes))
+            if absent:
+                raise FieldWhitelistError(
+                    f"{self.key}: update is a FULL-ROW OVERWRITE (API.md 13.4), so every "
+                    f"writable field must appear in `changes`. Missing {absent} - each "
+                    "would be written as NULL. Read the current row first and either "
+                    "carry its value across or write an explicit `null` to say you mean "
+                    "to clear it."
+                )
+
+        if operation == "update" and self.required_update_fields:
+            missing = {
+                f for f in self.required_update_fields
+                if is_missing_value(changes.get(f))
+            }
+            if missing:
+                raise FieldWhitelistError(
+                    f"{self.key}: update requires a non-empty value for "
+                    f"{sorted(missing)} - this resource's create and update share one "
+                    "server-side validator, so these are required on both."
+                )
+
         if operation == "create" and self.required_create_fields:
             # The server does not require these (API.md 4.3: `create`'s `changes` is
             # optional), which is exactly the problem - for a resource whose rows
@@ -129,11 +218,21 @@ class ResourceSpec:
                 if is_missing_value(changes.get(f))
             }
             if missing:
+                # The consequence differs by resource and saying the wrong one is worse
+                # than saying nothing: the code tables have no delete path at all
+                # (API.md 13.3), while the entity aggregates DO support delete, guarded
+                # by a 409 once anything references the row (API.md 13.4).
+                consequence = (
+                    "this resource has no delete path, so a blank row would be permanent"
+                    if not self.delete_aliases and not self.update_fields
+                    else "this is global reference data, so a blank row is visible to "
+                    "every other user until someone deletes it - and only while nothing "
+                    "references it yet"
+                )
                 raise FieldWhitelistError(
                     f"{self.key}: create requires a non-empty value for "
                     f"{sorted(missing)} - the server would accept the row without it "
-                    "and this resource has no delete path, so a blank row would be "
-                    "permanent"
+                    f"and {consequence}"
                 )
 
     def validate_target_pk_for_create(self, target_pk: dict) -> None:
@@ -195,35 +294,41 @@ RESOURCE_SPECS: dict[str, ResourceSpec] = {
                 "c_surname_proper", "c_mingzi_proper", "c_surname_rm", "c_mingzi_rm",
                 "c_female", "c_index_year", "c_index_year_type_code",
                 "c_index_year_source_id", "c_index_addr_id", "c_index_addr_type_code",
-                "c_dy", "c_by_intercalary", "c_by_nh_code", "c_by_nh_year",
-                "c_by_range", "c_by_yymm", "c_by_yymm_day", "c_by_day_gz",
-                "c_dy_intercalary", "c_dy_nh_code", "c_dy_nh_year", "c_dy_range",
-                "c_dy_yymm", "c_dy_yymm_day", "c_dy_day_gz", "c_death_age",
+                "c_dy", "c_by_intercalary", "c_birthyear", "c_by_nh_code",
+                "c_by_nh_year", "c_by_range", "c_by_month", "c_by_day",
+                "c_by_day_gz", "c_dy_intercalary", "c_deathyear", "c_dy_nh_code",
+                "c_dy_nh_year", "c_dy_range", "c_dy_month", "c_dy_day",
+                "c_dy_day_gz", "c_death_age",
                 "c_death_age_range", "c_fl_earliest_year", "c_fl_ey_nh_code",
                 "c_fl_ey_nh_year", "c_fl_ey_notes", "c_fl_latest_year",
                 "c_fl_ly_nh_code", "c_fl_ly_nh_year", "c_fl_ly_notes",
                 "c_ethnicity_code", "c_household_status_code", "c_tribe",
-                "c_choronym_code", "c_notes", "c_self_bio",
+                "c_choronym_code", "c_notes",
             }
         ),
         # update = create fields, minus c_personid (immutable-by-PK) and the 4 name
         # fields (blocked on update though allowed on create - see
         # update_immutable_fields below), minus audit fields (always server-set).
+        # The two lists are kept deliberately IDENTICAL apart from those exclusions:
+        # upstream now guarantees that symmetry mechanically
+        # (tests/Feature/MutationCreateUpdateParityTest.php), so a field appearing on
+        # only one side here is a transcription bug, not a real asymmetry.
         update_fields=frozenset(
             {
                 "c_surname_chn", "c_mingzi_chn", "c_surname", "c_mingzi",
                 "c_surname_proper", "c_mingzi_proper", "c_surname_rm", "c_mingzi_rm",
                 "c_female", "c_index_year", "c_index_year_type_code",
                 "c_index_year_source_id", "c_index_addr_id", "c_index_addr_type_code",
-                "c_dy", "c_by_intercalary", "c_by_nh_code", "c_by_nh_year",
-                "c_by_range", "c_by_yymm", "c_by_yymm_day", "c_by_day_gz",
-                "c_dy_intercalary", "c_dy_nh_code", "c_dy_nh_year", "c_dy_range",
-                "c_dy_yymm", "c_dy_yymm_day", "c_dy_day_gz", "c_death_age",
+                "c_dy", "c_by_intercalary", "c_birthyear", "c_by_nh_code",
+                "c_by_nh_year", "c_by_range", "c_by_month", "c_by_day",
+                "c_by_day_gz", "c_dy_intercalary", "c_deathyear", "c_dy_nh_code",
+                "c_dy_nh_year", "c_dy_range", "c_dy_month", "c_dy_day",
+                "c_dy_day_gz", "c_death_age",
                 "c_death_age_range", "c_fl_earliest_year", "c_fl_ey_nh_code",
                 "c_fl_ey_nh_year", "c_fl_ey_notes", "c_fl_latest_year",
                 "c_fl_ly_nh_code", "c_fl_ly_nh_year", "c_fl_ly_notes",
                 "c_ethnicity_code", "c_household_status_code", "c_tribe",
-                "c_choronym_code", "c_notes", "c_self_bio",
+                "c_choronym_code", "c_notes",
             }
         ),
         update_immutable_fields=frozenset(
@@ -280,18 +385,21 @@ RESOURCE_SPECS: dict[str, ResourceSpec] = {
         update_aliases=frozenset({"altnames", "altname", "altname_data"}),
         delete_aliases=frozenset({"altnames", "altname", "altname_data"}),
         pk_fields=("c_personid", "c_alt_name_chn", "c_alt_name_type_code"),
+        # No pinyin columns and no c_alt_name_role: ALTNAME_DATA has 12 columns and
+        # none of them is c_alt_name_pinyin/2/3 or c_alt_name_role. They sat in
+        # upstream's own whitelist by mistake until 8a3c9f04 and were transcribed
+        # here from it. Unlike the silent-drop paths (API.md 4.6), this handler
+        # validates its whitelist, so sending one was a 422 - docs/07 section 3.1.
         create_fields=frozenset(
             {
                 "c_personid", "c_alt_name_chn", "c_alt_name_type_code", "c_alt_name",
-                "c_source", "c_pages", "c_notes", "c_sequence", "c_alt_name_pinyin",
-                "c_alt_name_pinyin2", "c_alt_name_pinyin3", "c_alt_name_role",
+                "c_source", "c_pages", "c_notes", "c_sequence",
             }
         ),
         update_fields=frozenset(
             {
                 "c_alt_name_chn", "c_alt_name", "c_alt_name_type_code", "c_source",
-                "c_pages", "c_notes", "c_sequence", "c_alt_name_pinyin",
-                "c_alt_name_pinyin2", "c_alt_name_pinyin3", "c_alt_name_role",
+                "c_pages", "c_notes", "c_sequence",
             }
         ),
     ),
@@ -449,13 +557,20 @@ RESOURCE_SPECS: dict[str, ResourceSpec] = {
             {"texts", "text", "biog_text_data", "text_data"}
         ),
         pk_fields=("c_personid", "c_textid", "c_role_id"),
+        # No c_supplement / c_text_year: BIOG_TEXT_DATA has neither column. Same
+        # provenance as altnames' phantom fields, and the same LOUD failure mode:
+        # TextCreateHandler/TextMutationHandler extend the person-subresource
+        # handlers, which validate the whitelist, so sending one was a 422 - texts is
+        # NOT on API.md 4.6's silent-drop list. docs/07-api-md-digest.md section 3.1.
+        # (Four real BIOG_TEXT_DATA columns - c_year, c_nh_code, c_nh_year,
+        # c_range_code - are outside this list because the SERVER does not accept
+        # them either, not because we dropped them.)
         create_fields=frozenset(
             {"c_personid", "c_textid", "c_role_id", "c_source", "c_pages",
-             "c_notes", "c_supplement", "c_text_year"}
+             "c_notes"}
         ),
         update_fields=frozenset(
-            {"c_textid", "c_role_id", "c_source", "c_pages", "c_notes",
-             "c_supplement", "c_text_year"}
+            {"c_textid", "c_role_id", "c_source", "c_pages", "c_notes"}
         ),
     ),
     "postings": ResourceSpec(
@@ -603,6 +718,65 @@ RESOURCE_SPECS["text_codes"] = ResourceSpec(
     # not in the server's update whitelist (only c_title is), and the row cannot be
     # deleted. See docs/04-field-whitelists.md section 14.
     required_create_fields=frozenset({"c_title_chn"}),
+)
+
+
+# --- Entity aggregates (NOT person data). AGENTS.md rule 12 applies. -------------
+#
+# `office` spans OFFICE_CODES + OFFICE_CODE_TYPE_REL and is written only through the
+# aggregate resource (API.md 13.4). Design, traps and the worked batch:
+# docs/10-office-aggregate-design.md. The parts that shape this spec:
+#
+#   - ONLY the alias `office` is registered. `offices` and `office-load` are the two
+#     other strings the SERVER accepts, and both are deliberately omitted:
+#     (a) server-side, `offices` is matched by the POSTINGS handler first, so it writes
+#         a person's appointment record instead of an office code;
+#     (b) client-side, approval_gated_aliases() is built from these alias sets, and
+#         http_client._check_approval() matches it against the raw `resource` string -
+#         so registering `offices` here would make EVERY ROUTINE POSTINGS WRITE demand
+#         an approved_by. Do not add it.
+#   - Input fields are the aggregate's SEMANTIC short names, not OFFICE_CODES column
+#     names. The server also accepts the column names (c_office_chn, c_dy, ...); we
+#     register only the semantic set so there is exactly one way to say each thing and
+#     a reviewer never has to reconcile two spellings of the same field.
+#   - `dynasty_label` is NOT registered even though the server accepts it: it resolves
+#     through VariantLabelMap and, on a normalized-key collision, keeps the SMALLEST
+#     c_dy. Send `dynasty_code`.
+#   - `c_office_id` is server-assigned on create (max+1) and a known, pre-existing
+#     value on update - hence server_assigned_pk_fields, which makes staging require it
+#     to be *present* on update ("never invented") and *absent* on create.
+#   - DELETE IS NOT MODELLED. It is supported server-side and guarded by a 409 when
+#     postings reference the office, but nothing in this client needs to remove an
+#     office code, and a narrower surface is the point for a resource this global.
+#   - Unlike text_codes, an office row IS deletable while unreferenced, so a mistake
+#     here is recoverable - but only until something references it. See the note on
+#     requires_explicit_approval above: do not inherit text_codes' "permanent" wording.
+_OFFICE_AGGREGATE_FIELDS = frozenset(
+    {
+        "name", "name_alt", "translation", "translation_alt",
+        "pinyin", "pinyin_alt", "dynasty_code", "type_ids", "source_id",
+        "pages", "notes",
+    }
+)
+
+# Required by the shared create/update validator (ResolvesOfficeAggregateInput).
+_OFFICE_REQUIRED_FIELDS = frozenset({"name", "type_ids", "source_id", "dynasty_code"})
+
+RESOURCE_SPECS["office"] = ResourceSpec(
+    key="office",
+    create_aliases=frozenset({"office"}),
+    update_aliases=frozenset({"office"}),
+    delete_aliases=frozenset(),  # not modelled - see the comment above
+    pk_fields=("c_office_id",),
+    server_assigned_pk_fields=frozenset({"c_office_id"}),
+    create_fields=_OFFICE_AGGREGATE_FIELDS,
+    update_fields=_OFFICE_AGGREGATE_FIELDS,
+    requires_explicit_approval=True,
+    required_create_fields=_OFFICE_REQUIRED_FIELDS,
+    required_update_fields=_OFFICE_REQUIRED_FIELDS,
+    # The aggregate update writes NULL over anything you omit.
+    full_overwrite_update=True,
+    list_fields=frozenset({"type_ids"}),
 )
 
 
