@@ -1424,6 +1424,31 @@ Affairs", sourced to 《唐會要》卷六十八 刺史上, with the 大曆 12 (
 `c_notes` and three type nodes. 封魯卿's posting followed the row automatically (it points
 at `c_office_id`).
 
+**Postscript, hours later: `c_notes` has since been edited by the user through another
+path**, and this is worth recording twice over. The live value is 243 characters — the
+84-character English sentence the payload had deliberately preserved is gone, and the
+edict now carries a `唐會要：「…」` citation wrapper that appears nowhere in what was sent.
+The other nine columns are unchanged, and the three type relations are intact (checked
+with `GET /api/OFFICE_CODE_TYPE_REL`).
+
+Two lessons, one of them a plain mistake on the agent's part:
+
+1. **The preserved sentence should never have been sent.** It read "Temporarily added to
+   office codes. Need to be checked." — and the edict being added *was* that check. The
+   user's rule, given afterwards: 「提交到系统的数据不要去加 Need to be checked 这种内容，
+   我要提交的时候，肯定已经都检查好了」. Submission is the act that asserts the data is
+   correct; a "needs checking" note describes the editor's workflow, not the historical
+   record, and it stays visible to every CBDB user long after the checking is done. The
+   agent applied "don't rewrite other people's prose byte-for-byte" — right for
+   substantive content — to a self-obsoleting workflow marker, where it is wrong. Now a
+   rule in `skills/cbdb-data-entry/SKILL.md`.
+2. **The lost-update window from §5.1 of the design arrived within hours of being
+   documented as theoretical.** The aggregate `update` has no baseline or
+   compare-and-swap, so re-running the archived batch would silently revert the user's
+   edit. The archive is stamped DO NOT RE-SUBMIT for exactly this reason, and `docs/10`
+   §5.2 now carries a warning that its Current/Proposed table records what was sent, not
+   the live row.
+
 ### Two process notes worth keeping
 
 **The production gate did its job, twice.** `CBDB_CONFIRM_PROD` was empty, so the first

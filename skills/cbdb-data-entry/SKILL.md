@@ -185,6 +185,17 @@ does when invoked this way:
     to clear it. The client refuses a partial payload rather than letting it through.
   - Use the resource string **`office`**, never `offices` — the plural is matched by the
     postings handler first, so it would write a person's appointment record instead.
+- **Never write a provisional marker into a submitted field.** No "Need to be checked",
+  "to be verified", "tentative", "temporarily added" in `c_notes` or anywhere else that
+  lands in CBDB. Submitting is what asserts the data is right; such a note describes the
+  editor's workflow, not the record, and it stays public long after the checking is done.
+  Uncertainty belongs in the staging file — `confidence`, a `conflict`, `batch_notes` —
+  which is not submitted. **And when existing data already carries such a marker and your
+  task is the check it asks for, delete it** rather than preserving it: that is the one
+  case where the usual "keep other people's prose byte-for-byte" instinct is wrong.
+  (Real case: office 12304's note read "Temporarily added to office codes. Need to be
+  checked."; the edict being added was that check, the agent preserved the sentence
+  anyway, and the user had to remove it by hand.)
     **You must never fill that field in yourself**; it records that a named human
     made the call, and `batch_runner` forwards it into `meta.comment` so the
     sign-off is visible in the server's own `operations` row too.

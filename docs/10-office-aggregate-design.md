@@ -313,6 +313,17 @@ that is what makes the full overwrite safe.
 | `c_notes` (`notes`) | the English provisional note | **existing note verbatim + the 唐會要 passage** |
 | `type_ids` | *(none)* | **`["06", "06091204", "06091202"]`** |
 
+⚠️ **This table is a record of what was sent on 2026-09-04, not a description of the
+live row today.** `c_notes` has since been edited by someone through another path: the
+live value is now 243 characters, the preserved 84-character English sentence is gone,
+and the edict carries a `唐會要：「…」` citation wrapper that appears nowhere in the
+payload. The other nine columns are unchanged. That edit is an improvement — the English
+note said "Need to be checked", and it has now been checked — and it is exactly the
+lost-update window §5.1 describes, arriving in practice within hours. Two consequences:
+**do not rebuild a full-overwrite payload from this table** (it would revert that edit,
+which is why the archived batch is stamped DO NOT RE-SUBMIT), and §6's pre-flight rule
+now fires on this row — re-read it live before any further update.
+
 Notes on the non-obvious ones:
 
 - **`攝`, not the requested `摄`.** `OFFICE_CODES` is traditional throughout (`錄事參軍事`,
@@ -564,10 +575,20 @@ Settled by the user, 2026-09-04:
 Decided by me rather than asked, all cheaply reversible — say the word and any of them
 flips:
 
-- `pages` normalized from `卷六八《刺史上》` to `卷六十八 刺史上`, matching the `卷` +
-  full-Chinese-numeral, no-《》 form every sourced office row uses.
-- The existing English `c_notes` sentence kept verbatim, `Need to be checked.` included,
-  rather than editing someone else's sentence on the agent's own initiative.
+- `pages` normalized from `卷六八《刺史上》` to `卷六十八 刺史上`. Weaker evidence than
+  first stated: of 5,793 sourced `OFFICE_CODES` rows only 2,314 carry any `c_pages`, and
+  those are four distinct 遼史 values (`卷四十五`–`卷四十八`) plus one counterexample,
+  office 202979's bare `8947`. So the `卷` + full-Chinese-numeral form is *one batch's*
+  habit, not a house style — the "no 《》" half does hold (zero rows contain them).
+- ~~The existing English `c_notes` sentence kept verbatim, `Need to be checked.`
+  included, rather than editing someone else's sentence on the agent's own initiative.~~
+  **Wrong call, corrected by the user the same day.** A "needs checking" marker has no
+  place in submitted data: submission is the act that asserts the data is correct, the
+  note is a claim about the editor's workflow rather than about the historical record,
+  and it stays visible to every CBDB user long after the checking is done. The 唐會要
+  edict being added *was* that check, so the sentence should have gone. Keeping other
+  people's prose byte-for-byte is still right for substantive content — it was the wrong
+  instinct to apply to a self-obsoleting workflow marker.
 - `translation_alt` left explicitly `null`. `Acting Administrator of Prefectural Civil
   Affairs` is well-founded if you want it (Hucker renders `攝` as "Acting", and the
   edict's `使司不得差攝` supports the reading).

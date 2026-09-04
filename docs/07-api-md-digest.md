@@ -210,15 +210,27 @@ inside the web UI. Do not treat it as retryable.
 ### 1.9 The server rewrites your text before storing it — and only sometimes says so
 
 Consolidated here because it grew from an altnames-only quirk into a global one, and
-because it decides how a write is *verified* (rule 11), not just how it is sent. Three
-rewrites happen server-side, in this order (`API.md` §4.3, §1.5, and
-`app/Support/VariantReplaceScope.php`):
+because it decides how a write is *verified* (rule 11), not just how it is sent. The
+three rewrites that apply to **every** resource happen server-side in this order
+(`API.md` §4.3, §1.5, and `app/Support/VariantReplaceScope.php`) — and see the note
+after the table for the two narrower ones, so "three" does not become a reason to stop
+looking:
 
 | Rewrite | Scope | Announced? |
 |---|---|---|
 | **Unicode NFC folding** (compatibility ideographs → unified, e.g. 慎 U+FA87 → U+614E) | **every text column**, all resources | **No — silent.** It is canonical equivalence, so upstream treats it as the same character |
 | **Variant-character substitution** via `char_variant_map` | every text column *except* the excluded lists: strict (a smaller rule set) on `BIOG_MAIN.c_name_chn`/`c_surname_chn`/`c_mingzi_chn` and `ALTNAME_DATA.c_alt_name_chn`; **lenient (full rule set) everywhere else**, including `c_notes`/`c_pages` on the same row | **Yes** — top-level `notices` array |
 | **Pinyin `v`→`ü`** (only after `l`/`n`, not before `a`/`i`/`o`/`u`) | registered pinyin columns, per-table-per-column | **No — silent** |
+
+**Two more silent rewrites exist, narrower in scope and easy to miss** because
+`API.md` §1.5 lists all of them in one breath 「其他靜默改寫（**Unicode NFC 正規化**、
+拼音 `v→ü`、**括號正規化**、**哨兵值正規化**）**不會**產生 `notices`」:
+*bracket normalization* (`BracketNormalizer`; full-width → half-width, spaces inserted
+around brackets) on `ALTNAME_DATA.c_alt_name_chn`/`c_alt_name` and the `BIOG_MAIN` name
+columns, and *sentinel normalization* (null/`''`/`-999` → `'0'` on code and FK columns),
+which has its own section at §1.5 above. Neither touches the entity aggregates, but both
+are silent, so a value that comes back not-quite-as-sent on a person resource is probably
+one of these rather than a bug.
 
 What changed at this sync, and why it matters to us:
 
@@ -396,9 +408,16 @@ same collision creates.
   `max+1` and insert, so submitting the same office twice yields two rows with the same
   name and different ids, with nothing in the response to hint at it. The pre-create
   existence check is the client's job — and per `AGENTS.md`'s snapshot rule it has to be a
-  *live* check. `social-institution` is the exception: `resolveNameCode()` reuses an
-  existing name code rather than minting one, and the response says which happened via
-  `name_created: true|false`.
+  *live* check. `social-institution` is only a **partial** exception, and the difference
+  matters: `resolveNameCode()` reuses an existing *name code* rather than minting one
+  (the response says which via `name_created: true|false`), but
+  `SocialInstituteImportService::create()` still calls
+  `allocateNextId('SOCIAL_INSTITUTION_CODES', 'c_inst_code')` unconditionally — so a
+  repeated create mints a **second institution row** under the reused name code. The
+  dedup is also one-directional by upstream's own admission: it cannot match when the
+  input is the reference form and the stored row is a *different* variant form. So all
+  three aggregates need a client-side pre-create check; only the shape of what gets
+  duplicated differs.
 - **`/api/v2/get` cannot read any of them.** `MutationReadService` covers 13 person
   resources plus `nianhao` (14 definitions in total) and nothing else — `resolve('office')`
   returns `null`. So rule 11's read-back has to go through
@@ -569,9 +588,16 @@ because both of the server's filters key off its own `allowedFields()`:
   it cannot stop it), and fails at the `INSERT`. Upstream's own commit message for the
   fix is blunt about the consequence: 「使用者拿到 **500 而不是 422**，錯誤訊息還會把 SQL
   與主機／資料庫名回吐給呼叫端」 — a 500 that echoes the statement plus the host and
-  database name back to the caller. This applied to all three resources, `altnames` and
-  `texts` included: their handler `array_diff`es `changes` against `allowedFields()`, so
-  a name *in* that list passes validation and is then filtered *in*, not out.
+  database name back to the caller. That applied to `basicinformation` **create** and to
+  `altnames`/`texts` on **both** operations: their handler `array_diff`es `changes`
+  against `allowedFields()`, so a name *in* that list passes validation and is then
+  filtered *in*, not out. It did **not** apply to `basicinformation` update, which is the
+  one path that was safe by construction: `BiogMainMutationHandler::buildMergedPayload()`
+  derives its allow-list from **the live row's own columns**
+  (`array_diff(array_keys($base), self::BLOCKED_FIELDS)`), not from a hand-written
+  constant, so a name that is not a column cannot be in it and was always silently
+  dropped. Upstream's fix touches only `BiogMainCreateHandler.php`, and its commit
+  message scopes the 500 to 「`POST /api/v2/create`（resource=basicinformation）」.
 - **Now that upstream has removed them, the two paths diverge.** `basicinformation`
   extends `AbstractMutationHandler` directly and filters with `array_intersect_key()`,
   so a phantom is **silently dropped** and the call still returns `200 ok:true` (§1.7) —

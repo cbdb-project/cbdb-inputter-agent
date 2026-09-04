@@ -442,8 +442,12 @@ and the worked batch: **`docs/10-office-aggregate-design.md`**. What `models.py`
   the aggregate shares one validator (`ResolvesOfficeAggregateInput`) between the two
   operations, unlike every person resource where an update may carry a single field.
   Encoded as both `required_create_fields` and `required_update_fields`.
-- **`update` is a FULL-ROW OVERWRITE, not §7's PATCH.** Any writable field absent from
-  `changes` is written as `NULL`. `full_overwrite_update=True` makes `validate_changes()`
+- **`update` is a FULL-ROW OVERWRITE, not §7's PATCH.** Any *optional* field absent from
+  `changes` is written as `NULL` — with one carve-out worth knowing: `pinyin` and
+  `pinyin_alt` are **derived from the corresponding Chinese** when omitted
+  (`OfficeImportService::officeColumns()` calls `buildPinyin()`), not nulled. The client
+  demands all eleven fields regardless, so this never changes what we send; it changes
+  what you should expect if you ever read a row written by another client. `full_overwrite_update=True` makes `validate_changes()`
   demand every field in `update_fields` — a value or an explicit `null` — so "I forgot
   `notes`" becomes a validation error instead of silent data loss, and clearing a field
   has to be said out loud where a reviewer sees it.
