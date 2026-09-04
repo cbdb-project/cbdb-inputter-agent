@@ -11,7 +11,9 @@ own `API.md`, digested — read this before any endpoint/field question**),
 `docs/01-implementation-plan.md` (this repo's
 architecture and milestones), `docs/03-extraction-review-workflow.md` (source-text →
 staging-file → human-review pipeline), `docs/04-field-whitelists.md` (per-resource
-allowed fields), `docs/05-testing-strategy.md` (mocking/fixture conventions).
+allowed fields), `docs/05-testing-strategy.md` (mocking/fixture conventions),
+`docs/08-review-interface-design.md` (the offline review page and the
+`review.json` → `decisions.json` → `apply-review` round trip).
 
 ## The target system's API contract — where it lives, and keeping it in sync
 
@@ -39,6 +41,44 @@ the failed-auth rate cap were both added in the days before that sync). So:
   `docs/04-field-whitelists.md`, and log the sync in `docs/02-review-log.md`.
 - `docs/07-api-md-digest.md` is a *summary*. Where it and upstream `API.md` disagree,
   upstream wins and the digest is the thing that's wrong — fix it.
+- For **reference data** (what a code means, what an address is inside), prefer the
+  weekly SQLite snapshot over the API — see the next section, including the hard
+  limit on what a snapshot may decide.
+
+## The weekly CBDB SQLite snapshot — what it's for, and what it must never decide
+
+CBDB publishes a full SQLite build of the database every week at
+<https://huggingface.co/datasets/cbdb/cbdb-sqlite> (`latest.zip`, ~132 MB compressed,
+~557 MB on disk). `src/cbdb_agent/snapshot.py` downloads it on demand, verifies it
+against the `sha256` in its sidecar metadata, and opens it **read-only**.
+
+- Location: `data/cbdb-sqlite/` inside this repo, gitignored. Override with
+  `CBDB_SQLITE_DIR`; disable the download with `CBDB_SQLITE_AUTODOWNLOAD=false`.
+  It lives in the repo rather than a user-cache directory so it is visible and can be
+  removed by deleting the folder — but if your checkout is inside a synced folder
+  (OneDrive/Dropbox), point `CBDB_SQLITE_DIR` outside it.
+- What it buys: reference data and the joins the API cannot do in one call. An
+  address's full parent chain through `ADDR_BELONGS_DATA`, an office's
+  `OFFICE_TYPE_TREE` ancestry through `OFFICE_CODE_TYPE_REL`, book titles, reign
+  periods — one local query instead of one rate-limited HTTP request per level. This
+  is what puts a human-readable name next to every code in the review page.
+
+**It is a weekly snapshot of a database that is written to continuously — including
+by this agent. So it answers "what does this code mean", never "what is currently
+true of this record".** Concretely, it must **never** be used for:
+
+- `max(c_personid)` or any `c_personid` allocation (`person_id.py` stays on the live
+  `GET /api/v2/persons`, per rule 6);
+- a "does this row already exist" check before a create — a row added since the build
+  is invisible in it, so the check can answer "not there" for something that is,
+  which is exactly how you create the duplicate you were checking for;
+- the current-value diff behind `preview.md` / `review.json` (that stays on
+  `GET /api/v2/get`);
+- anything else that gates a write.
+
+For those, the live API is the only acceptable source, and its being slower is the
+price of being right. `snapshot.snapshot_is_stale()` exists so a caller can tell the
+user how old the build is instead of quietly trusting it.
 
 ## Hard rules
 
@@ -66,6 +106,27 @@ the failed-auth rate cap were both added in the days before that sync). So:
    `GET /api/select/{table}` (whole small code table),
    `GET /api/select/search/{table}` (keyword search),
    `GET /api/code/addr`, and `GET /api/name`.
+   Two more are allowed **only** as the no-snapshot fallback for office-type
+   hierarchy: `GET /api/OFFICE_TYPE_TREE` and `GET /api/OFFICE_CODE_TYPE_REL`.
+   `API.md` §14 names these as "still present, not documented here" — they ignore
+   their parameters and dump the whole table (2.7k and 44k rows). Treat them as
+   liable to vanish: `code_lookup.py` fetches each once and treats a failure as
+   "no type tree for this office", never as an error. When the SQLite snapshot is
+   available these are not called at all, which is the better path anyway.
+   Also allowed, and necessary for a different job — **reading a person's current
+   state before proposing changes to them**: `GET /cbdbapi/person?id=<N>&mode=json`
+   (`API.md` §14.7). `/api/v2/get` can only fetch one row by its full composite PK, so
+   it cannot answer "what does this person already have?" — which is exactly what you
+   must know before writing (to avoid duplicating an existing row, and per rule 5's
+   preference for human judgement over a blind retry). This endpoint returns the whole
+   person in one read: `BasicInfo` plus `PersonSources`, `PersonSourcesAs`,
+   `PersonAliases`, `PersonAddresses`, `PersonEntryInfo`, `PersonPostings`,
+   `PersonSocialStatus`, `PersonKinshipInfo`, `PersonSocialAssociation`, `PersonTexts`
+   (empty collections are stripped, so a missing key means "none", not "unknown").
+   **`mode=json` is mandatory** — any other value, including omitting it or misspelling
+   it, returns an **HTML page**, not JSON. Prefer it over
+   `/app/basicinformation/{id}/summary` and `/app/basicinformation/{id}/tabs/{tabKey}`
+   (§14.9), which are page-backing endpoints with no stability guarantee at all.
    Three conditions, all of them binding:
    (a) they must still go through `http_client.py` (rule 2 — they're rate-limited and
    audit-logged like everything else);
@@ -152,22 +213,37 @@ the failed-auth rate cap were both added in the days before that sync). So:
 12. **Code-table and entity-aggregate writes are a different, higher risk class than
     person data — never do one without explicit, specific user approval.** This covers
     `text-codes` (new `TEXT_CODES` rows), `char-variant-map`, the `office` and
-    `social-institution` entity aggregates, and `merged-person`. They are **global
-    reference data** referenced by potentially tens of thousands of person rows, and
-    **there is no delete path at all** — a wrong row is un-deletable and only partly
-    correctable. So a missing book title or office code is something you **report to the
-    user as a finding**, with the evidence; you create it only if they say to. It is
-    never a gap you close on your own initiative to unblock a batch.
+    `social-institution` entity aggregates, and `merged-person`. What they share is
+    **blast radius**: they are global reference data, referenced by potentially tens of
+    thousands of person rows and visible to every other user, so a mistake is not
+    confined to one record. Reversibility differs and it is worth knowing which you are
+    touching: the **code tables have no delete path at all** (`403`/`501`, `API.md`
+    §13.3), and a `TEXT_CODES` row is only partly correctable afterwards — just
+    `c_title`, never `c_title_chn`. The **entity aggregates *do* support `delete`**
+    (§13.4), guarded by `409` reference checks, so a mistake there is recoverable if
+    nothing has referenced it yet. Either way: a missing book title or office code is
+    something you **report to the user as a finding**, with the evidence; you create it
+    only if they say to. It is never a gap you close on your own initiative to unblock
+    a batch.
     Mechanics and traps: `docs/07-api-md-digest.md` §2.2–2.4.
-    **Two things to be precise about.** (a) *This rule is not enforced by code.* Those
-    resource strings simply aren't in `models.py`'s `RESOURCE_SPECS`, so a staging YAML
-    naming one is rejected today as an unknown alias — which is the right outcome by
-    accident, not by design. The moment someone models one of them for a legitimate
-    reason, nothing in the code will ask for approval. (b) *Two near-identical strings
-    mean entirely different resources*: `office` is the entity aggregate (needs approval)
-    while `offices` resolves to the **postings sub-resource** (routine); likewise
-    `social-institution` (hyphen, entity, needs approval) vs `social_institution`
-    (underscore, the person sub-resource `BIOG_INST_DATA`, routine). Read the separator.
+    **How the gate is enforced.** `ResourceSpec.requires_explicit_approval` marks such a
+    resource; `staging.find_issues()` then raises a **structural error** (not a
+    "conflict", which is a normal mid-review state) unless that proposal carries an
+    explicit `approved_by: <name of the human who decided>`. `batch_runner` forwards it
+    into `meta.comment`, so the sign-off lands in the **server's** `operations` row too,
+    not only in this repo. **Never fill in `approved_by` yourself** — it exists precisely
+    to record that a human, named, made the call.
+    Today exactly one such resource is modelled: **`text-codes`** (create only; `update`
+    is not modelled since the server only allows `c_title`, and `delete` is disabled
+    server-side). The others (`char-variant-map`, `office`, `social-institution`,
+    `merged-person`) are still unmodelled, so a staging file naming one is rejected as an
+    unknown alias — a safe outcome, but by absence rather than by design. If you ever
+    model one, set `requires_explicit_approval=True` on it.
+    **One more trap: two near-identical strings mean entirely different resources.**
+    `office` is the entity aggregate (needs approval) while `offices` resolves to the
+    **postings sub-resource** (routine); likewise `social-institution` (hyphen, entity,
+    needs approval) vs `social_institution` (underscore, the person sub-resource
+    `BIOG_INST_DATA`, routine). Read the separator.
 
 ## Review workflow for changes in this repo
 

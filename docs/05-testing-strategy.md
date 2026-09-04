@@ -132,3 +132,40 @@ fixture conventions.
 - `pytest.ini` / `pyproject.toml` test config lives at the repo root (added in
   Milestone 2); `-m "not integration"` is the default so `pytest` alone never
   touches a real server, local or otherwise.
+
+## Browser tests for the review page (added 2026-08-19)
+
+`tools/review/index.html` is tested by actually loading it in headless Chromium
+(`tests/test_review_page.py`, Playwright). This is not gold-plating — it was added
+after a bug that every cheaper check waved through:
+
+> `review.REVIEW_JSON_SCHEMA_VERSION` was bumped from 1 to 2, and the page's matching
+> `const SCHEMA` was not. `node --check` on the extracted script passed. The Python
+> suite passed. The diff looked right. The page silently refused every export and
+> rendered a blank screen.
+
+A syntax check proves a file parses, not that a feature exists. The class of bug that
+actually occurs here — a constant out of sync, a selector renamed, a value rendered as
+`[object Object]`, a label injected as HTML — is only visible in a DOM.
+
+Conventions:
+- The tests **skip themselves** when Playwright or its browser binary is missing, so
+  `pytest` still runs anywhere; `requirements-dev.txt` lists Playwright with the
+  `playwright install chromium` follow-up in a comment.
+- They build their own `review.json` through the real `export_review_json()`, so the
+  exporter and the page are tested against each other rather than against a
+  hand-written fixture that can drift from both.
+- `test_page_declares_the_same_schema_version_as_the_exporter` is a pure-Python
+  regex check with no browser needed, so the specific bug above is caught even where
+  Playwright isn't installed.
+- One test asserts a label containing `<img src=x onerror=…>` renders as text.
+  Labels come from CBDB data (book titles, place names), and that is exactly the
+  kind of field where a stray angle bracket eventually shows up.
+
+## No test may download the weekly SQLite snapshot
+
+`validate --staging` fetches CBDB's ~132 MB weekly build when none is present — that
+is intended behaviour, and a terrible thing to trigger from a test assertion. An
+autouse fixture in `conftest.py` replaces `snapshot.download_snapshot` with one that
+raises. Tests that genuinely exercise downloading mock the URL with `responses` and
+opt out via `@pytest.mark.snapshot_download`.

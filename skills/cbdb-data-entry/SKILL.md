@@ -123,6 +123,17 @@ does when invoked this way:
    - This step also refreshes `preview.md` next to the staging file (see the CLI
      reference above) — point the user at it, or read it back to them yourself,
      as the primary way to review a batch instead of raw YAML.
+   - **For a batch of more than a few proposals, point the user at the review page
+     instead of `preview.md`**: `validate --staging` also writes a `review.json`
+     next to the YAML, and `tools/review/index.html` (open it directly, no server)
+     loads that file. It gives a dense per-person table, filters, and — the reason
+     it exists — **bulk resolution of repeated conflicts**: identical questions
+     asked across many rows (an index-year convention, a reign-year check) collapse
+     into one click. The user then exports `decisions.json` and you run
+     `python -m cbdb_agent apply-review --staging <yaml> --decisions <json>`, which
+     prints every change it made. Re-run `validate --staging` afterwards. See
+     `docs/08-review-interface-design.md`. Never edit the YAML yourself to mirror
+     what the page did — `apply-review` is the write path.
    - If the user wants a nicer visual than the plain Markdown file, or asks to
      "see"/可视化 the batch, render `preview.md` as a Claude Code Artifact
      (`docs/06-staging-preview-design.md` Tier 3) — conflict cards, side-by-side
@@ -154,8 +165,26 @@ does when invoked this way:
   `social-institution`, `merged-person`) to unblock a batch.** If a book title or
   office code the source needs doesn't exist, that is a *finding to report to the
   user*, with the evidence — they decide. These writes are global, referenced by
-  potentially tens of thousands of person rows, and have **no delete path**
-  (AGENTS.md rule 12).
+  potentially tens of thousands of person rows (AGENTS.md rule 12). The code tables
+  additionally have **no delete path at all**, and a `TEXT_CODES` row's Chinese title
+  can never be edited afterwards; the `office`/`social-institution` aggregates *are*
+  deletable while still unreferenced.
+  - Before reporting a code as missing, **search by pinyin as well as by Chinese
+    characters**. Variant characters are normal in CBDB: 《俟庵集》 is stored as
+    《俟菴集》, and searching 俟庵 returns zero hits while `Sian ji` finds it. Reporting
+    a false "missing" is how a duplicate gets created for a row that can never be
+    deleted.
+  - If the user *does* approve one, `text-codes` (create only) is modelled and goes
+    through the normal staging pipeline — but the proposal needs an explicit
+    `approved_by: <the human's name>` or validation fails with a structural error.
+    **You must never fill that field in yourself**; it records that a named human
+    made the call, and `batch_runner` forwards it into `meta.comment` so the
+    sign-off is visible in the server's own `operations` row too.
+  - `c_textid` is server-assigned, so a `BIOG_TEXT_DATA` (`texts`) row that cites a
+    newly-created book **cannot be in the same batch** — the staging schema can
+    carry a sibling reference for `person_id` only, not for a `c_textid`. Submit the
+    `text-codes` create first, read the assigned id out of the response, then put
+    the literal id in the follow-up batch.
 - `c_personid` is client-assigned — for a `"NEW"` proposal, only
   `batch_runner.allocate_person_id()` may pick the real value (it's the only code
   path that calls `person_id.py`'s validation/existence checks); for a

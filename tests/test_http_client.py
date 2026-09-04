@@ -619,3 +619,101 @@ def test_request_path_uses_slot_so_retries_are_also_spaced(tmp_path):
     with pytest.raises(ServerError):
         client.get("/api/v2/get")
     assert len(responses.calls) == 3
+
+
+# --- the transport-layer approval gate ----------------------------------------
+# AGENTS.md rule 12. MutationApi already refuses an unsigned write, but a defense
+# that only works when the caller used the intended wrapper is not a defense for a
+# write the server cannot undo.
+
+
+def _text_codes_envelope(changes=None):
+    return {
+        "resource": "text-codes",
+        "mode": "direct",
+        "operation": "create",
+        "person_id": 0,
+        "target": {"pk": {}},
+        "changes": changes if changes is not None else {"c_title_chn": "聽雪先生集"},
+    }
+
+
+@responses.activate
+def test_direct_post_of_a_gated_resource_is_refused_without_a_signature(tmp_path):
+    from cbdb_agent.http_client import MissingApprovalError
+
+    client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create", json={"ok": True}, status=200
+    )
+    with pytest.raises(MissingApprovalError, match="rule 12"):
+        client.post("/api/v2/create", json_body=_text_codes_envelope(), mutating=True)
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_direct_post_of_a_gated_resource_is_allowed_with_a_signature(tmp_path):
+    client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create", json={"ok": True}, status=200
+    )
+    client.post(
+        "/api/v2/create",
+        json_body=_text_codes_envelope(),
+        mutating=True,
+        approval_signature="Hongsu Wang",
+    )
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_the_gate_matches_every_alias_and_is_case_insensitive(tmp_path):
+    """The server lowercases `resource`, so the gate must too - otherwise
+    'Text-Codes' would sail past it."""
+    from cbdb_agent.http_client import MissingApprovalError
+
+    client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
+    for alias in ("text-codes", "text_codes", "Text-Codes", "  TEXT_CODES  "):
+        body = _text_codes_envelope()
+        body["resource"] = alias
+        with pytest.raises(MissingApprovalError):
+            client.post("/api/v2/create", json_body=body, mutating=True)
+
+
+@responses.activate
+def test_the_gate_does_not_touch_ordinary_person_resources(tmp_path):
+    client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create", json={"ok": True}, status=200
+    )
+    client.post(
+        "/api/v2/create",
+        json_body={"resource": "altnames", "mode": "direct", "operation": "create",
+                   "person_id": 5000, "target": {"pk": {}}, "changes": {}},
+        mutating=True,
+    )
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_the_gate_does_not_block_reads(tmp_path):
+    """A GET of a gated resource is harmless and must stay possible."""
+    client, _ = make_client(tmp_path)
+    responses.add(
+        responses.GET, "http://localhost:8000/api/v2/get", json={"ok": True}, status=200
+    )
+    client.get("/api/v2/get", json_body=_text_codes_envelope())
+    assert len(responses.calls) == 1
+
+
+def test_approval_gated_aliases_covers_the_key_and_every_alias():
+    from cbdb_agent.models import RESOURCE_SPECS, approval_gated_aliases
+
+    gated = approval_gated_aliases()
+    for key, spec in RESOURCE_SPECS.items():
+        if spec.requires_explicit_approval:
+            assert key in gated
+            for alias in spec.create_aliases | spec.update_aliases | spec.delete_aliases:
+                assert alias in gated
+        else:
+            assert key not in gated

@@ -1,0 +1,764 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CBDB staging batch review</title>
+<!--
+  Offline review surface for a cbdb-inputter-agent staging batch.
+  See docs/08-review-interface-design.md.
+
+  This file contains NO DATA. It loads a review.json produced by
+  `python -m cbdb_agent validate --staging <path>` and writes back a
+  decisions.json that `python -m cbdb_agent apply-review` applies to the YAML.
+  The YAML stays the only source of truth; this page never edits it.
+
+  Deliberately dependency-free and single-file: it must open from file:// with no
+  server, no build step, and no network, because it is used to review unpublished
+  historical data on a laptop.
+-->
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#fff; --ink:#15181d; --muted:#5d6470; --line:#dfe3e8;
+    --accent:#2f5fd0; --accent-soft:#eaf0fd;
+    --warn:#a5590a; --warn-soft:#fdf3e3; --bad:#a3242c; --bad-soft:#fdecec;
+    --good:#1c6b4a; --good-soft:#e8f5ef;
+    --create:#1c6b4a; --update:#8a5a00; --delete:#a3242c;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme=light]){
+      --bg:#12141a; --panel:#191c23; --ink:#e6e8ec; --muted:#9aa2b1; --line:#2c313c;
+      --accent:#7ea2f0; --accent-soft:#1d2536;
+      --warn:#e0a558; --warn-soft:#2c2416; --bad:#f08b8b; --bad-soft:#2e1a1c;
+      --good:#6ecfa2; --good-soft:#14291f;
+      --create:#6ecfa2; --update:#e0a558; --delete:#f08b8b;
+    }
+  }
+  :root[data-theme=dark]{
+    --bg:#12141a; --panel:#191c23; --ink:#e6e8ec; --muted:#9aa2b1; --line:#2c313c;
+    --accent:#7ea2f0; --accent-soft:#1d2536;
+    --warn:#e0a558; --warn-soft:#2c2416; --bad:#f08b8b; --bad-soft:#2e1a1c;
+    --good:#6ecfa2; --good-soft:#14291f;
+    --create:#6ecfa2; --update:#e0a558; --delete:#f08b8b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.5 system-ui,-apple-system,"Segoe UI","Noto Sans TC","Microsoft JhengHei",sans-serif}
+  code,.mono{font-family:var(--mono);font-size:12.5px}
+
+  header{position:sticky;top:0;z-index:20;background:var(--panel);
+    border-bottom:1px solid var(--line);padding:10px 16px}
+  .hdr-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  h1{font-size:15px;margin:0;font-weight:650}
+  .batch{font-family:var(--mono);color:var(--muted);font-size:12px}
+  .stats{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+  .stat{padding:2px 9px;border-radius:99px;border:1px solid var(--line);
+    font-size:12px;white-space:nowrap}
+  .stat b{font-variant-numeric:tabular-nums}
+  .stat.bad{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
+  .stat.warn{background:var(--warn-soft);border-color:var(--warn);color:var(--warn)}
+  .stat.good{background:var(--good-soft);border-color:var(--good);color:var(--good)}
+
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}
+  input[type=text],input[type=search],select,textarea{
+    background:var(--bg);color:var(--ink);border:1px solid var(--line);
+    border-radius:6px;padding:5px 8px;font:inherit}
+  input[type=search]{min-width:230px}
+  button{background:var(--panel);color:var(--ink);border:1px solid var(--line);
+    border-radius:6px;padding:5px 11px;font:inherit;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.primary:hover{filter:brightness(1.08)}
+  button.tiny{padding:2px 8px;font-size:12px}
+  label.chk{display:inline-flex;gap:5px;align-items:center;font-size:13px;color:var(--muted)}
+
+  main{padding:14px 16px 120px}
+  .drop{border:2px dashed var(--line);border-radius:10px;padding:44px 20px;text-align:center;
+    background:var(--panel);max-width:760px;margin:40px auto}
+  .drop.hot{border-color:var(--accent);background:var(--accent-soft)}
+  .drop h2{margin:0 0 8px;font-size:17px}
+  .drop p{margin:6px 0;color:var(--muted)}
+  .drop code{background:var(--bg);padding:1px 5px;border-radius:4px}
+
+  .group{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+    margin-bottom:12px;overflow:hidden}
+  .group > summary{padding:9px 12px;cursor:pointer;display:flex;gap:10px;align-items:center;
+    font-weight:600;list-style:none;position:sticky;top:0;background:var(--panel);
+    border-bottom:1px solid var(--line)}
+  .group > summary::-webkit-details-marker{display:none}
+  .group > summary::before{content:"▸";color:var(--muted);font-weight:400}
+  .group[open] > summary::before{content:"▾"}
+  .gname{font-size:15px}
+  .gmeta{color:var(--muted);font-weight:400;font-size:12px;margin-left:auto;
+    display:flex;gap:6px;align-items:center}
+
+  table{width:100%;border-collapse:collapse}
+  thead th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;
+    color:var(--muted);font-weight:600;padding:6px 10px;border-bottom:1px solid var(--line);
+    background:var(--panel)}
+  tbody tr{border-bottom:1px solid var(--line)}
+  tbody tr:last-child{border-bottom:none}
+  tbody tr.flagged{background:var(--warn-soft)}
+  tbody tr.errored{background:var(--bad-soft)}
+  td{padding:7px 10px;vertical-align:top}
+  td.rid{font-family:var(--mono);font-size:12px;color:var(--muted);white-space:nowrap}
+  .op{font-family:var(--mono);font-size:11px;font-weight:700;text-transform:uppercase}
+  .op.create{color:var(--create)} .op.update{color:var(--update)} .op.delete{color:var(--delete)}
+  .res{font-family:var(--mono);font-size:12px}
+  .conf{font-size:11px;color:var(--muted)}
+  .conf.low{color:var(--bad);font-weight:600}
+  .conf.medium{color:var(--warn)}
+
+  .fields{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;align-items:baseline}
+  .fname{font-family:var(--mono);font-size:12px;color:var(--muted);white-space:nowrap}
+  .fval{font-family:var(--mono);font-size:12.5px;word-break:break-word}
+  .fval .was{color:var(--muted);text-decoration:line-through;margin-right:6px}
+  .fval .edited{color:var(--accent);font-weight:600}
+  .fedit{border:none;border-bottom:1px dashed var(--line);background:transparent;
+    color:inherit;font-family:var(--mono);font-size:12.5px;width:100%;padding:1px 2px}
+  .fedit:focus{outline:none;border-bottom-color:var(--accent);background:var(--accent-soft)}
+  .quote{color:var(--muted);font-size:12px;margin-top:5px;font-style:italic}
+
+  /* Read-only, resolved meaning of a code. Never editable: it is what the code
+     MEANS, not a value - an input would imply it could be saved. */
+  .codeinfo{grid-column:2;margin:0 0 4px;padding:3px 0 3px 9px;
+    border-left:2px solid var(--line);font-size:12px}
+  .codeinfo .cname{color:var(--ink);font-weight:600}
+  .codeinfo .csub{color:var(--muted);margin-left:6px}
+  .codeinfo .cline{color:var(--muted);display:block;margin-top:1px}
+  .codeinfo .cmiss{color:var(--warn);font-style:italic}
+  .opt .clabel{font-family:inherit;margin-left:6px;opacity:.85}
+
+  .conflict{border-left:3px solid var(--warn);background:var(--warn-soft);
+    padding:8px 10px;margin:7px 0;border-radius:0 6px 6px 0}
+  .conflict.done{border-left-color:var(--good);background:var(--good-soft)}
+  .cid{font-family:var(--mono);font-size:11px;font-weight:700}
+  .cfield{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .cdesc{margin:5px 0;font-size:13px;white-space:pre-wrap}
+  .opts{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;align-items:center}
+  .opt{border:1px solid var(--line);background:var(--panel);border-radius:99px;
+    padding:3px 10px;font-size:12px;cursor:pointer;font-family:var(--mono)}
+  .opt:hover{border-color:var(--accent)}
+  .opt.sel{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .opt.suggested{border-color:var(--accent);border-style:dashed}
+  .opt .why{font-family:inherit;color:var(--muted);font-size:11px;margin-left:5px}
+  .opt.sel .why{color:#fff;opacity:.85}
+  .rationales{margin:5px 0 0;padding-left:16px;font-size:12px;color:var(--muted)}
+  .rationales li{margin:1px 0}
+  .suggest{font-size:12px;color:var(--muted);margin-top:5px}
+  .freetext{margin-top:6px;display:flex;gap:6px;align-items:center}
+  .freetext input{flex:1;min-width:120px}
+
+  .approval{border-left:3px solid var(--bad);background:var(--bad-soft);
+    padding:8px 10px;margin:7px 0;border-radius:0 6px 6px 0}
+  .approval.done{border-left-color:var(--good);background:var(--good-soft)}
+  .issue{font-size:12px;color:var(--bad);margin-top:4px}
+  .issue.conflictish{color:var(--warn)}
+
+  .bulk{background:var(--accent-soft);border:1px solid var(--accent);border-radius:9px;
+    padding:10px 12px;margin-bottom:12px}
+  .bulk h3{margin:0 0 7px;font-size:13px}
+  .bulk-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+    padding:5px 0;border-top:1px solid var(--line)}
+  .bulk-row:first-of-type{border-top:none}
+  .bulk-row .lbl{font-family:var(--mono);font-size:12px;min-width:150px}
+  .bulk-row .cnt{color:var(--muted);font-size:12px}
+
+  footer{position:fixed;bottom:0;left:0;right:0;background:var(--panel);
+    border-top:1px solid var(--line);padding:9px 16px;display:flex;gap:10px;
+    align-items:center;flex-wrap:wrap;z-index:20}
+  .pending{color:var(--muted);font-size:13px}
+  .pending b{color:var(--accent);font-variant-numeric:tabular-nums}
+  .hint{color:var(--muted);font-size:12px}
+  .empty{color:var(--muted);padding:24px;text-align:center}
+  .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="hdr-row">
+    <h1>CBDB staging review</h1>
+    <span class="batch" id="batchId"></span>
+    <div class="stats" id="stats"></div>
+  </div>
+  <div class="controls" id="controls" hidden>
+    <input type="search" id="q" placeholder="搜尋 / search: name, id, field, value, quote…">
+    <select id="fRes"><option value="">all resources</option></select>
+    <select id="fOp"><option value="">all operations</option></select>
+    <select id="fConf"><option value="">any confidence</option>
+      <option value="low">low only</option><option value="medium">medium only</option>
+      <option value="high">high only</option></select>
+    <label class="chk"><input type="checkbox" id="fUnres"> only unresolved</label>
+    <label class="chk"><input type="checkbox" id="fTouched"> only edited by me</label>
+    <button class="tiny" id="expandAll">expand all</button>
+    <button class="tiny" id="collapseAll">collapse all</button>
+    <button class="tiny" id="theme">theme</button>
+  </div>
+</header>
+
+<main>
+  <div class="drop" id="drop">
+    <h2>Load a batch</h2>
+    <p>Drop <code>review.json</code> here, or <input type="file" id="file" accept=".json,application/json"></p>
+    <p class="hint">Produced by <code>python -m cbdb_agent validate --staging &lt;path&gt;</code>,
+       next to the staging YAML.</p>
+    <p class="hint">Nothing you do here touches the database or the YAML. You export
+       <code>decisions.json</code>, then run
+       <code>python -m cbdb_agent apply-review --staging &lt;yaml&gt; --decisions decisions.json</code>.</p>
+  </div>
+  <div id="bulkWrap"></div>
+  <div id="groups"></div>
+</main>
+
+<footer id="footer" hidden>
+  <span class="pending" id="pending"></span>
+  <button class="primary" id="export">Export decisions.json</button>
+  <button id="clear">Discard my decisions</button>
+  <span class="hint" id="saveHint"></span>
+</footer>
+
+<script>
+"use strict";
+const SCHEMA = 2;   // must match review.REVIEW_JSON_SCHEMA_VERSION
+                    //   1: initial
+                    //   2: + code_labels / field_code_tables /
+                    //      list_valued_fields / code_table_names
+let DATA = null;
+// decisions[proposalId] = {conflicts:{cid:value}, fields:{name:value}, approved_by:str}
+let D = {};
+const NL = String.fromCharCode(10);   // newline for title= tooltips
+const $ = (s) => document.querySelector(s);
+const el = (t, cls, txt) => { const n = document.createElement(t);
+  if (cls) n.className = cls; if (txt !== undefined) n.textContent = txt; return n; };
+
+/* ---------- persistence: survive an accidental reload, per batch ---------- */
+const key = () => "cbdb-review:" + (DATA ? DATA.batch_id : "?");
+function save(){ try{ localStorage.setItem(key(), JSON.stringify(D));
+  $("#saveHint").textContent = "saved locally"; }catch(e){ $("#saveHint").textContent = ""; } }
+function restore(){
+  try{ const raw = localStorage.getItem(key()); if(raw){ D = JSON.parse(raw);
+    $("#saveHint").textContent = "restored your earlier decisions from this browser"; } }
+  catch(e){ D = {}; }
+}
+
+/* ---------- value formatting ----------
+   Values arrive as real JSON types (numbers, strings, arrays for the address
+   pseudo-fields). Render them unambiguously: an empty string and a null are
+   different things to this API, and a reviewer must be able to tell them apart. */
+function fmt(v){
+  if (v === null || v === undefined) return "∅ null";
+  if (v === "") return '"" (empty → null server-side)';
+  if (Array.isArray(v)) return "[" + v.join(", ") + "]";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+/* Parse a reviewer's typed value back to a JSON type, so 18 stays a number and
+   [1,2] stays a list. Anything unparseable is kept verbatim as a string. */
+function parseVal(s){
+  const t = s.trim();
+  if (t === "") return "";
+  if (t === "null" || t === "∅ null") return null;
+  if (/^-?\d+$/.test(t)) return parseInt(t, 10);
+  if (/^-?\d*\.\d+$/.test(t)) return parseFloat(t);
+  if (t.startsWith("[") || t.startsWith("{")) { try { return JSON.parse(t); } catch(e){} }
+  return s;
+}
+
+/* ---------- code labels ----------
+   Resolved in Python at export time (code_lookup.py) from the weekly CBDB SQLite
+   snapshot, or from the public lookup API when there is no snapshot. The page never
+   fetches: it is opened from file:// and is deliberately network-free. An export
+   made offline simply has no labels, and everything below degrades to the bare code. */
+function codeTable(field){ return (DATA.field_code_tables || {})[field] || null; }
+/* Every CBDB code is an integer. Conflict options share a field with real codes but
+   often hold a DECISION instead - "defer", "new_office_code", "both". Those are not
+   codes, must not be looked up, and must not be flagged as unresolved. */
+function isCodeValue(v){
+  if (v === null || v === undefined || typeof v === "boolean") return false;
+  if (typeof v === "number") return Number.isInteger(v);
+  return typeof v === "string" && /^-?\d+$/.test(v.trim());
+}
+function codeLabel(field, value){
+  const t = codeTable(field);
+  if (!t || !isCodeValue(value)) return null;
+  return (DATA.code_labels || {})[t + ":" + value] || null;
+}
+function hasAnyLabels(){ return Object.keys(DATA.code_labels || {}).length > 0; }
+function isListField(field){
+  return (DATA.list_valued_fields || []).indexOf(field) !== -1;
+}
+/* Every code value present in the batch when review.json was generated. Lets an
+   unresolved value be reported honestly: in this set means the lookup ran and found
+   nothing; not in it means the reviewer has just typed something new. */
+let exportedValues = new Set();
+function indexExportedValues(){
+  exportedValues = new Set();
+  const add = (field, value) => {
+    if (!codeTable(field)) return;
+    for (const item of (Array.isArray(value) ? value : [value]))
+      exportedValues.add(String(item));
+  };
+  for (const p of DATA.proposals){
+    for (const obj of [p.changes || {}, p.target_pk || {}])
+      for (const [f, v] of Object.entries(obj)) add(f, v);
+    for (const c of p.conflicts)
+      for (const o of c.options) add(c.field, o.value);
+  }
+}
+
+/* One read-only block per code value. A list-valued field (postings' c_addr) gets
+   one block per element, since each element is a separate address. */
+function codeInfoNode(field, value){
+  if (!codeTable(field)) return null;
+  const values = Array.isArray(value) ? value : [value];
+  const box = el("div", "codeinfo");
+  let shown = 0;
+  for (const v of values){
+    if (!isCodeValue(v)) continue;
+    const info = codeLabel(field, v);
+    const line = el("div");
+    if (!info){
+      // Say WHY there is no name, rather than leaving the reviewer to guess whether
+      // the code is wrong or the lookup simply never ran.
+      const tableName = (DATA.code_table_names || {})[codeTable(field)] || "the code table";
+      let why;
+      if (!hasAnyLabels()){
+        why = " — not resolved (export ran without a snapshot or network)";
+      } else if (exportedValues.has(String(v))){
+        why = " — no match in " + tableName;   // looked up, genuinely absent
+      } else {
+        // You typed this just now; the export never saw it. A different problem, and
+        // not evidence that the code is wrong.
+        why = " — not in this export; re-run validate --staging to look it up";
+      }
+      line.appendChild(el("span", "cmiss", v + why));
+      box.appendChild(line); shown++;
+      continue;
+    }
+    line.appendChild(el("span", "cname", info.label));
+    if (info.sub) line.appendChild(el("span", "csub", info.sub));
+    box.appendChild(line);
+    for (const extra of (info.lines || [])) box.appendChild(el("span", "cline", extra));
+    shown++;
+  }
+  return shown ? box : null;
+}
+
+/* ---------- decision accessors ---------- */
+const dec = (pid) => (D[pid] = D[pid] || {});
+function setConflict(pid, cid, value){
+  const d = dec(pid); d.conflicts = d.conflicts || {}; d.conflicts[cid] = value; save(); render();
+}
+function clearConflict(pid, cid){
+  const d = D[pid]; if (d && d.conflicts) { delete d.conflicts[cid]; save(); render(); }
+}
+function setField(pid, name, value){
+  const d = dec(pid); d.fields = d.fields || {}; d.fields[name] = value; save();
+}
+function setApproval(pid, sig){ dec(pid).approved_by = sig; save(); render(); }
+
+function conflictValue(p, c){
+  const d = D[p.id];
+  if (d && d.conflicts && Object.prototype.hasOwnProperty.call(d.conflicts, c.id))
+    return {value: d.conflicts[c.id], mine: true};
+  if (c.resolved) return {value: c.resolution, mine: false};
+  return null;
+}
+function fieldValue(p, f){
+  const d = D[p.id];
+  if (d && d.fields && Object.prototype.hasOwnProperty.call(d.fields, f.field))
+    return {value: d.fields[f.field], mine: true};
+  return {value: f.proposed, mine: false};
+}
+function approvalValue(p){
+  const d = D[p.id];
+  if (d && d.approved_by !== undefined) return {value: d.approved_by, mine: true};
+  return {value: p.approved_by, mine: false};
+}
+const isUnresolved = (p) => p.conflicts.some(c => !conflictValue(p, c));
+const missingApproval = (p) => p.needs_approval && !(approvalValue(p).value || "").trim();
+function pendingCount(){
+  let n = 0;
+  for (const pid in D){ const d = D[pid];
+    n += d.conflicts ? Object.keys(d.conflicts).length : 0;
+    n += d.fields ? Object.keys(d.fields).length : 0;
+    if (d.approved_by !== undefined) n += 1; }
+  return n;
+}
+
+/* ---------- filtering ---------- */
+function visible(p){
+  const q = $("#q").value.trim().toLowerCase();
+  if ($("#fRes").value && p.resource !== $("#fRes").value) return false;
+  if ($("#fOp").value && p.operation !== $("#fOp").value) return false;
+  if ($("#fConf").value && p.confidence !== $("#fConf").value) return false;
+  if ($("#fUnres").checked && !isUnresolved(p) && !missingApproval(p)) return false;
+  if ($("#fTouched").checked && !D[p.id]) return false;
+  if (!q) return true;
+  const hay = [p.id, p.resource, p.operation, String(p.person_id), p.source_quote,
+      DATA.group_labels[p.group] || "",
+      JSON.stringify(p.changes), JSON.stringify(p.target_pk),
+      p.conflicts.map(c => c.id + " " + c.field + " " + c.description).join(" ")
+    ].join(" ").toLowerCase();
+  return hay.includes(q);
+}
+
+/* ---------- bulk resolution ----------
+   The point of this page: 41 conflicts across 78 rows, several of them the SAME
+   question repeated (the index-year convention, the reign-year arithmetic). Group
+   identical questions by field + option set and settle a whole group at once. */
+function bulkGroups(){
+  const map = new Map();
+  for (const p of DATA.proposals){
+    for (const c of p.conflicts){
+      if (conflictValue(p, c)) continue;              // already settled
+      const sig = c.field + "::" + c.options.map(o => JSON.stringify(o.value)).join("|");
+      if (!map.has(sig)) map.set(sig, {field: c.field, options: c.options, items: []});
+      map.get(sig).items.push({p, c});
+    }
+  }
+  return [...map.values()].filter(g => g.items.length > 1)
+    .sort((a, b) => b.items.length - a.items.length);
+}
+function renderBulk(){
+  const wrap = $("#bulkWrap"); wrap.innerHTML = "";
+  const groups = bulkGroups();
+  if (!groups.length) return;
+  const box = el("div", "bulk");
+  box.appendChild(el("h3", null,
+    "Repeated questions — settle a whole group at once (" + groups.length + " group" +
+    (groups.length > 1 ? "s" : "") + ")"));
+  for (const g of groups){
+    const row = el("div", "bulk-row");
+    row.appendChild(el("span", "lbl", g.field));
+    row.appendChild(el("span", "cnt", "×" + g.items.length + " unresolved"));
+    for (const o of g.options){
+      const b = el("button", "opt", fmt(o.value));
+      const oInfo = codeLabel(g.field, Array.isArray(o.value) ? o.value[0] : o.value);
+      if (oInfo) b.appendChild(el("span", "clabel", oInfo.label));
+      b.title = [o.rationale, oInfo && oInfo.sub].filter(Boolean).join(NL);
+      b.onclick = () => { for (const it of g.items){
+          const d = dec(it.p.id); d.conflicts = d.conflicts || {};
+          d.conflicts[it.c.id] = o.value; } save(); render(); };
+      row.appendChild(b);
+    }
+    const ids = el("span", "cnt", g.items.map(i => i.c.id).join(", "));
+    row.appendChild(ids);
+    box.appendChild(row);
+  }
+  wrap.appendChild(box);
+}
+
+/* ---------- rendering ---------- */
+function conflictNode(p, c){
+  const chosen = conflictValue(p, c);
+  const box = el("div", "conflict" + (chosen ? " done" : ""));
+  const head = el("div");
+  head.appendChild(el("span", "cid", (chosen ? "✔ " : "⚠ ") + c.id));
+  head.appendChild(document.createTextNode(" "));
+  head.appendChild(el("span", "cfield", c.field));
+  box.appendChild(head);
+  box.appendChild(el("div", "cdesc", c.description));
+
+  const opts = el("div", "opts");
+  for (const o of c.options){
+    const sel = chosen && JSON.stringify(chosen.value) === JSON.stringify(o.value);
+    const suggested = JSON.stringify(c.agent_suggestion) === JSON.stringify(o.value);
+    const b = el("button", "opt" + (sel ? " sel" : "") + (suggested ? " suggested" : ""));
+    b.appendChild(document.createTextNode(fmt(o.value)));
+    // Choosing between 64674 and 63343 is impossible without their names on the
+    // buttons - this is the decision the reviewer is actually being asked to make.
+    const oInfo = codeLabel(c.field, Array.isArray(o.value) ? o.value[0] : o.value);
+    if (oInfo) b.appendChild(el("span", "clabel", oInfo.label));
+    if (suggested) b.appendChild(el("span", "why", "· agent suggests"));
+    b.title = [o.rationale, oInfo && oInfo.sub,
+                oInfo && (oInfo.lines || []).join(NL)].filter(Boolean).join(NL);
+    b.onclick = () => setConflict(p.id, c.id, o.value);
+    opts.appendChild(b);
+  }
+  const defer = el("button", "opt" + (chosen && chosen.value === "defer" ? " sel" : ""), "defer");
+  defer.title = "Skip this row/field for now; submit the rest of the batch.";
+  defer.onclick = () => setConflict(p.id, c.id, "defer");
+  opts.appendChild(defer);
+  if (chosen && chosen.mine){
+    const undo = el("button", "opt", "↺ undo");
+    undo.onclick = () => clearConflict(p.id, c.id);
+    opts.appendChild(undo);
+  }
+  box.appendChild(opts);
+
+  const rats = el("ul", "rationales");
+  for (const o of c.options){
+    const li = el("li");
+    li.appendChild(el("code", null, fmt(o.value)));
+    const oInfo = codeLabel(c.field, Array.isArray(o.value) ? o.value[0] : o.value);
+    if (oInfo) li.appendChild(el("b", null, " " + oInfo.label));
+    li.appendChild(document.createTextNode(" — " + o.rationale));
+    if (oInfo) for (const extra of (oInfo.lines || []))
+      li.appendChild(el("span", "cline", extra));
+    rats.appendChild(li);
+  }
+  if (c.options.length) box.appendChild(rats);
+  if (c.agent_reasoning)
+    box.appendChild(el("div", "suggest", "agent reasoning: " + c.agent_reasoning));
+
+  const ft = el("div", "freetext");
+  ft.appendChild(el("span", "hint", "or type a value:"));
+  const inp = el("input"); inp.type = "text"; inp.placeholder = "free-text override";
+  if (chosen && !c.options.some(o => JSON.stringify(o.value) === JSON.stringify(chosen.value))
+      && chosen.value !== "defer") inp.value = fmt(chosen.value);
+  inp.onchange = () => setConflict(p.id, c.id, parseVal(inp.value));
+  ft.appendChild(inp);
+  box.appendChild(ft);
+  return box;
+}
+
+function approvalNode(p){
+  const cur = approvalValue(p);
+  const has = !!(cur.value || "").trim();
+  const box = el("div", "approval" + (has ? " done" : ""));
+  box.appendChild(el("div", "cid", (has ? "🔓 " : "🔒 ") + "approved_by — global reference data"));
+  box.appendChild(el("div", "cdesc",
+    "This proposal writes GLOBAL reference data, not one person's record: it is " +
+    "referenced by potentially tens of thousands of rows, the server offers no " +
+    "delete path for a code table, and a TEXT_CODES row's Chinese title can never " +
+    "be edited afterwards. It cannot be submitted until a named human signs off. " +
+    "Type YOUR name — the agent is not allowed to fill this in."));
+  const ft = el("div", "freetext");
+  const inp = el("input"); inp.type = "text"; inp.placeholder = "your name";
+  inp.value = cur.value || "";
+  inp.onchange = () => setApproval(p.id, inp.value.trim());
+  ft.appendChild(inp);
+  box.appendChild(ft);
+  return box;
+}
+
+function proposalRow(p){
+  const tr = el("tr");
+  const err = p.issues.some(i => i.severity === "error"
+      && !(i.message.includes("approved_by") && !missingApproval(p)));
+  if (err) tr.className = "errored";
+  else if (isUnresolved(p)) tr.className = "flagged";
+
+  const c1 = el("td", "rid");
+  c1.appendChild(el("div", null, p.id));
+  c1.appendChild(el("div", "conf " + p.confidence, p.confidence));
+  tr.appendChild(c1);
+
+  const c2 = el("td");
+  c2.appendChild(el("div", "op " + p.operation, p.operation));
+  c2.appendChild(el("div", "res", p.resource));
+  tr.appendChild(c2);
+
+  const c3 = el("td");
+  const fields = el("div", "fields");
+  for (const [k, v] of Object.entries(p.target_pk)){
+    fields.appendChild(el("div", "fname", "pk · " + k));
+    fields.appendChild(el("div", "fval", fmt(v)));
+    const pkInfo = codeInfoNode(k, v);
+    if (pkInfo) fields.appendChild(pkInfo);
+  }
+  for (const f of p.fields){
+    fields.appendChild(el("div", "fname", f.field));
+    const v = el("div", "fval");
+    if (f.current_status === "fetched"){
+      const was = el("span", "was", fmt(f.current)); v.appendChild(was);
+    } else if (f.current_status === "fetch_failed"){
+      v.appendChild(el("span", "was", "?"));
+    }
+    const cur = fieldValue(p, f);
+    const inp = el("input", "fedit" + (cur.mine ? " edited" : ""));
+    inp.type = "text"; inp.value = fmt(cur.value);
+    inp.onchange = () => { setField(p.id, f.field, parseVal(inp.value)); render(); };
+    v.appendChild(inp);
+    fields.appendChild(v);
+    // What this code actually means. Follows the EDITED value, not the exported one,
+    // so retyping a code shows the new code's meaning immediately - which is the
+    // whole point of having it on screen while editing.
+    const info = codeInfoNode(f.field, cur.value);
+    if (info) fields.appendChild(info);
+  }
+  c3.appendChild(fields);
+  if (p.source_quote) c3.appendChild(el("div", "quote", "「" + p.source_quote + "」"));
+  for (const i of p.issues){
+    if (i.message.includes("approved_by") && !missingApproval(p)) continue;
+    // A conflict already settled here would otherwise still show its
+    // "unresolved_conflict" line from the export, contradicting the green panel.
+    if (i.severity === "unresolved_conflict"){
+      const m = /conflict '([^']+)'/.exec(i.message);
+      if (m){
+        const c = p.conflicts.find(x => x.id === m[1]);
+        if (c && conflictValue(p, c)) continue;
+      }
+    }
+    c3.appendChild(el("div", "issue" + (i.severity === "error" ? "" : " conflictish"),
+      i.severity + ": " + i.message));
+  }
+  if (p.needs_approval) c3.appendChild(approvalNode(p));
+  for (const c of p.conflicts) c3.appendChild(conflictNode(p, c));
+  tr.appendChild(c3);
+  return tr;
+}
+
+function render(){
+  const groups = $("#groups"); const openState = {};
+  groups.querySelectorAll("details.group").forEach(d => openState[d.dataset.g] = d.open);
+  groups.innerHTML = "";
+
+  const byGroup = new Map();
+  for (const p of DATA.proposals){
+    if (!visible(p)) continue;
+    if (!byGroup.has(p.group)) byGroup.set(p.group, []);
+    byGroup.get(p.group).push(p);
+  }
+  if (!byGroup.size){ groups.appendChild(el("div", "empty", "No rows match these filters.")); }
+  for (const [g, ps] of byGroup){
+    const d = el("details", "group"); d.dataset.g = g;
+    d.open = openState[g] !== undefined ? openState[g] : true;
+    const s = el("summary");
+    s.appendChild(el("span", "gname", DATA.group_labels[g] || g));
+    const meta = el("div", "gmeta");
+    meta.appendChild(el("span", null, ps.length + " row" + (ps.length > 1 ? "s" : "")));
+    const unres = ps.filter(isUnresolved).length;
+    if (unres) meta.appendChild(el("span", "stat warn", unres + " unresolved"));
+    const errs = ps.filter(p => p.issues.some(i => i.severity === "error"
+        && !(i.message.includes("approved_by") && !missingApproval(p)))).length;
+    if (errs) meta.appendChild(el("span", "stat bad", errs + " error"));
+    if (ps.some(missingApproval)) meta.appendChild(el("span", "stat bad", "needs approval"));
+    s.appendChild(meta);
+    d.appendChild(s);
+    const t = el("table");
+    const th = el("thead");
+    const htr = el("tr");
+    for (const h of ["proposal", "what", "fields · source · decisions"])
+      htr.appendChild(el("th", null, h));
+    th.appendChild(htr); t.appendChild(th);
+    const tb = el("tbody");
+    for (const p of ps) tb.appendChild(proposalRow(p));
+    t.appendChild(tb);
+    d.appendChild(t);
+    groups.appendChild(d);
+  }
+  renderBulk();
+  renderStats();
+  $("#pending").innerHTML = "<b>" + pendingCount() + "</b> decision(s) staged in this browser";
+}
+
+/* A structural error that the reviewer has since fixed here must stop being counted,
+   or the header keeps saying "1 structural error" after they typed their name into
+   the approval box. Only the approval error is satisfiable from this page; every
+   other error needs a YAML edit and a re-validate, so it stays counted. */
+function liveErrorCount(){
+  let n = 0;
+  for (const p of DATA.proposals){
+    for (const i of p.issues){
+      if (i.severity !== "error") continue;
+      const isApprovalError = i.message.includes("approved_by");
+      if (isApprovalError && !missingApproval(p)) continue;
+      n++;
+    }
+  }
+  return n;
+}
+
+function renderStats(){
+  const s = $("#stats"); s.innerHTML = "";
+  const unres = DATA.proposals.reduce((n, p) =>
+    n + p.conflicts.filter(c => !conflictValue(p, c)).length, 0);
+  const errs = liveErrorCount();
+  const appr = DATA.proposals.filter(missingApproval).length;
+  const add = (cls, label, n) => {
+    const x = el("span", "stat " + cls);
+    x.innerHTML = "<b>" + n + "</b> " + label; s.appendChild(x); };
+  if (!hasAnyLabels()){
+    const x = el("span", "stat warn");
+    x.textContent = "code names unavailable";
+    x.title = "review.json was exported without a SQLite snapshot or network, so "
+      + "codes are shown bare. Re-run: python -m cbdb_agent validate --staging <path>";
+    s.appendChild(x);
+  }
+  add("", "proposals", DATA.summary.proposals);
+  add("", "persons/groups", DATA.summary.groups);
+  add(unres ? "warn" : "good", "unresolved", unres);
+  add(errs ? "bad" : "good", "structural errors", errs);
+  if (DATA.proposals.some(p => p.needs_approval))
+    add(appr ? "bad" : "good", "missing approvals", appr);
+}
+
+/* ---------- export ---------- */
+function buildDecisions(){
+  const out = [];
+  for (const p of DATA.proposals){
+    const d = D[p.id]; if (!d) continue;
+    if (d.conflicts) for (const cid in d.conflicts)
+      out.push({proposal_id: p.id, conflict_id: cid, resolution: d.conflicts[cid]});
+    if (d.fields) for (const name in d.fields)
+      out.push({proposal_id: p.id, field: name, value: d.fields[name]});
+    if (d.approved_by !== undefined)
+      out.push({proposal_id: p.id, approved_by: d.approved_by});
+  }
+  return {schema_version: SCHEMA, batch_id: DATA.batch_id, decisions: out};
+}
+function download(){
+  const payload = buildDecisions();
+  if (!payload.decisions.length){ alert("No decisions to export yet."); return; }
+  const blob = new Blob([JSON.stringify(payload, null, 1)], {type: "application/json"});
+  const a = el("a"); a.href = URL.createObjectURL(blob);
+  a.download = "decisions.json"; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+/* ---------- load ---------- */
+function load(text){
+  let d;
+  try { d = JSON.parse(text); }
+  catch(e){ alert("Not valid JSON: " + e.message); return; }
+  if (d.schema_version !== SCHEMA){
+    alert("This review.json declares schema_version " + d.schema_version +
+      " but this page speaks " + SCHEMA + ".\n\nRe-export with a matching version " +
+      "rather than risking a mis-render: python -m cbdb_agent validate --staging <path>");
+    return;
+  }
+  DATA = d; D = {};
+  indexExportedValues();
+  restore();
+  $("#drop").hidden = true;
+  $("#controls").hidden = false;
+  $("#footer").hidden = false;
+  $("#batchId").textContent = DATA.batch_id;
+  const res = [...new Set(DATA.proposals.map(p => p.resource))].sort();
+  for (const r of res) $("#fRes").appendChild(el("option", null, r)).value = r;
+  const ops = [...new Set(DATA.proposals.map(p => p.operation))].sort();
+  for (const o of ops) $("#fOp").appendChild(el("option", null, o)).value = o;
+  render();
+}
+
+const drop = $("#drop");
+["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.add("hot"); }));
+["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.remove("hot"); }));
+drop.addEventListener("drop", e => {
+  const f = e.dataTransfer.files[0]; if (f) f.text().then(load); });
+$("#file").addEventListener("change", e => {
+  const f = e.target.files[0]; if (f) f.text().then(load); });
+
+for (const id of ["q", "fRes", "fOp", "fConf", "fUnres", "fTouched"])
+  $("#" + id).addEventListener("input", () => DATA && render());
+$("#expandAll").onclick = () =>
+  document.querySelectorAll("details.group").forEach(d => d.open = true);
+$("#collapseAll").onclick = () =>
+  document.querySelectorAll("details.group").forEach(d => d.open = false);
+$("#theme").onclick = () => {
+  const r = document.documentElement;
+  r.dataset.theme = r.dataset.theme === "dark" ? "light" : "dark"; };
+$("#export").onclick = download;
+$("#clear").onclick = () => {
+  if (!confirm("Discard every decision you have made in this browser for this batch?")) return;
+  D = {}; try{ localStorage.removeItem(key()); }catch(e){}
+  $("#saveHint").textContent = ""; render(); };
+</script>
+</body>
+</html>

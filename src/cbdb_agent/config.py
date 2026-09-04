@@ -42,6 +42,10 @@ class Config:
     max_requests_per_minute: int
     local_audit_log_dir: Path
     online_main_server_repo_dir: Path | None = None
+    # Where the weekly CBDB SQLite snapshot lives, and whether we may fetch it.
+    # None = snapshot.default_snapshot_dir() (data/cbdb-sqlite/ inside the repo).
+    sqlite_dir: Path | None = None
+    sqlite_autodownload: bool = True
 
     @property
     def live_writes_confirmed(self) -> bool:
@@ -133,6 +137,15 @@ def load_config(env_path: str | Path | None = None) -> Config:
                 "it empty."
             )
 
+    # Optional override for where the weekly CBDB SQLite snapshot is kept. Unlike
+    # CBDB_ONLINE_MAIN_SERVER_REPO_DIR this is NOT required to exist yet - the
+    # directory is created on first download.
+    sqlite_dir_raw = os.environ.get("CBDB_SQLITE_DIR", "").strip()
+    sqlite_dir = Path(sqlite_dir_raw).expanduser() if sqlite_dir_raw else None
+    sqlite_autodownload = _parse_bool(
+        os.environ.get("CBDB_SQLITE_AUTODOWNLOAD"), default=True
+    )
+
     return Config(
         api_base_url=api_base_url,
         api_token=api_token,
@@ -141,4 +154,6 @@ def load_config(env_path: str | Path | None = None) -> Config:
         max_requests_per_minute=max_rpm,
         local_audit_log_dir=audit_log_dir,
         online_main_server_repo_dir=online_main_server_repo_dir,
+        sqlite_dir=sqlite_dir,
+        sqlite_autodownload=sqlite_autodownload,
     )

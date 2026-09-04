@@ -146,6 +146,16 @@ Not designing that now — YAGNI until it's actually asked for.
 - **Editing via the preview.** The preview is read-only, generated, and safe to
   delete/regenerate at any time. All edits go through the YAML (hand-edited or via
   chat), per `03-extraction-review-workflow.md`.
+  **Superseded in part, 2026-08-18 — read `docs/08-review-interface-design.md`.**
+  The constraint above still holds (the YAML is still the only source of truth and
+  the only write path), but "read-only review surface" turned out to be the wrong way
+  to satisfy it once a batch reached 78 proposals and 41 conflicts. `docs/08` adds a
+  *round trip* instead: `validate --staging` now also emits a `review.json` beside
+  `preview.md`; `tools/review/index.html` reads it and lets a human decide and edit in
+  bulk; and `apply-review` writes those decisions back into the YAML, printing every
+  change. The page itself still cannot write anything, and `submit` still reads only
+  the YAML — so there is still exactly one write path, it just has a nicer front end.
+  `preview.md` is unchanged and still stands alone with no browser.
 - **A TUI or interactive terminal app.** Bigger engineering lift, a new dependency,
   and doesn't fit "the agent and the human are both just reading/writing a file."
 - **Making Tier 2's live diff a hard requirement.** It must degrade gracefully to

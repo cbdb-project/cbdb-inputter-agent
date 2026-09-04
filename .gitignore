@@ -15,6 +15,12 @@ data/processed/*
 data/staging/*
 !data/staging/.gitkeep
 
+# The weekly CBDB SQLite snapshot (~557 MB) and the label cache derived from it.
+# Downloaded on demand by snapshot.py; see AGENTS.md. Kept inside the repo rather
+# than in a user-cache directory so it is visible and deletable, but never committed.
+data/cbdb-sqlite/
+data/cache/
+
 # Python
 __pycache__/
 *.pyc

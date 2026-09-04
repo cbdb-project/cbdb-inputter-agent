@@ -1,8 +1,9 @@
 """`python -m cbdb_agent` entry point.
 
 Subcommands:
-  validate --staging <path> | --input <path>  [--env <path>]
-  submit   --staging <path> | --input <path>  [--dry-run] [--env <path>]
+  validate     --staging <path> | --input <path>  [--env <path>]
+  submit       --staging <path> | --input <path>  [--dry-run] [--env <path>]
+  apply-review --staging <path> --decisions <path>
 
 See docs/01-implementation-plan.md section 7 and docs/03-extraction-review-
 workflow.md section 2.3 for the intended interaction flow. Both --staging and
@@ -11,7 +12,12 @@ same submission engine (batch_runner.py) - see load_input_batch()'s docstring fo
 why.
 
 `validate --staging` additionally refreshes a `preview.md` file next to the
-staging YAML on every run (docs/06-staging-preview-design.md section 3);
+staging YAML on every run (docs/06-staging-preview-design.md section 3), plus a
+`review.json` for the offline review page in `tools/review/`
+(docs/08-review-interface-design.md). `apply-review` is the return leg of that
+round trip: it reads the page's exported `decisions.json` and writes the choices
+back into the staging YAML - the YAML remains the only source of truth and the
+only thing `submit` ever reads. `--env` there is unused;
 `--env` there is only used for that preview's best-effort Tier 2 live diff, not
 for validation itself, which never touches the network. `validate --input` has
 no persistent file location to write a preview next to, so it skips this.
@@ -28,9 +34,19 @@ from pathlib import Path
 
 from .audit_log import AuditLog
 from .batch_runner import ProposalResult, fetch_current_values, run_batch
+from .code_lookup import CodeResolver, collect_code_values
+from .snapshot import (
+    autodownload_from_env,
+    ensure_snapshot,
+    open_snapshot,
+    snapshot_age_days,
+    snapshot_dir_from_env,
+    snapshot_is_stale,
+)
 from .config import ConfigError, load_config
 from .http_client import HttpClient
 from .mutation_api import MutationApi
+from .review import apply_decisions, export_review_json
 from .staging import (
     Issue,
     StagingBatch,
@@ -39,6 +55,7 @@ from .staging import (
     load_input_batch,
     load_staging_file,
     render_preview_markdown,
+    save_staging_file,
     validate_for_submit,
 )
 
@@ -98,6 +115,8 @@ def _write_preview(args: argparse.Namespace, batch: StagingBatch, issues: list[I
     validate's own exit code or structural report.
     """
     current_values = None
+    config = None
+    client = None
     try:
         config = load_config(args.env)
         client = HttpClient(config, AuditLog(config.local_audit_log_dir))
@@ -109,6 +128,8 @@ def _write_preview(args: argparse.Namespace, batch: StagingBatch, issues: list[I
     except ConfigError:
         current_values = None
 
+    code_labels = _resolve_code_labels(batch, config, client)
+
     try:
         markdown = render_preview_markdown(batch, issues, current_values=current_values)
         preview_path = Path(args.staging).parent / "preview.md"
@@ -116,6 +137,86 @@ def _write_preview(args: argparse.Namespace, batch: StagingBatch, issues: list[I
         print(f"Preview written to {preview_path}")
     except OSError as exc:
         print(f"Warning: could not write preview.md: {exc}", file=sys.stderr)
+
+    # review.json rides along with preview.md for the same reason preview.md is tied
+    # to validate: a review surface that can go stale relative to the file it claims
+    # to describe is worse than no review surface. Both are generated and disposable.
+    try:
+        review_path = Path(args.staging).parent / "review.json"
+        review_path.write_text(
+            export_review_json(
+                batch,
+                issues,
+                current_values=current_values,
+                code_labels=code_labels,
+            ),
+            encoding="utf-8",
+        )
+        print(f"Review data written to {review_path}  (open tools/review/index.html)")
+    except OSError as exc:
+        print(f"Warning: could not write review.json: {exc}", file=sys.stderr)
+
+
+def _resolve_code_labels(
+    batch: StagingBatch, config: object | None, client: HttpClient | None
+) -> dict:
+    """Human-readable names for every code in the batch (docs/08 section 3).
+
+    Prefers the weekly SQLite snapshot, which answers the hierarchy joins - an
+    address's full parent chain, an office's type-tree ancestry - in one local query
+    instead of one HTTP request per level. Falls back to the public lookup endpoints,
+    and to nothing at all when neither is available.
+
+    Best-effort by contract, exactly like the Tier-2 live diff: `validate` must keep
+    working with no network, no .env and no snapshot, so nothing here may raise or
+    affect the exit code.
+    """
+    # Fall back to the environment when there is no Config: `validate --staging` is
+    # required to work with no .env, and that is exactly when a user who does not want
+    # a 132 MB download most needs to be able to say so. Reading only Config here
+    # meant CBDB_SQLITE_AUTODOWNLOAD was silently ignored in that case.
+    snapshot_dir = getattr(config, "sqlite_dir", None) or snapshot_dir_from_env()
+    allow_download = getattr(config, "sqlite_autodownload", None)
+    if allow_download is None:
+        allow_download = autodownload_from_env()
+    try:
+        snapshot_path = ensure_snapshot(
+            snapshot_dir, allow_download=allow_download, progress=print
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail validate over a cache
+        print(f"Warning: snapshot unavailable ({exc})", file=sys.stderr)
+        snapshot_path = None
+
+    resolver = None
+    connection = None
+    try:
+        if snapshot_path is not None:
+            connection = open_snapshot(snapshot_path)
+            resolver = CodeResolver(snapshot=connection)
+            age = snapshot_age_days(snapshot_path)
+            age_text = f", built {age:.0f} day(s) ago" if age is not None else ""
+            print(f"Code labels from the SQLite snapshot ({snapshot_path.name}{age_text})")
+            if snapshot_is_stale(snapshot_path):
+                # Reference tables drift slowly, but the reviewer should know the
+                # names they are reading come from a build this old.
+                print(
+                    "  note: that snapshot is over two weeks old - delete it to "
+                    "re-download, or ignore if the code tables haven't moved.",
+                    file=sys.stderr,
+                )
+        elif client is not None:
+            resolver = CodeResolver(client=client)
+            print("Code labels from the public lookup API (no local snapshot)")
+
+        if resolver is None:
+            return {}
+        return resolver.resolve_values(collect_code_values(batch))
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        print(f"Warning: could not resolve code labels ({exc})", file=sys.stderr)
+        return {}
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
@@ -206,6 +307,51 @@ def _archive_batch(
     print(f"Archived to {dest_dir}/")
 
 
+def cmd_apply_review(args: argparse.Namespace) -> int:
+    """Apply the review page's decisions.json back into the staging YAML.
+
+    Prints every change it made. Does NOT validate afterwards - run
+    `validate --staging` next, which is also what regenerates preview.md/review.json
+    from the newly-written file.
+    """
+    try:
+        batch = load_staging_file(args.staging)
+    except (StagingError, OSError, ValueError) as exc:
+        print(f"Could not load {args.staging}: {exc}", file=sys.stderr)
+        return EXIT_LOAD_ERROR
+
+    try:
+        decisions = json.loads(Path(args.decisions).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"Could not load {args.decisions}: {exc}", file=sys.stderr)
+        return EXIT_LOAD_ERROR
+
+    try:
+        applied = apply_decisions(batch, decisions)
+    except StagingError as exc:
+        # Deliberately a hard failure, not a partial apply: a decisions file that
+        # doesn't match the batch means one of the two has moved on, and applying
+        # only the half that still matches would leave the reviewer believing they
+        # settled something they didn't.
+        print(f"Refusing to apply: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION_ERROR
+
+    if not applied:
+        print("No changes - every decision already matched the staging file.")
+        return EXIT_OK
+
+    for change in applied:
+        print(f"  [{change.proposal_id}] {change.kind}: {change.detail}")
+    try:
+        save_staging_file(batch, args.staging)
+    except OSError as exc:
+        print(f"Applied nothing - could not write {args.staging}: {exc}", file=sys.stderr)
+        return EXIT_LOAD_ERROR
+    print(f"{len(applied)} change(s) written to {args.staging}")
+    print("Next: python -m cbdb_agent validate --staging " + args.staging)
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m cbdb_agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -227,6 +373,16 @@ def build_parser() -> argparse.ArgumentParser:
                 help="Force dry-run even if .env disables it (cannot force it off)",
             )
         sub.set_defaults(func=handler)
+
+    apply_review = subparsers.add_parser(
+        "apply-review",
+        help="Write the review page's decisions.json back into a staging YAML",
+    )
+    apply_review.add_argument("--staging", required=True, help="Path to the YAML staging file")
+    apply_review.add_argument(
+        "--decisions", required=True, help="decisions.json exported by tools/review/index.html"
+    )
+    apply_review.set_defaults(func=cmd_apply_review)
 
     return parser
 
