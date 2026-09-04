@@ -448,7 +448,10 @@ def test_office_update_refuses_a_partial_payload(tmp_path):
 
 
 @responses.activate
-def test_office_create_refuses_the_plural_alias(tmp_path):
+def test_office_refuses_the_plural_alias_on_both_operations(tmp_path):
+    """`offices` reaches the postings handler server-side, so sending it here would
+    write a person's appointment record instead of an office code. It has to be refused
+    on create as well as update - the earlier version of this test only covered update."""
     api = make_api(tmp_path)
     with pytest.raises(FieldWhitelistError, match="not a valid resource alias"):
         api.update(
@@ -459,6 +462,16 @@ def test_office_create_refuses_the_plural_alias(tmp_path):
             resource_string="offices",
             approved_by="Hongsu Wang",
         )
+    with pytest.raises(FieldWhitelistError, match="not a valid resource alias"):
+        api.create(
+            "office",
+            person_id=0,
+            target_pk={},
+            changes=_office_create_changes(),
+            resource_string="offices",
+            approved_by="Hongsu Wang",
+        )
+    # Neither reached the network - not the write, and not even the duplicate check.
     assert not responses.calls
 
 

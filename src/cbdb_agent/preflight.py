@@ -36,8 +36,13 @@ from the only endpoint rule 1 allows for this:
    module's call to make.
 2. The server rewrites `c_office_chn` through `char_variant_map` before storing it
    (e.g. 峯 -> 峰), and that table is in the target system's database, not in anything
-   we can read. So a name whose variant-normalized form already exists can pass. NFC
-   folding, the other half of the server's normalization, IS handled - see _canonical().
+   we can read. So a name whose variant-normalized form already exists can pass.
+
+Unicode normalization, which looks like a third hole of the same kind, IS closed - but
+note it took two attempts and the first one only covered the unlikely direction. Folding
+both sides of the comparison is not enough, because a stored row in the other form never
+comes back from a byte-based `LIKE` in the first place. Every byte-distinct spelling is
+searched; see _spellings().
 
 So a clean result means "no same-dynasty office of that name is visible through the
 search endpoint", not "no duplicate can exist". That is materially better than the
@@ -50,7 +55,13 @@ from __future__ import annotations
 import unicodedata
 from typing import Any
 
-from .http_client import CbdbApiError, HttpClient
+from .http_client import (
+    AuthenticationError,
+    AuthorizationError,
+    CbdbApiError,
+    HttpClient,
+    RateLimitedError,
+)
 
 # API.md 14.4. Public and unauthenticated, so it is called with public=True: a token
 # gains nothing here and a stale one would spend the shared per-IP failed-auth budget
@@ -68,6 +79,70 @@ _ALT_SEPARATOR = ";"
 # through - and `searchOffice()` has no `orderBy`, so which rows land on page 1 is not even
 # stable. Every page has to be read.
 _PAGE_CAP = 30  # 600 rows; at the client's 1 req/s that is a ~30 s worst case
+
+# How many alternate spellings of one name we are willing to search for. See
+# _spellings(): a name whose every character has compatibility pre-images explodes
+# combinatorially, and each spelling costs its own pass over the paginator.
+_MAX_SPELLINGS = 8
+
+
+def _compatibility_pre_images() -> dict[str, list[str]]:
+    """unified ideograph -> the compatibility ideographs that NFC-fold onto it.
+
+    Why this map has to exist. The search endpoint's `LIKE %q%` is byte-based, and CBDB
+    genuinely contains both forms: 23 of the 34,079 `OFFICE_CODES.c_office_chn` values in
+    the 2026-08-15 snapshot are not in NFC (e.g. 10271 駙馬都尉, whose 都 is U+FA26, not
+    U+90FD). The target system's own `app/Support/UnicodeNfc.php` spells out the
+    consequence: 「唯一鍵擋不住、精確比對找不到、搜尋互不可見」.
+
+    So folding both sides of the comparison is not enough - by the time we compare, the
+    stored row has to have come back from the endpoint, and it will not come back for a
+    query in the other form. Every spelling has to be *searched*. Only 902 unified
+    ideographs have any compatibility pre-image, and at most 3 each, so this is a small
+    table built once at import from `unicodedata` rather than shipped as data.
+    """
+    reverse: dict[str, list[str]] = {}
+    # The CJK Compatibility Ideographs blocks. Everything outside them either has no
+    # compatibility pre-image or does not fold to a single character.
+    for low, high in ((0xF900, 0xFAFF), (0x2F800, 0x2FA1F)):
+        for codepoint in range(low, high + 1):
+            char = chr(codepoint)
+            folded = unicodedata.normalize("NFC", char)
+            if folded != char and len(folded) == 1:
+                reverse.setdefault(folded, []).append(char)
+    return reverse
+
+
+_PRE_IMAGES = _compatibility_pre_images()
+
+
+def _spellings(canonical_name: str) -> list[str]:
+    """Every byte-distinct spelling of `canonical_name` a stored row could be using.
+
+    The canonical form first, then each substitution of a compatibility pre-image.
+    Raises if the name has more variants than `_MAX_SPELLINGS`, rather than searching
+    some of them and calling the result clean - the same posture as the page cap.
+    """
+    out = [canonical_name]
+    for index, char in enumerate(canonical_name):
+        variants = _PRE_IMAGES.get(char)
+        if not variants:
+            continue
+        for variant in variants:
+            out.extend(
+                spelling[:index] + variant + spelling[index + 1:]
+                for spelling in list(out)
+                if spelling[index] == char
+            )
+        if len(out) > _MAX_SPELLINGS:
+            raise PreflightError(
+                f"office name {canonical_name!r} has more than {_MAX_SPELLINGS} "
+                "byte-distinct spellings once CJK compatibility ideographs are "
+                "considered, so this check cannot search all of them. The search "
+                "endpoint matches bytes, so an unsearched spelling could be a "
+                "duplicate. Verify by hand before creating this office."
+            )
+    return out
 
 
 class PreflightError(CbdbApiError):
@@ -152,6 +227,15 @@ def _search_all_pages(
             params["page"] = page
         try:
             body = client.get(_OFFICE_SEARCH_PATH, params=params, public=True)
+        except (AuthenticationError, AuthorizationError, RateLimitedError):
+            # AGENTS.md rule 10: these are properties of the credentials or the
+            # egress IP, not of this record, and batch_runner aborts the whole batch
+            # on them (_ABORTING_ERRORS). Wrapping them in PreflightError would
+            # downgrade a batch-wide stop into one failed proposal and let the run
+            # march on spending the shared per-IP failed-auth budget. Re-raise
+            # unwrapped. (public=True means no token is sent, so a 401 here would be
+            # odd - but a proxy or WAF 403/429 is not.)
+            raise
         except CbdbApiError as exc:
             raise PreflightError(
                 f"office duplicate check failed on page {page} ({exc}) - refusing to "
@@ -169,6 +253,19 @@ def _search_all_pages(
         # paginated, so one request is the whole result set.
         last_page = body.get("last_page")
         if not isinstance(last_page, int) or last_page <= page:
+            # `searchOffice()` has no `orderBy`, so LIMIT/OFFSET paging over an
+            # unordered scan can serve one row twice and skip another. The seen_ids
+            # dedupe above absorbs the duplicate - and would hide the skip - so
+            # compare against the count the paginator itself reported.
+            total = body.get("total")
+            if isinstance(total, int) and len(seen_ids) < total:
+                raise PreflightError(
+                    f"office search for {query!r} reported {total} rows but only "
+                    f"{len(seen_ids)} distinct ones came back across {page} page(s). "
+                    "The endpoint pages an unordered scan, so a row was probably "
+                    "skipped - and a skipped row could be the duplicate. Refusing "
+                    "rather than reporting a partial result as clean."
+                )
             return out
         if last_page > _PAGE_CAP:
             raise PreflightError(
@@ -214,9 +311,14 @@ def find_office_name_conflicts(
         raise PreflightError("cannot check for duplicates of an empty office name")
     wanted = _canonical(raw)
 
-    # Query both spellings when they differ: the endpoint's LIKE is byte-based, so a
-    # decomposed form we were handed will not match a composed form in the column.
-    queries = [raw] if raw == wanted else [raw, wanted]
+    # Search every byte-distinct spelling, not just the one we were handed. The
+    # endpoint's LIKE is byte-based and CBDB holds both compatibility and unified
+    # forms, so a single query in either form can miss a row written in the other -
+    # and the common case is the one that looks safest: the operator types the ordinary
+    # unified ideograph while the stored row uses the compatibility codepoint.
+    queries = _spellings(wanted)
+    if raw != wanted and raw not in queries:
+        queries.append(raw)
 
     collected: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -236,7 +338,13 @@ def find_office_name_conflicts(
                 "c_office_id": row.get("c_office_id"),
                 "c_office_chn": row.get("c_office_chn"),
                 "c_dy": row_dy,
-                "matched": "name" if row.get("c_office_chn") == wanted else "name_alt",
+                # Compare canonical to canonical: `wanted` is folded and the row's value
+            # is raw, so a raw comparison mislabels a main-name hit as an alias hit
+            # and sends the reviewer looking in the wrong column.
+            "matched": (
+                "name" if _canonical(row.get("c_office_chn") or "") == wanted
+                else "name_alt"
+            ),
                 "same_dynasty": same_dynasty,
             }
         )
@@ -263,6 +371,17 @@ def assert_office_create_is_not_a_duplicate(
     the same office name legitimately recurs across dynasties - `知州` exists separately
     for Tang, Yuan, Ming and Qing - so only a same-dynasty collision is a duplicate.
     """
+    if dynasty_code is None or str(dynasty_code).strip() == "":
+        # Without a dynasty nothing can ever be "same dynasty", so this function would
+        # return quietly even on an exact name hit - an assert that cannot fail is
+        # worse than no assert. `dynasty_code` is required on an office create anyway
+        # (models.py's required_create_fields); refuse rather than vouch for nothing.
+        raise PreflightError(
+            "cannot check for duplicates without a dynasty_code: an office name is only "
+            "a duplicate within its own dynasty, so with no dynasty this check could "
+            "not block anything"
+        )
+
     conflicts = find_office_name_conflicts(client, name=name, dynasty_code=dynasty_code)
     blocking = [c for c in conflicts if c["same_dynasty"]]
     if blocking:

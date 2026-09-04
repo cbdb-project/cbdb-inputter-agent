@@ -114,10 +114,17 @@ class ResourceSpec:
     # to resend the whole row.
     full_overwrite_update: bool = False
     # Fields whose VALUE SHAPE is load-bearing: must be a non-empty list of non-empty
-    # strings. `type_ids` is the first such field in this client - `type_ids: "06"` as
-    # a bare string would be silently mangled by the server's resolver into a
-    # single-element list only by luck, and an empty list is a 422. The generic
-    # whitelist only ever checked KEYS, never values.
+    # strings. `type_ids` is the first such field in this client. The generic whitelist
+    # only ever checked KEYS, never values.
+    #
+    # Not because the server would silently mangle a scalar - it would not.
+    # `resolveOfficeTypeIds()` falls through to `type_id`/`c_office_tree_id` when
+    # `type_ids` is not an array, finds neither, and returns [] for a clean
+    # `422 type_ids: required`. Two reasons that is still not good enough: the 422
+    # arrives after a round trip and says "required" for a field that was present, which
+    # is a confusing thing to debug; and these are varchar node ids where **the leading
+    # zero is significant** ("06", not 6), so pinning them to strings here is what stops
+    # a YAML author writing `type_ids: [06]` and having it arrive as 6.
     list_fields: frozenset[str] = field(default_factory=frozenset)
 
     def resolve_alias(self, resource_string: str, operation: str) -> None:
@@ -211,11 +218,21 @@ class ResourceSpec:
                 if is_missing_value(changes.get(f))
             }
             if missing:
+                # The consequence differs by resource and saying the wrong one is worse
+                # than saying nothing: the code tables have no delete path at all
+                # (API.md 13.3), while the entity aggregates DO support delete, guarded
+                # by a 409 once anything references the row (API.md 13.4).
+                consequence = (
+                    "this resource has no delete path, so a blank row would be permanent"
+                    if not self.delete_aliases and not self.update_fields
+                    else "this is global reference data, so a blank row is visible to "
+                    "every other user until someone deletes it - and only while nothing "
+                    "references it yet"
+                )
                 raise FieldWhitelistError(
                     f"{self.key}: create requires a non-empty value for "
                     f"{sorted(missing)} - the server would accept the row without it "
-                    "and this resource has no delete path, so a blank row would be "
-                    "permanent"
+                    f"and {consequence}"
                 )
 
     def validate_target_pk_for_create(self, target_pk: dict) -> None:

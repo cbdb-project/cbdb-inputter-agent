@@ -717,3 +717,46 @@ def test_approval_gated_aliases_covers_the_key_and_every_alias():
                 assert alias in gated
         else:
             assert key not in gated
+
+
+def test_the_ambiguous_offices_resource_string_is_refused(tmp_path):
+    """`offices` is a server-side alias for BOTH the approval-gated `office` aggregate
+    and the routine `postings` sub-resource, and which one wins is registry order this
+    client cannot see. It is deliberately absent from approval_gated_aliases() - adding
+    it would make every routine postings write demand an approved_by - so without this
+    guard a raw post could reach the gated aggregate ungated."""
+    from cbdb_agent.http_client import MissingApprovalError
+
+    client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
+    for ambiguous in ("offices", "office-load", "  OFFICES  "):
+        body = {
+            "resource": ambiguous,
+            "mode": "direct",
+            "operation": "create",
+            "person_id": 0,
+            "target": {"pk": {}},
+            "changes": {"name": "知某州事"},
+        }
+        # Refused even WITH a signature: the point is that the string is ambiguous,
+        # not that it is unsigned.
+        with pytest.raises(MissingApprovalError, match="refusing to send resource"):
+            client.post(
+                "/api/v2/create", json_body=body, mutating=True,
+                approval_signature="Hongsu Wang",
+            )
+
+
+def test_the_unambiguous_spellings_are_not_refused(tmp_path):
+    """`postings` must stay routine and `office` must stay gated-but-permitted."""
+    from cbdb_agent.http_client import MissingApprovalError
+
+    client, _ = make_client(tmp_path, dry_run=True, confirm_prod="")
+    routine = {
+        "resource": "postings", "mode": "direct", "operation": "create",
+        "person_id": 1, "target": {"pk": {"c_office_id": 1}}, "changes": {},
+    }
+    client.post("/api/v2/create", json_body=routine, mutating=True)  # must not raise
+
+    gated = dict(routine, resource="office")
+    with pytest.raises(MissingApprovalError, match="without an approval signature"):
+        client.post("/api/v2/create", json_body=gated, mutating=True)

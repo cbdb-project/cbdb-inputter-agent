@@ -524,9 +524,15 @@ def test_office_registers_only_the_singular_alias():
 
     assert find_spec_by_alias("office").key == "office"
     for bad in ("offices", "office-load", "office_codes"):
-        with pytest.raises(FieldWhitelistError):
-            found = find_spec_by_alias(bad)
-            assert found.key != "office", f"{bad} must not resolve to the office entity"
+        # Assert on the RESULT, not inside pytest.raises - an assert in there is
+        # unreachable whenever the call does not raise, which is the case that matters.
+        # And `offices` may legitimately come back as the POSTINGS spec (the server
+        # still accepts it there); what must never happen is it resolving to `office`.
+        try:
+            resolved = find_spec_by_alias(bad).key
+        except FieldWhitelistError:
+            continue
+        assert resolved != "office", f"{bad} must not resolve to the office entity"
 
 
 def test_office_whitelist_is_the_semantic_field_set():

@@ -122,24 +122,6 @@ class MutationApi:
         _require_approval(spec, approved_by, "create")
         spec.validate_target_pk_for_create(target_pk)
 
-        # The server has NO duplicate-name guard on office create (it allocates max+1
-        # and inserts), so this live check is the only thing between a re-run and a
-        # second permanent row in global reference data. It lives HERE, at the layer
-        # that actually sends the request, for the same reason _require_approval does:
-        # a guard that only exists in batch_runner is one a direct
-        # `MutationApi.create("office", ...)` call walks straight past. Raises
-        # PreflightError (a CbdbApiError), which batch_runner isolates per proposal.
-        #
-        # Keyed on the resource for now because office is the only resource that needs
-        # it. If a second one appears, make this a spec-driven hook rather than growing
-        # the condition.
-        if spec.key == "office":
-            assert_office_create_is_not_a_duplicate(
-                self._client,
-                name=changes.get("name"),
-                dynasty_code=changes.get("dynasty_code"),
-            )
-
         merged_changes = dict(changes)
         for pk_field, pk_value in target_pk.items():
             if pk_field not in spec.create_fields:
@@ -153,6 +135,34 @@ class MutationApi:
             merged_changes[pk_field] = pk_value
 
         spec.validate_changes("create", merged_changes)
+
+        # The server has NO duplicate-name guard on office create (it allocates max+1
+        # and inserts), so this live check is the only thing between a re-run and a
+        # second permanent row in global reference data. It lives HERE, at the layer
+        # that actually sends the request, for the same reason _require_approval does:
+        # a guard that only exists in batch_runner is one a direct
+        # `MutationApi.create("office", ...)` call walks straight past. Raises
+        # PreflightError (a CbdbApiError), which batch_runner isolates per proposal.
+        #
+        # Deliberately AFTER validate_changes(): a payload we can reject offline should
+        # be rejected offline, both so the caller sees the real error (a bad field name
+        # rather than "cannot check for duplicates of an empty office name") and so a
+        # malformed create does not spend up to _PAGE_CAP rate-limited requests first.
+        #
+        # Skipped under dry-run for the same reason batch_runner skips person-id
+        # allocation there: a dry run's job is to preview a batch without touching the
+        # target system, and an unreachable host should not turn a previewed office
+        # create into a failed proposal. The real create cannot skip it.
+        #
+        # Keyed on the resource for now because office is the only resource that needs
+        # it. If a second one appears, make this a spec-driven hook rather than growing
+        # the condition.
+        if spec.key == "office" and not self._client.dry_run:
+            assert_office_create_is_not_a_duplicate(
+                self._client,
+                name=merged_changes.get("name"),
+                dynasty_code=merged_changes.get("dynasty_code"),
+            )
 
         envelope = _build_envelope(
             resource_string=alias,

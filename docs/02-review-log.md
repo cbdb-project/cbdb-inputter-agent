@@ -1476,9 +1476,72 @@ staging file quotes the instruction so the basis is auditable. It is still a bou
 flagging rather than a precedent — and note the sign-off also reached the server, in
 `meta.comment` on `operations` row 360887.
 
-### Outstanding
+### Review passes — 4 SERIOUS + ~20 MINOR, and the guard was wrong three times
 
-`AGENTS.md` §11 owes this milestone a review round (the re-sync milestone above got three
-passes; this one has had none). Nothing about the write is unverified, but the new code —
-`preflight.py` especially, which is a security-adjacent guard — has not been reviewed by a
-second party.
+Two review agents plus codex, at the standard the previous milestone used. Worth writing
+down that **every one of the four SERIOUS findings was the same failure**: the duplicate
+guard reporting "clean" when it was not. Its first version had 13 passing tests and was
+broken in three independent ways.
+
+1. **Page 1 only.** (Found before the reviews landed, by checking the thing they were
+   most likely to hit.) `/api/select/search/office` is a paginator at 20 rows over a
+   `LIKE %q%` with **no `orderBy`**; `q=知` reports `total=1061` across 54 pages. So a
+   duplicate on page 2 was invisible, and which rows land on page 1 is not stable between
+   calls. Now walks every page, refuses above a 30-page cap rather than scanning part of
+   a result set, and refuses if any page fails.
+2. **Bypassable.** (codex) The check lived only in `batch_runner`, so a direct
+   `MutationApi.create("office", ...)` — approved and otherwise valid — walked straight
+   past it. Moved into `MutationApi.create()`, for the same reason `_require_approval`
+   lives at both layers: a guard that only exists in the layer a caller can skip is not a
+   guard.
+3. **Compared the spelling we typed, not the one the server stores.** (codex, then the
+   code reviewer found the fix was half a fix.) The first attempt folded both sides of
+   the comparison — useless in the direction that actually matters, because a byte-based
+   `LIKE` never returns the differently-encoded row in the first place. **23 of the
+   34,079 office names in the snapshot are not NFC** (10271 駙馬都尉 stores 都 as U+FA26).
+   Now every byte-distinct spelling is *searched*, from a 902-entry compatibility
+   pre-image map built at import, capped and refusing above the cap.
+4. **Vouched for nothing when `dynasty_code` was absent.** (code reviewer) `same_dynasty`
+   can never be true without a dynasty, so `assert_office_create_is_not_a_duplicate`
+   returned quietly even on an exact name hit — an assert that cannot fail. Now refuses.
+
+Other findings acted on: the check no longer wraps `AuthenticationError` /
+`AuthorizationError` / `RateLimitedError` in `PreflightError` (that would downgrade rule
+10's batch-wide abort to one failed proposal while spending the shared per-IP budget); it
+reconciles the rows collected against the paginator's own `total`, since paging an
+unordered scan can *skip* a row and the `seen_ids` dedupe would hide it;
+`validate_changes` now runs *before* the network check, so a payload we can reject
+offline is rejected offline instead of spending up to 30 rate-limited requests and then
+reporting a misleading error; the check is skipped under dry-run, matching what
+`allocate_person_id` already does and stated as a decision rather than left as a side
+effect; the `matched` label no longer mislabels a main-name hit as an alias hit; and
+`http_client` now refuses the resource strings `offices`/`office-load` outright — they
+are server-side aliases for *both* the gated `office` aggregate and routine `postings`,
+so they are deliberately absent from `approval_gated_aliases()` and a raw post using one
+could otherwise have reached the gated aggregate ungated.
+
+Two false claims in messages a reviewer reads while deciding were fixed rather than left
+cosmetic: `models.py` and `staging.py` both said "this resource has no delete path, so a
+blank row would be permanent", which is true of the code tables and **false** of the
+aggregates. The consequence is now derived from the spec.
+
+Also corrected: `list_fields`' stated rationale claimed the server would silently mangle
+a scalar `type_ids`. It would not — `resolveOfficeTypeIds()` returns `[]` and the server
+answers a clean `422 type_ids: required`. The check is still worth having, for the better
+message and because these are varchar node ids where the leading zero is significant, but
+the justification was wrong.
+
+Fact-check pass corrections, all in prose: the digest still repeated the `ON DELETE
+CASCADE` myth in §2.3 after `docs/10` had corrected it; §1.9's "three rewrites" read as
+exhaustive while `API.md` §1.5 names more (bracket and sentinel normalization now called
+out); §3.1 attributed the pre-cleanup `500` to `basicinformation` *update*, which was
+safe by construction because its handler derives its allow-list from the live row's own
+columns; §2.3 implied `social-institution` create is duplicate-protected when only its
+*name code* is deduped (`c_inst_code` is still `allocateNextId`, so a repeat create mints
+a second institution row); `docs/04` §15 said the overwrite nulls every absent field when
+`pinyin`/`pinyin_alt` are *derived* from the Chinese; and `docs/10`'s `c_pages` "house
+style" rested on one batch with a counterexample (office 202979's bare `8947`).
+
+**384 tests** (335 before this milestone). `tests/test_preflight.py` alone went 13 → 26,
+almost all of it pinning refusal paths — the distinction between "there is no duplicate"
+and "the check could not run" is the whole value of the module.
