@@ -24,6 +24,7 @@ from typing import Any
 
 from .http_client import HttpClient
 from .models import FieldWhitelistError, get_resource_spec
+from .preflight import assert_office_create_is_not_a_duplicate
 
 
 def _build_envelope(
@@ -120,6 +121,24 @@ class MutationApi:
         spec.resolve_alias(alias, "create")
         _require_approval(spec, approved_by, "create")
         spec.validate_target_pk_for_create(target_pk)
+
+        # The server has NO duplicate-name guard on office create (it allocates max+1
+        # and inserts), so this live check is the only thing between a re-run and a
+        # second permanent row in global reference data. It lives HERE, at the layer
+        # that actually sends the request, for the same reason _require_approval does:
+        # a guard that only exists in batch_runner is one a direct
+        # `MutationApi.create("office", ...)` call walks straight past. Raises
+        # PreflightError (a CbdbApiError), which batch_runner isolates per proposal.
+        #
+        # Keyed on the resource for now because office is the only resource that needs
+        # it. If a second one appears, make this a spec-driven hook rather than growing
+        # the condition.
+        if spec.key == "office":
+            assert_office_create_is_not_a_duplicate(
+                self._client,
+                name=changes.get("name"),
+                dynasty_code=changes.get("dynasty_code"),
+            )
 
         merged_changes = dict(changes)
         for pk_field, pk_value in target_pk.items():

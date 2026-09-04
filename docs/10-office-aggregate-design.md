@@ -1,6 +1,11 @@
 # Adding a Tang office code `知某州事` — design
 
-**Status: design only. Nothing has been submitted, and no code has been written yet.**
+**Status: implemented and submitted.** The `office` spec, `preflight.py` and this
+design's §5.4 batch all landed together; the write went to production on 2026-09-04
+(`operation_id 360887`) and is recorded in §8 and `docs/02-review-log.md`. The
+sections below are kept as written because most of their value is the eight traps in
+§2 and the reasoning behind the data decision in §5.1, not the payload — but read
+§4's table as *what was done*, not as a proposal.
 
 The request (2026-09-04): record a Tang office `知某州事`, English
 `Administrator of Prefectural Civil Affairs`, alias `摄某州事`, attested in
@@ -170,7 +175,7 @@ Narrow: `office` alias only, semantic field names only, `create` + `update`, no 
 
 | File | Change |
 |---|---|
-| `models.py` | `RESOURCE_SPECS["office"]`: **`create_aliases=frozenset()`** (see below), `update_aliases={"office"}`, `delete_aliases=frozenset()`, `pk_fields=("c_office_id",)`, `server_assigned_pk_fields={"c_office_id"}`, `update_fields={name, name_alt, translation, translation_alt, pinyin, pinyin_alt, dynasty_code, type_ids, source_id, pages, notes}`, `requires_explicit_approval=True` |
+| `models.py` | `RESOURCE_SPECS["office"]`: `create_aliases={"office"}` (see the revision note below), `update_aliases={"office"}`, `delete_aliases=frozenset()`, `pk_fields=("c_office_id",)`, `server_assigned_pk_fields={"c_office_id"}`, `update_fields={name, name_alt, translation, translation_alt, pinyin, pinyin_alt, dynasty_code, type_ids, source_id, pages, notes}`, `requires_explicit_approval=True` |
 | `models.py` | New `ResourceSpec.required_update_fields` — the server requires `name`/`type_ids`/`source_id`/`dynasty_code` on update as well, and nothing client-side says so today |
 | `models.py` / `staging.py` / `http_client.py` | The rule-12 refusal messages are hard-coded with the code-table rationale — `staging.py`'s "the server offers NO delete path, so a wrong row is permanent" and `http_client.py`'s "offers no way to undo it". Both become **false** for `office`, which *is* deletable while unreferenced. `models.py`'s own comment on `requires_explicit_approval` already warns "If you gate one of those, don't inherit the undeletable wording" — so the messages need to derive the reason from the spec rather than assert it |
 | `code_lookup.py` | **Not free after all** — see the correction below the table. `FIELD_CODE_TABLES` is keyed on `c_*` column names, so the aggregate's semantic inputs (`type_ids`, `source_id`, `dynasty_code`) resolve to nothing, and `office_type_chains()` is keyed by *office* id, not type-node id, so there is no path from `06091204` to 刺史 at all |
@@ -184,16 +189,16 @@ Narrow: `office` alias only, semantic field names only, `create` + `update`, no 
 | `tests/test_staging.py` | An `office` update with no `approved_by` is a structural error; `resolve_target_pk()` yields `{"c_office_id": 12304}` |
 | `tests/test_mutation_api.py` | Envelope: `resource: "office"`, `operation: "update"`, `target.pk == {"c_office_id": 12304}`, `person_id: 0`, `mode: "direct"`; refusal without `approved_by` |
 
-**Why create is not modelled.** Plan B needs only `update`, and modelling `create`
-would open a path with no duplicate protection at either end: the server has none
-(trap 3), and §6's pre-flight is a *documented procedure for this one batch*, not code.
-An approved future office create could therefore go straight through
-`MutationApi.create()` and mint a second `知某州事` with nothing to stop it. If a create
-is ever wanted, it must ship together with a **programmatic** live duplicate check —
-inside `batch_runner`, refusing the proposal rather than reminding a human — and that is
-a larger piece of work than this one. Registering no create alias is how the narrower
-surface gets enforced rather than merely recommended; `find_issues()` will reject
-`resource: office` on a `create` proposal as an invalid alias for that operation.
+**Revision note on `create`.** An earlier draft of this section modelled `update` only,
+on the grounds that a create would open a path with no duplicate protection at either
+end: the server has none (trap 3), and §6's pre-flight was a *documented procedure for
+one batch*, not code. That was scope-narrowing rather than a fix — the moment a second
+office write was approved, nothing would make anyone run the procedure. So `create` **is**
+modelled, and the condition attached to it was met instead: the duplicate check is now
+code (`preflight.py`), it runs inside `MutationApi.create()` — the layer that actually
+sends, so a direct library call cannot walk past it — and it fails the proposal. Read its
+module docstring before relying on it: it is a real guard with two structural holes, both
+imposed by the only endpoint rule 1 allows.
 
 **What genuinely needs no change:** `batch_runner.py`, `staging.py`'s resolution logic
 and `cli.py`. `resolve_target_pk()` already produces `{"c_office_id": 12304}` for this

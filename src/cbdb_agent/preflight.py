@@ -22,10 +22,32 @@ proposal rather than printing a warning.
 create" as precisely the question the weekly SQLite build may never answer: a row added
 since the build is invisible in it, so the snapshot can answer "not there" for something
 that is - which is exactly how you create the duplicate you were checking for.
+
+**It is a partial guard, and the two holes are structural, not oversights.** Both come
+from the only endpoint rule 1 allows for this:
+
+1. `ApiController::searchOffice()` searches `c_office_chn` and `c_office_pinyin` only -
+   never `c_office_chn_alt`. A name that exists ONLY inside another office's
+   ";"-separated alternative-name list is therefore invisible: that row never comes back
+   for our query, so the local alt-list scan below cannot see it either. Closing this
+   needs either an upstream change (search the alt column) or adding
+   `GET /api/OFFICE_CODES` to AGENTS.md rule 1's allowlist - it is an undocumented
+   legacy full-table dump that rule 1 does not currently permit. Neither is this
+   module's call to make.
+2. The server rewrites `c_office_chn` through `char_variant_map` before storing it
+   (e.g. 峯 -> 峰), and that table is in the target system's database, not in anything
+   we can read. So a name whose variant-normalized form already exists can pass. NFC
+   folding, the other half of the server's normalization, IS handled - see _canonical().
+
+So a clean result means "no same-dynasty office of that name is visible through the
+search endpoint", not "no duplicate can exist". That is materially better than the
+nothing the server provides, and it is not a guarantee. Anyone widening office creates
+beyond one-off, reviewed batches should close hole 1 first.
 """
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Any
 
 from .http_client import CbdbApiError, HttpClient
@@ -83,15 +105,81 @@ def _rows(body: Any) -> list[dict[str, Any]]:
     return [row for row in candidate if isinstance(row, dict)]
 
 
+def _canonical(text: str) -> str:
+    """Compare names the way the server will after it normalizes them.
+
+    The server NFC-folds every text column before storing (API.md 4.3), and canonical
+    equivalents are not mutually searchable - so comparing the raw spelling we were
+    handed against the raw spelling that came back can miss a row that is the same name
+    in a different encoding. Both sides get folded here.
+
+    What this does NOT cover: the server also applies `char_variant_map` substitution
+    to `c_office_chn` (e.g. 峯 -> 峰), and that map lives in the target system's
+    database, not in anything we can read. So a name whose *variant* form is already
+    present can still slip through. See the module docstring.
+    """
+    return unicodedata.normalize("NFC", text).strip()
+
+
 def _names_of(row: dict[str, Any]) -> set[str]:
     names = set()
     main = row.get("c_office_chn")
     if isinstance(main, str) and main.strip():
-        names.add(main.strip())
+        names.add(_canonical(main))
     alt = row.get("c_office_chn_alt")
     if isinstance(alt, str):
-        names.update(part.strip() for part in alt.split(_ALT_SEPARATOR) if part.strip())
+        names.update(
+            _canonical(part) for part in alt.split(_ALT_SEPARATOR) if part.strip()
+        )
     return names
+
+
+def _search_all_pages(
+    client: HttpClient, query: str, seen_ids: set[str]
+) -> list[dict[str, Any]]:
+    """Every page of `/api/select/search/office?q=<query>`, de-duplicated by office id.
+
+    The endpoint paginates at 20 rows over a `LIKE %q%` with **no `orderBy`**, so a
+    match can sit on any page and which rows land on page 1 is not stable between
+    calls. Reading one page would be a check that reports "clean" while a duplicate
+    sits on page 2.
+    """
+    out: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        params: dict[str, Any] = {"q": query}
+        if page > 1:
+            params["page"] = page
+        try:
+            body = client.get(_OFFICE_SEARCH_PATH, params=params, public=True)
+        except CbdbApiError as exc:
+            raise PreflightError(
+                f"office duplicate check failed on page {page} ({exc}) - refusing to "
+                "treat a failed check as a clean one"
+            ) from exc
+
+        for row in _rows(body):
+            office_id = str(row.get("c_office_id"))
+            if office_id in seen_ids:
+                continue
+            seen_ids.add(office_id)
+            out.append(row)
+
+        # A bare-array response carries no pagination metadata; that shape is not
+        # paginated, so one request is the whole result set.
+        last_page = body.get("last_page")
+        if not isinstance(last_page, int) or last_page <= page:
+            return out
+        if last_page > _PAGE_CAP:
+            raise PreflightError(
+                f"office name {query!r} matches {body.get('total')} rows across "
+                f"{last_page} pages of the search endpoint, over this check's "
+                f"{_PAGE_CAP}-page cap. Refusing rather than scanning part of the "
+                "result set and calling it clean: the endpoint does a substring match "
+                "with no stable ordering, so a duplicate could be on any page. Verify "
+                "by hand before creating this office."
+            )
+        page += 1
 
 
 def find_office_name_conflicts(
@@ -121,42 +209,19 @@ def find_office_name_conflicts(
     back for another reason. Scanning the alt lists of the rows we do get back (above)
     is a partial mitigation, not a complete one.
     """
-    wanted = (name or "").strip()
-    if not wanted:
+    raw = (name or "").strip()
+    if not raw:
         raise PreflightError("cannot check for duplicates of an empty office name")
+    wanted = _canonical(raw)
+
+    # Query both spellings when they differ: the endpoint's LIKE is byte-based, so a
+    # decomposed form we were handed will not match a composed form in the column.
+    queries = [raw] if raw == wanted else [raw, wanted]
 
     collected: list[dict[str, Any]] = []
-    page = 1
-    while True:
-        params = {"q": wanted}
-        if page > 1:
-            params["page"] = page
-        try:
-            body = client.get(_OFFICE_SEARCH_PATH, params=params, public=True)
-        except CbdbApiError as exc:
-            raise PreflightError(
-                f"office duplicate check failed on page {page} ({exc}) - refusing to "
-                "treat a failed check as a clean one"
-            ) from exc
-
-        collected.extend(_rows(body))
-
-        # A bare-array response carries no pagination metadata; that shape is not
-        # paginated, so one request is the whole result set.
-        last_page = body.get("last_page")
-        if not isinstance(last_page, int) or last_page <= page:
-            break
-        if last_page > _PAGE_CAP:
-            raise PreflightError(
-                f"office name {wanted!r} matches {body.get('total')} rows across "
-                f"{last_page} pages of the search endpoint, over this check's "
-                f"{_PAGE_CAP}-page cap. Refusing rather than scanning part of the "
-                "result set and calling it clean: the endpoint does a substring match "
-                "with no stable ordering, so a duplicate could be on any page. Verify "
-                "by hand before creating this office."
-            )
-        page += 1
-
+    seen_ids: set[str] = set()
+    for query in queries:
+        collected.extend(_search_all_pages(client, query, seen_ids))
     conflicts = []
     for row in collected:
         if wanted not in _names_of(row):

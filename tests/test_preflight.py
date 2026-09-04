@@ -295,3 +295,51 @@ def test_a_failure_on_a_later_page_refuses(tmp_path):
         assert_office_create_is_not_a_duplicate(
             make_client(tmp_path), name="知某州事", dynasty_code=6
         )
+
+
+# --- normalization: compare what the server will store, not what we typed ------
+
+
+@responses.activate
+def test_a_canonically_equivalent_name_is_still_a_conflict(tmp_path):
+    """The server NFC-folds every text column before storing (API.md 4.3), and canonical
+    equivalents are not mutually searchable. Comparing raw spellings would let a
+    decomposed form pass as "new" and then land on top of the composed row already
+    there. Both sides are folded, and both spellings are queried."""
+    import unicodedata
+
+    composed = "\u614e\u5dde\u4e8b"          # 慎州事, NFC
+    decomposed = "\ufa87\u5dde\u4e8b"        # same first char as a compatibility ideograph
+    assert unicodedata.normalize("NFC", decomposed) == composed
+    assert decomposed != composed
+
+    # The stored row carries the composed form; we submit the other one.
+    responses.add(
+        responses.GET,
+        SEARCH_URL,
+        json=paginator([{"c_office_id": 99001, "c_dy": 6, "c_office_chn": composed}]),
+    )
+    responses.add(
+        responses.GET,
+        SEARCH_URL,
+        json=paginator([{"c_office_id": 99001, "c_dy": 6, "c_office_chn": composed}]),
+    )
+    with pytest.raises(PreflightError, match="already exists in dynasty 6"):
+        assert_office_create_is_not_a_duplicate(
+            make_client(tmp_path), name=decomposed, dynasty_code=6
+        )
+    # Both spellings were queried, since the endpoint's LIKE is byte-based.
+    assert len(responses.calls) == 2
+
+
+@responses.activate
+def test_the_same_row_seen_twice_is_reported_once(tmp_path):
+    """Querying two spellings can return the same row twice; it must not turn into two
+    conflicts."""
+    responses.add(responses.GET, SEARCH_URL, json=paginator([ROW_12304]))
+    responses.add(responses.GET, SEARCH_URL, json=paginator([ROW_12304]))
+    conflicts = find_office_name_conflicts(
+        make_client(tmp_path), name="\ufa87", dynasty_code=6
+    )
+    assert len(conflicts) == 0  # 慎 is not 知州事; the point is it did not crash
+    assert len(responses.calls) == 2

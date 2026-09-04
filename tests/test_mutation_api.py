@@ -460,3 +460,128 @@ def test_office_create_refuses_the_plural_alias(tmp_path):
             approved_by="Hongsu Wang",
         )
     assert not responses.calls
+
+
+# --- office create: the duplicate guard must hold at THIS layer ----------------
+#
+# The guard used to live only in batch_runner, which meant a direct
+# `MutationApi.create("office", ...)` walked straight past it - and the server has no
+# duplicate protection of its own. These tests are the reason it moved here.
+
+OFFICE_SEARCH = "http://localhost:8000/api/select/search/office"
+
+
+def _office_create_changes():
+    return {
+        "name": "知某州事",
+        "type_ids": ["06", "06091204"],
+        "source_id": 3892,
+        "dynasty_code": 6,
+    }
+
+
+@responses.activate
+def test_office_create_runs_the_duplicate_check_before_writing(tmp_path):
+    api = make_api(tmp_path)
+    responses.add(
+        responses.GET, OFFICE_SEARCH,
+        json={"current_page": 1, "last_page": 1, "data": [], "total": 0},
+    )
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        json={"ok": True, "result": {"pk": {"c_office_id": 803856}, "status": "created"}},
+    )
+
+    api.create(
+        "office",
+        person_id=0,
+        target_pk={},
+        changes=_office_create_changes(),
+        resource_string="office",
+        approved_by="Hongsu Wang",
+    )
+
+    # The search happened FIRST, and carried no credentials (AGENTS.md rule 10).
+    assert responses.calls[0].request.url.startswith(OFFICE_SEARCH)
+    assert "Authorization" not in responses.calls[0].request.headers
+    assert responses.calls[1].request.url.endswith("/api/v2/create")
+
+
+@responses.activate
+def test_office_create_refuses_when_the_name_already_exists(tmp_path):
+    """No POST may be sent. This is the failure the server cannot detect for us."""
+    from cbdb_agent.preflight import PreflightError
+
+    api = make_api(tmp_path)
+    responses.add(
+        responses.GET, OFFICE_SEARCH,
+        json={
+            "current_page": 1, "last_page": 1, "total": 1,
+            "data": [{"c_office_id": 12304, "c_dy": 6, "c_office_chn": "知某州事"}],
+        },
+    )
+    responses.add(responses.POST, "http://localhost:8000/api/v2/create", json={"ok": True})
+
+    with pytest.raises(PreflightError, match="already exists in dynasty 6"):
+        api.create(
+            "office",
+            person_id=0,
+            target_pk={},
+            changes=_office_create_changes(),
+            resource_string="office",
+            approved_by="Hongsu Wang",
+        )
+
+    assert [c.request.method for c in responses.calls] == ["GET"]
+
+
+@responses.activate
+def test_office_update_does_not_run_the_duplicate_check(tmp_path):
+    """An update targets a known id; the check is about minting a second row."""
+    api = make_api(tmp_path)
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/mutate",
+        json={"ok": True, "result": {"pk": {"c_office_id": 12304}, "status": "updated"}},
+    )
+    api.update(
+        "office",
+        person_id=0,
+        target_pk={"c_office_id": 12304},
+        changes=_office_changes(),
+        resource_string="office",
+        approved_by="Hongsu Wang",
+    )
+    assert [c.request.method for c in responses.calls] == ["POST"]
+
+
+@responses.activate
+def test_a_failed_duplicate_check_blocks_the_office_create(tmp_path):
+    """"The check could not run" must not become "there is no duplicate"."""
+    from cbdb_agent.preflight import PreflightError
+
+    api = make_api(tmp_path)
+    responses.add(responses.GET, OFFICE_SEARCH, json={"message": "boom"}, status=500)
+    responses.add(responses.POST, "http://localhost:8000/api/v2/create", json={"ok": True})
+
+    with pytest.raises(PreflightError):
+        api.create(
+            "office",
+            person_id=0,
+            target_pk={},
+            changes=_office_create_changes(),
+            resource_string="office",
+            approved_by="Hongsu Wang",
+        )
+    assert not any(c.request.method == "POST" for c in responses.calls)
+
+
+@responses.activate
+def test_a_non_office_create_does_not_touch_the_search_endpoint(tmp_path):
+    """The guard is keyed on the resource; it must not add a round trip to every write."""
+    api = make_api(tmp_path)
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        json={"ok": True, "result": {"pk": {"c_personid": 900002}}},
+    )
+    api.create_person(900002, {"c_name_chn": "柳宗元"})
+    assert [c.request.method for c in responses.calls] == ["POST"]

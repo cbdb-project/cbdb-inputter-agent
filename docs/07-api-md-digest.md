@@ -440,9 +440,14 @@ same collision creates.
   mid-syllable at exactly 255 characters.
 
 **Referential guards** (all `409` unless noted): office `delete` while referenced by
-postings → `c_office_id: referenced_by_postings` with a `reference_count` — and that guard
-is load-bearing, because `POSTED_TO_OFFICE_DATA.c_office_id` is `ON DELETE CASCADE`, so
-bypassing it would delete other people's posting rows. Social-institution `delete` while
+postings → `c_office_id: referenced_by_postings` with a `reference_count`. ⚠️ A stale ⚠
+comment in `OfficeImportService::referenceCount()` calls that guard load-bearing because
+the FK is `ON DELETE CASCADE`; **it is not** — the schema says
+`POSTED_TO_OFFICE_DATA_ibfk_13 … ON DELETE RESTRICT ON UPDATE CASCADE`, and migration
+`2026_07_23_000000_restrict_fks_referencing_small_code_tables.php` is what flipped it
+(the base schema dump now contains no `ON DELETE CASCADE` at all). A leaked hard delete
+fails closed with errno 1451 instead of destroying postings. For schema facts read the
+schema; a source comment can go stale. Social-institution `delete` while
 referenced → `c_inst_code: referenced_by_person_data`; social-institution `update`
 renaming a referenced institution → `name: rename_blocked_while_referenced` (note **office
 rename is *not* blocked**). Text-entity `delete` while referenced →
