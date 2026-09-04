@@ -200,3 +200,98 @@ def test_same_dynasty_conflicts_are_reported_first(tmp_path):
     assert [c["c_office_id"] for c in conflicts] == [12304, 63858]
     described = describe_office_conflicts(conflicts)
     assert "same dynasty" in described and "dynasty 18" in described
+
+
+# --- pagination: the hole this check shipped with, and the cap ------------------
+#
+# `ApiController::searchOffice()` does `->paginate(20)` on a `LIKE %q%` with **no
+# orderBy**. Measured against production 2026-09-04: `q=知` reports total=1061 across 54
+# pages. So reading only page 1 could report "clean" while a same-dynasty duplicate sat
+# on page 2 - and which rows land on page 1 is not even stable between calls.
+
+
+def _page(rows, *, current, last, total=None):
+    return {
+        "current_page": current,
+        "last_page": last,
+        "per_page": 20,
+        "total": total if total is not None else last * 20,
+        "data": rows,
+    }
+
+
+@responses.activate
+def test_a_conflict_on_a_later_page_is_still_found(tmp_path):
+    """The regression guard for the shipped bug: page 1 holds only near misses."""
+    responses.add(
+        responses.GET,
+        SEARCH_URL,
+        json=_page(
+            [{"c_office_id": 11321, "c_dy": 6, "c_office_chn": "知軍州事"}],
+            current=1,
+            last=3,
+        ),
+    )
+    responses.add(responses.GET, SEARCH_URL, json=_page([], current=2, last=3))
+    responses.add(
+        responses.GET, SEARCH_URL, json=_page([ROW_12304], current=3, last=3)
+    )
+
+    with pytest.raises(PreflightError, match="already exists in dynasty 6"):
+        assert_office_create_is_not_a_duplicate(
+            make_client(tmp_path), name="知州事", dynasty_code=6
+        )
+    # All three pages were actually fetched, and page 1 carried no `page` param.
+    assert len(responses.calls) == 3
+    assert "page=" not in responses.calls[0].request.url
+    assert "page=2" in responses.calls[1].request.url
+    assert "page=3" in responses.calls[2].request.url
+
+
+@responses.activate
+def test_pagination_stops_at_the_last_page(tmp_path):
+    responses.add(responses.GET, SEARCH_URL, json=_page([], current=1, last=2))
+    responses.add(responses.GET, SEARCH_URL, json=_page([], current=2, last=2))
+    assert find_office_name_conflicts(
+        make_client(tmp_path), name="知某州事", dynasty_code=6
+    ) == []
+    assert len(responses.calls) == 2
+
+
+@responses.activate
+def test_a_result_set_too_large_to_scan_refuses_rather_than_passing(tmp_path):
+    """A one-character name matches over a thousand rows. Scanning 30 of 54 pages and
+    reporting "clean" would be the exact failure this module exists to prevent, so it
+    refuses and says to check by hand."""
+    responses.add(
+        responses.GET, SEARCH_URL, json=_page([], current=1, last=54, total=1061)
+    )
+    with pytest.raises(PreflightError, match="over this check's 30-page cap"):
+        assert_office_create_is_not_a_duplicate(
+            make_client(tmp_path), name="知", dynasty_code=6
+        )
+    # It must not have walked 30 pages before giving up.
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_a_bare_array_is_treated_as_a_complete_result_set(tmp_path):
+    """That shape carries no pagination metadata because it is not paginated - it must
+    not loop forever looking for a `last_page`."""
+    responses.add(responses.GET, SEARCH_URL, json=[ROW_12304])
+    with pytest.raises(PreflightError, match="already exists"):
+        assert_office_create_is_not_a_duplicate(
+            make_client(tmp_path), name="知州事", dynasty_code=6
+        )
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_a_failure_on_a_later_page_refuses(tmp_path):
+    """Half a result set is not a clean result set."""
+    responses.add(responses.GET, SEARCH_URL, json=_page([], current=1, last=2))
+    responses.add(responses.GET, SEARCH_URL, json={"message": "boom"}, status=500)
+    with pytest.raises(PreflightError, match="failed on page 2"):
+        assert_office_create_is_not_a_duplicate(
+            make_client(tmp_path), name="知某州事", dynasty_code=6
+        )

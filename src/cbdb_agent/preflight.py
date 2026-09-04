@@ -40,6 +40,13 @@ _OFFICE_SEARCH_PATH = "/api/select/search/office"
 # a conflict too, even though it is not the row's main name.
 _ALT_SEPARATOR = ";"
 
+# The endpoint is a Laravel paginator at 20 rows/page and it does a `LIKE %q%`, so a short
+# name matches a lot: `q=知` reports total=1061 across 54 pages (measured against
+# production, 2026-09-04). Reading only the first page would let a duplicate on page 2
+# through - and `searchOffice()` has no `orderBy`, so which rows land on page 1 is not even
+# stable. Every page has to be read.
+_PAGE_CAP = 30  # 600 rows; at the client's 1 req/s that is a ~30 s worst case
+
 
 class PreflightError(CbdbApiError):
     """The pre-flight check could not be completed, so it cannot vouch for anything.
@@ -96,6 +103,11 @@ def find_office_name_conflicts(
     most useful first: same-dynasty matches before cross-dynasty ones. An empty list
     means the live table has no office of that name.
 
+    Reads **every page**, not just the first. The endpoint paginates at 20 rows and does
+    a substring match with no `orderBy`, so a duplicate can sit on any page and which
+    rows appear first is not stable. Beyond `_PAGE_CAP` pages it raises instead of
+    scanning part of the result set and calling it clean.
+
     Deliberately queried **without** the endpoint's `c_dy` filter. That filter falls
     back to unfiltered when it finds nothing (`ApiController::searchOffice()`), so a
     filtered query cannot distinguish "no Tang match" from "no match at all, here is
@@ -113,16 +125,40 @@ def find_office_name_conflicts(
     if not wanted:
         raise PreflightError("cannot check for duplicates of an empty office name")
 
-    try:
-        body = client.get(_OFFICE_SEARCH_PATH, params={"q": wanted}, public=True)
-    except CbdbApiError as exc:
-        raise PreflightError(
-            f"office duplicate check failed ({exc}) - refusing to treat a failed check "
-            "as a clean one"
-        ) from exc
+    collected: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        params = {"q": wanted}
+        if page > 1:
+            params["page"] = page
+        try:
+            body = client.get(_OFFICE_SEARCH_PATH, params=params, public=True)
+        except CbdbApiError as exc:
+            raise PreflightError(
+                f"office duplicate check failed on page {page} ({exc}) - refusing to "
+                "treat a failed check as a clean one"
+            ) from exc
+
+        collected.extend(_rows(body))
+
+        # A bare-array response carries no pagination metadata; that shape is not
+        # paginated, so one request is the whole result set.
+        last_page = body.get("last_page")
+        if not isinstance(last_page, int) or last_page <= page:
+            break
+        if last_page > _PAGE_CAP:
+            raise PreflightError(
+                f"office name {wanted!r} matches {body.get('total')} rows across "
+                f"{last_page} pages of the search endpoint, over this check's "
+                f"{_PAGE_CAP}-page cap. Refusing rather than scanning part of the "
+                "result set and calling it clean: the endpoint does a substring match "
+                "with no stable ordering, so a duplicate could be on any page. Verify "
+                "by hand before creating this office."
+            )
+        page += 1
 
     conflicts = []
-    for row in _rows(body):
+    for row in collected:
         if wanted not in _names_of(row):
             continue
         row_dy = row.get("c_dy")
