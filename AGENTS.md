@@ -13,7 +13,10 @@ architecture and milestones), `docs/03-extraction-review-workflow.md` (source-te
 staging-file → human-review pipeline), `docs/04-field-whitelists.md` (per-resource
 allowed fields), `docs/05-testing-strategy.md` (mocking/fixture conventions),
 `docs/08-review-interface-design.md` (the offline review page and the
-`review.json` → `decisions.json` → `apply-review` round trip).
+`review.json` → `decisions.json` → `apply-review` round trip),
+`docs/11-salt-administration-design.md` (**which reference tables have no API write
+path at all** — read before promising a contributor that place-name or hierarchy data
+can be submitted).
 
 ## The target system's API contract — where it lives, and keeping it in sync
 
@@ -249,6 +252,19 @@ user how old the build is instead of quietly trusting it.
     The rest (`char-variant-map`, `social-institution`, `text-entity`, `merged-person`)
     are still unmodelled, so a staging file naming one is rejected as an unknown alias —
     a safe outcome, but by absence rather than by design.
+    **Separately, and more often the actual blocker: several reference tables have no
+    `/api/v2` write path at all, and no amount of modelling here will change that.**
+    `config/code_table_writes.php` in the target system registers exactly two creatable
+    tables, `TEXT_CODES` and `char_variant_map`; everything else 501s. So `ADDR_CODES`
+    is **update-only and only `c_name`**, `ADMIN_CAT_CODES` update-only and only
+    `c_admin_cat_py`, and `ADDR_BELONGS_DATA` (the address parent chain) and
+    `OFFICE_TYPE_TREE` are not writable through `/api/v2` in any form — they are
+    reachable only via the session-authenticated web `CodesController`, which rule 1
+    forbids. Do not go looking for a way around this: a new place name, a new address
+    hierarchy edge, or a new office-type node is **a finding you report and a
+    deliverable someone with database access loads**, not something this client
+    submits. Worked example, with the evidence and the export format:
+    `docs/11-salt-administration-design.md` §4–5.
     If you model one, set `requires_explicit_approval=True` on it — and note that
     the refusal messages in `staging.py` and `http_client.py` still assert the
     *code-table* rationale ("no delete path", "no way to undo it"), which is false for
