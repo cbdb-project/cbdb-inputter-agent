@@ -1545,3 +1545,95 @@ style" rested on one batch with a counterexample (office 202979's bare `8947`).
 **384 tests** (335 before this milestone). `tests/test_preflight.py` alone went 13 → 26,
 almost all of it pinning refusal paths — the distinction between "there is no duplicate"
 and "the check could not run" is the whole value of the module.
+
+---
+
+## Milestone: Ming/Qing salt administration design (`docs/11`) — 2026-09-10
+
+Design only; **no writes issued, no code changed**. `docs/11-salt-administration-design.md`
+specifies how Ning Hao's 明清六個鹽運使司 spreadsheet becomes CBDB rows, after the
+2026 thread in which Ning Hao proposed treating 轉運鹽使司/分司 as both office names and
+addresses, Fuller objected that addresses are invisible to CBDB analysis unless they
+connect spatially, Hongsu answered that the 治所 column exists to supply XY, and Chen
+Song agreed on precedent.
+
+**The finding that shapes everything: half of the request cannot be submitted through
+the sanctioned API.** `config/code_table_writes.php` — the registry
+`CodeTableCreateHandler` reads — has exactly two entries, `TEXT_CODES` and
+`char_variant_map`. `ADDR_CODES` is update-only and only `c_name`; `ADMIN_CAT_CODES` is
+update-only and only `c_admin_cat_py`; `ADDR_BELONGS_DATA` and `OFFICE_TYPE_TREE` have no
+`/api/v2` path at all, and are writable *only* through the session-authenticated web
+`CodesController`, which rule 1 forbids. `office` create is available and already
+modelled. So the design splits: Track A (51 units → 49 `office` creates, two blocked)
+through the client, Track B (`ADDR_CODES` + `ADDR_BELONGS_DATA`) as a reviewed export for
+someone with database access, plus a recommendation to ask upstream for an `address`
+aggregate.
+
+### Review-agent passes
+
+Three passes. The first (API/code claims) returned 0 blockers / 2 serious / 6 minor; the
+second (data modelling, run in parallel) **4 blockers / 7 serious / 7 minor**; the third,
+re-reviewing the revision, 1 blocker / 5 serious / 7 minor. Everything was verified
+independently against the snapshot and the target-system source before being acted on.
+
+The four original blockers, each a case where the wrong answer looks right:
+
+- **The 治所 resolution window used the `DYNASTIES` span, not the `ADDR_CODES`
+  convention.** `DYNASTIES` says Ming 1368–1644, but `ADDR_CODES` ends Ming rows at 1643
+  and starts Qing rows at 1644, so an overlap test against 1644 admits the whole Qing
+  block — **18 of 19 Ming 治所 names came back ambiguous**, with Ming/Qing rows carrying
+  *identical* coordinates so no coordinate test could separate them. Window is now
+  1368–1643 / 1644–1911; ambiguity drops to four names.
+- **`安東` resolved to Dandong.** The Qing sheet's 淮安分司 seat matches two rows 900 km
+  apart (`6794` Liaoning, `7583` Jiangsu). They are different places, not duplicate rows,
+  so the lowest-id tiebreak had no licence to fire — but would have. The tiebreak is now
+  gated on the candidates' coordinates agreeing.
+- **Shared boundary years.** Every seat move in the sheet gives both periods the same
+  boundary year (six in-unit, plus cross-unit successions like 青州分司→天津分司 at 1781),
+  which with inclusive `c_firstyear`/`c_lastyear` puts one unit in two places at once.
+- **A reversed range was indistinguishable from "no overlap".** 寧紹分司's `1793–1685`
+  intersects to empty, so its parent edge would have been dropped silently and the row
+  orphaned — in flat contradiction of the doc's own promise that nothing is silently
+  corrected.
+
+Also acted on: Qing `type_ids` now use the four named `20070403`–`06` nodes rather than
+the generic `20070402` alone (that whole `200704*` branch has **zero** existing
+`OFFICE_CODE_TYPE_REL` rows, so these are its first offices); the bare dynasty node was
+*dropped* from `type_ids` after checking that only 16 of 38 offices under `19072801` carry
+it and the four closest analogues carry none; `c_admin_cat_code = 0` was demoted from
+"alternative" to "degradation" once all 362 precedent jurisdiction rows turned out to
+carry a real category code; the coincident-point problem was quantified (nine groups,
+26 of 54 address rows — 清 兩浙 puts three rows on one 杭州府 point) instead of being
+answered with a `c_notes` disclaimer; and five spreadsheet defects the first draft missed
+were added to §3, one of them (嘉松分司's 備註 contradicting its 治所) blocking.
+
+One claim in the first revision was simply wrong and was corrected after a reviewer *ran*
+it: `target_pk: {}` on an `office` create does **not** fail validation. Both `models.py`
+and `staging.py` test `set(target_pk) & server_assigned_pk_fields`, which is empty for
+`{}`. Omitting the key is still right; there is just no guardrail, and saying there was
+one would have left a reader trusting a check that does not exist.
+
+### codex passes
+
+Three. The first returned 2 serious, both real:
+
+- §5.1 contradicted itself on 裁/併入 — the prose said such ends keep their year while
+  the succession table decremented 溫台分司 and 嘉興分司, which are described with exactly
+  those verbs. Resolved by making the test mechanical and independent of the prose: 止 is
+  decremented iff some listed period begins at exactly 止. 併入 with no successor starting
+  that year (黃崎分司 1677) is a terminus; 併入 with one (溫台分司 1685) is a handover.
+- **Track B had no 運司 → dynasty edge rule at all.** Only 分司 → 運司 was specified, so
+  every 運司 address row would have been generated as an orphan — precisely the "上層歸屬"
+  the request was about. Added, to `4329 明朝` / `6756 清朝`, matching the precedent.
+
+The second codex pass found the fix to the first had an **ordering** bug: validity (d)
+was documented after classification (a), so 寧紹分司's typo'd `1793` acted as a successor
+year and silently shortened its own first seat to `[1644,1792]` — a confident-looking row
+built entirely on the defect. The application order is now stated as (d) → (a) → (b) →
+(c), and a unit rejected by (d) contributes no successor years to its neighbours. The
+third pass re-derived every interval in both sheets independently, matched them
+row-for-row, and left one minor wording fix ("all 51 units" → the 49 that reach that
+stage), which was applied.
+
+Sign-off: 0 blockers, 0 serious outstanding. No code changed, so the suite is unchanged
+at **384 tests**.
