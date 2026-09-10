@@ -9,3 +9,7 @@ freezegun>=1.4,<2
 # nothing, which has already happened once. After installing, run:
 #     playwright install chromium
 playwright
+
+# Reads the salt-administration source spreadsheet (tools/salt-admin/build_dataset.py
+# and tests/test_salt_admin.py). A tools-only dependency, not needed to submit data.
+openpyxl>=3.1,<4

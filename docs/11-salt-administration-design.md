@@ -662,19 +662,32 @@ The rules, in order:
    Note 安東 in particular: the two rows are different *places*, not duplicates, so
    rule 4 has no licence to fire on them at all. That is why rule 3 runs first and why
    rule 4 is restricted below.
-4. Only where the surviving candidates have **matching coordinates** — CBDB's genuine
-   duplicate rows for the same place and period, `4631`/`4632` 泰州, `4454`/`4455` 滄州,
-   `4634`/`4635` 通州, `7242`/`700000` 天津 — take the lowest `c_addr_id` and record the
-   duplicate in the export. Coordinate agreement is the precondition, not an
-   observation: without it, "lowest id" is how 安東 becomes Dandong. This is a
-   pre-existing CBDB data issue, reported and not fixed here.
+4. Only where the surviving candidates are **the same row entered twice** — agreeing
+   on point, on `c_firstyear`/`c_lastyear` *and* on `c_admin_type` — take the lowest
+   `c_addr_id` and record the duplicate in the export. Three cases qualify:
+   `4631`/`4632` 泰州, `4454`/`4455` 滄州, `4634`/`4635` 通州. That agreement is the
+   precondition, not an observation: without it, "lowest id" is how 安東 becomes
+   Dandong. This is a pre-existing CBDB data issue, reported and not fixed here.
 
-   **"Matching" means to 5 decimal places (~1 m), not bit-identical**, and that
-   tolerance is load-bearing rather than defensive. CBDB stores the same point at
-   different precisions in different rows: `4634` is `120.85464478, 32.010471344` and
-   `4635` is `120.854645, 32.010471`. Under exact equality, rule 3 leaves both Nantong
-   rows standing, rule 4 refuses to break the tie, and rule 5 turns 明 通州分司 — the
-   very case §5.2 was written for — into a hard error.
+   **All three fields, not just the coordinates.** 清 天津 is why: `7242` (`Xian`,
+   1644–1911) and `700000` (`Wei`, 1644–1910) sit on an identical point and are *not*
+   a duplicate — they are a county and a guard, and choosing between them is the
+   anachronism question §3.11 raises. A coordinate-only test would settle it by id
+   sort while reporting it as "CBDB holds duplicate rows". It goes to rule 4a instead.
+
+4a. **A recorded decision**, for candidates that survive rule 3 and are not
+   duplicates. `salt_data.SEAT_DECISIONS` maps `(dynasty, seat)` to a chosen
+   `c_addr_id` **and the reasoning**, and using one raises a `warning`, so the choice
+   is visible in the review page rather than buried. Today it holds exactly one
+   entry, 清 天津 → `7242`. A candidate set with no box and no decision is rule 5.
+
+   **On "same point": an absolute tolerance of 1e-5° (~1 m), never a rounding.**
+   The two are not equivalent and the difference decides a real case. CBDB stores one
+   point at different precisions in different rows — `4634` is
+   `120.85464478, 32.010471344`, `4635` is `120.854645, 32.010471`. They are 2e-6
+   apart but fall either side of a 5-decimal-place boundary, so `round(x, 5)` puts
+   them in different buckets and 明 通州分司 — the very case §5.2 exists for — becomes
+   a hard error. Rounding compares positions on a grid; what is meant is distance.
 5. Anything still unresolved is a hard error the generator refuses to paper over, and
    it shows in the review page as unresolved. 未詳 (§3.3) is the one allowed
    "resolved to nothing", and it resolves to the sentinel `ADDR_CODES 0 [未詳]`
@@ -699,7 +712,8 @@ of these points coincide.** A 分司 seated in its parent's seat gets a coordina
 says nothing about the 分司 at all. Counted from the sheet:
 
 Computed over the rows actually emitted (so the two blocked units of §9 are excluded),
-grouping points rounded to 5 dp — nine groups, 26 of the 54 address rows:
+clustering points that agree within 1e-5 degrees (~1 m) — nine groups, 26 of
+the 55 address rows:
 
 | group | rows | point | which |
 |---|---|---|---|
@@ -716,8 +730,10 @@ grouping points rounded to 5 dp — nine groups, 26 of the 54 address rows:
 Three of these need saying out loud. **清 長蘆's天津 group crosses two `c_addr_id`s** —
 `7241 天津府` and `7242 天津` are different rows with *identical* coordinates, so a map
 stacks three markers where a row-count suggests two. **明 福建's pair likewise crosses
-two places**, 福州府 and 閩縣, the prefecture and its附郭 county, which CBDB stores at
-the same point to 5 dp but not to 6 — so exact-equality grouping would under-report it.
+two places**, 福州府 and 閩縣, the prefecture and its 附郭 county, stored 2e-6 apart —
+so exact-equality grouping misses it, and so does rounding to a grid, since the two
+values can fall either side of a boundary. The clustering uses the same distance
+tolerance as §5.2 rule 4, for the same reason.
 And **清 兩浙 becomes 4** if 嘉松分司 is unblocked (§9), which is the largest single
 pile-up in the dataset.
 
@@ -734,11 +750,21 @@ count per dynasty as a dataset-level statistic.
 `c_addr_id` is client-assigned in `ADDR_CODES` and there is no API to allocate one.
 `AGENTS.md` is explicit that the snapshot must **never** decide an ID allocation or a
 "does this already exist" check — a row added since the 2026-08-15 build is invisible in
-it. So the export uses **symbolic keys** (`salt:ming:lianghuai`,
-`salt:ming:lianghuai/taizhou@1368`) as the authoritative identity, and the belongs
-edges reference those symbols. A *suggested* numeric block is included alongside,
-clearly labelled as a suggestion the loader must verify against the live database
-before use.
+it. So the export uses **symbolic keys** as the authoritative identity, and the belongs
+edges reference those symbols:
+
+```
+salt:<ming|qing>:<region>:<unit name>@<first year>
+salt:ming:兩淮:兩淮都轉運鹽使司@1368
+salt:ming:長蘆:滄州分司@1611          ← the second seat period is its own row
+```
+
+**No numeric block is suggested anywhere.** An earlier draft proposed one; that was
+dropped, because any number this repo could offer would come from the weekly
+snapshot, and `AGENTS.md` is explicit that the snapshot must never decide an ID — a
+row added since the build is invisible in it. `track_b_load.sql` allocates instead
+from `MAX(c_addr_id)` on the **live** table, inside the transaction, and binds each
+row's id to a user variable so the edges never carry a hand-copied number.
 
 ## 6. Pipeline and files
 
@@ -806,8 +832,21 @@ loads a local `dataset.json`:
   legacy `v1` CRUD, not `/api/operations/*`. If the address rows are wanted in the
   database, either an upstream `address` aggregate is added, or a human with database
   access loads the reviewed export.
-- **No `TEXT_CODES` or `ADMIN_CAT_CODES` row created to unblock anything.** Both are
-  approval-gated or unavailable; a missing code is a finding reported to the user.
+- **No `TEXT_CODES` row created to unblock anything, and no code-table row created
+  *through this client* at all.** A missing code is a finding reported to the user
+  (§5 lists two: 福建運司志, 增修河東鹽法備覽). This is a rule about the *client*: it
+  is rule 12's approval gate plus the fact that `TEXT_CODES` create is the one
+  code-table write `/api/v2` exposes, so it is the one the agent could reach for.
+
+  **`ADMIN_CAT_CODES` is the deliberate exception, and it is worth being precise
+  about why**, because §5's Track B and this list looked contradictory until it was
+  written down. Nothing reaches `ADMIN_CAT_CODES` through the API — there is no
+  create path (§4) — so the two category rows are `INSERT`s inside the Track B
+  script, run by hand by a person with database access who is already deciding to
+  run it. The generator does not decide this on its own initiative either: it is
+  `--admin-cat {new,zero}`, the SQL says which mode produced it, and the choice is
+  §9.7's open item. What remains forbidden is the agent quietly minting a category
+  row to make a batch go through, which is what the rule is actually for.
 - **No snapshot-based existence check gating a write.** The generator's "does CBDB
   already have this office" pass is *advisory*, shown in the review page. Before a real
   submission, `preflight.assert_office_create_is_not_a_duplicate()` runs its **live**
