@@ -1,0 +1,625 @@
+<meta charset="utf-8">
+<!-- Required: this file is full of Chinese and is opened straight from disk or
+     a plain static server, neither of which sends a charset. Without it the
+     browser sniffs windows-1252, every 治所 name in the JS becomes mojibake,
+     and the dynasty lookup silently misses. -->
+<title>鹽運使司 Review</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Serif+TC:wght@500;700&display=swap">
+
+<style>
+/* ---------------------------------------------------------------------------
+   Palette: brine. A cool mineral ground rather than the usual warm cream, with
+   a salt-water teal accent. The two dynasties are the primary axis of the whole
+   dataset, so each gets its own hue - bronze for 明, indigo for 清 - and those
+   hues are used only for dynasty identity, never for state. Severity is a
+   separate, unmistakable scale.
+   --------------------------------------------------------------------------- */
+:root {
+  --ground:      #eef1f2;
+  --surface:     #fbfcfc;
+  --surface-2:   #e6eaec;
+  --line:        #cfd7da;
+  --line-soft:   #dfe5e7;
+  --ink:         #12191d;
+  --ink-2:       #47565e;
+  --ink-3:       #6d7f88;
+  --accent:      #0f6e77;
+  --accent-ink:  #ffffff;   /* text ON the accent - flips with it, see dark blocks */
+  --accent-soft: #d7e8ea;
+  --ming:        #9c5f28;
+  --ming-soft:   #f0e2d4;
+  --qing:        #2f5d8c;
+  --qing-soft:   #dce6f0;
+  --blocker:     #a8261c;
+  --blocker-soft:#f6ddda;
+  --warn:        #7d5800;
+  --warn-soft:   #f6ecd4;
+  --note:        #4a5c68;
+  --note-soft:   #e3e9ec;
+  --bar:         #9fb6bb;
+  --shadow:      0 1px 2px rgba(18,25,29,.06), 0 8px 24px -16px rgba(18,25,29,.28);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:      #0e1418;
+    --surface:     #151d22;
+    --surface-2:   #1d272d;
+    --line:        #2c3940;
+    --line-soft:   #232f35;
+    --ink:         #e8eef0;
+    --ink-2:       #a5b6bd;
+    --ink-3:       #7b8d95;
+    --accent:      #55b9c2;
+    --accent-ink:  #08171a;   /* the dark accent is light, so its text goes dark */
+    --accent-soft: #16343a;
+    --ming:        #d59a63;
+    --ming-soft:   #33251a;
+    --qing:        #8fb6dd;
+    --qing-soft:   #1a2734;
+    --blocker:     #f08b80;
+    --blocker-soft:#3a1a17;
+    --warn:        #e0b45c;
+    --warn-soft:   #332a12;
+    --note:        #9fb0b8;
+    --note-soft:   #1f2a30;
+    --bar:         #46606a;
+    --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"] {
+  --ground:      #0e1418;
+  --surface:     #151d22;
+  --surface-2:   #1d272d;
+  --line:        #2c3940;
+  --line-soft:   #232f35;
+  --ink:         #e8eef0;
+  --ink-2:       #a5b6bd;
+  --ink-3:       #7b8d95;
+  --accent:      #55b9c2;
+  --accent-ink:  #08171a;
+  --accent-soft: #16343a;
+  --ming:        #d59a63;
+  --ming-soft:   #33251a;
+  --qing:        #8fb6dd;
+  --qing-soft:   #1a2734;
+  --blocker:     #f08b80;
+  --blocker-soft:#3a1a17;
+  --warn:        #e0b45c;
+  --warn-soft:   #332a12;
+  --note:        #9fb0b8;
+  --note-soft:   #1f2a30;
+  --bar:         #46606a;
+  --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 14px/1.55 "IBM Plex Sans", "Noto Sans TC", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.han { font-family: "Noto Serif TC", "Songti TC", serif; }
+.mono {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.wrap { max-width: 1240px; margin: 0 auto; padding: 32px 24px 96px; }
+
+/* --- masthead ----------------------------------------------------------- */
+header.masthead { border-bottom: 2px solid var(--ink); padding-bottom: 18px; margin-bottom: 22px; }
+.eyebrow {
+  font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--accent); font-weight: 600; margin: 0 0 6px;
+}
+h1 {
+  font-family: "Noto Serif TC", serif; font-weight: 700;
+  font-size: clamp(26px, 3.4vw, 38px); line-height: 1.15; margin: 0 0 8px;
+  text-wrap: balance; letter-spacing: -.01em;
+}
+.standfirst { margin: 0; max-width: 68ch; color: var(--ink-2); font-size: 15px; }
+.provenance {
+  margin: 14px 0 0; font-size: 12px; color: var(--ink-3);
+  display: flex; flex-wrap: wrap; gap: 4px 18px;
+}
+
+/* --- the two-track banner ------------------------------------------------ */
+.tracks { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin: 22px 0; }
+.track { border: 1px solid var(--line); border-left-width: 4px; border-radius: 3px; background: var(--surface); padding: 14px 16px; }
+.track.a { border-left-color: var(--accent); }
+.track.b { border-left-color: var(--warn); }
+.track h2 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+.track p { margin: 0; font-size: 13px; color: var(--ink-2); }
+.track .verdict { font-weight: 600; color: var(--ink); }
+
+/* --- stat strip ---------------------------------------------------------- */
+.stats { display: flex; flex-wrap: wrap; gap: 0; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); overflow: hidden; }
+.stat { flex: 1 1 130px; padding: 12px 16px; border-right: 1px solid var(--line-soft); }
+.stat:last-child { border-right: 0; }
+.stat b { display: block; font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; font-size: 25px; font-weight: 500; line-height: 1.1; }
+.stat span { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+.stat.is-blocker b { color: var(--blocker); }
+
+/* --- section headings ---------------------------------------------------- */
+h2.sec {
+  font-family: "Noto Serif TC", serif; font-size: 20px; font-weight: 700;
+  margin: 40px 0 4px; padding-bottom: 6px; border-bottom: 1px solid var(--line);
+}
+h2.sec .count { font-family: "IBM Plex Mono", monospace; font-size: 13px; font-weight: 400; color: var(--ink-3); margin-left: 8px; }
+.sec-note { margin: 0 0 14px; font-size: 13px; color: var(--ink-2); max-width: 76ch; }
+
+/* --- findings ------------------------------------------------------------ */
+.finding { display: grid; grid-template-columns: 78px 1fr; gap: 0 14px; padding: 10px 0; border-bottom: 1px solid var(--line-soft); align-items: start; }
+.sev { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; font-weight: 600; padding: 3px 7px; border-radius: 2px; text-align: center; }
+.sev.blocker { background: var(--blocker-soft); color: var(--blocker); }
+.sev.warning { background: var(--warn-soft); color: var(--warn); }
+.sev.note    { background: var(--note-soft);  color: var(--note); }
+.finding .ftitle { font-weight: 600; }
+.finding .fdetail { color: var(--ink-2); font-size: 13px; }
+.finding .funit { font-size: 11px; color: var(--ink-3); }
+
+/* --- controls ------------------------------------------------------------ */
+.controls { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 0; margin-bottom: 4px; background: var(--ground); border-bottom: 1px solid var(--line); }
+.chip { font: inherit; font-size: 12px; padding: 5px 11px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); border-radius: 999px; cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 500; }
+.chip:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input.search { font: inherit; font-size: 13px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); color: var(--ink); min-width: 210px; flex: 1 1 210px; }
+.spacer { flex: 1 1 auto; }
+
+/* --- unit groups --------------------------------------------------------- */
+.group { border: 1px solid var(--line); border-radius: 3px; background: var(--surface); margin-bottom: 12px; overflow: hidden; box-shadow: var(--shadow); }
+.group > summary { list-style: none; cursor: pointer; padding: 11px 16px; display: flex; align-items: baseline; gap: 12px; background: var(--surface-2); border-bottom: 1px solid var(--line); }
+.group > summary::-webkit-details-marker { display: none; }
+.group > summary::before { content: "▸"; color: var(--ink-3); font-size: 11px; }
+.group[open] > summary::before { content: "▾"; }
+.gname { font-family: "Noto Serif TC", serif; font-weight: 700; font-size: 16px; }
+.dyn { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; font-weight: 600; padding: 2px 7px; border-radius: 2px; }
+.dyn.ming { background: var(--ming-soft); color: var(--ming); }
+.dyn.qing { background: var(--qing-soft); color: var(--qing); }
+.gmeta { font-size: 12px; color: var(--ink-3); margin-left: auto; }
+
+/* --- unit rows ----------------------------------------------------------- */
+.unit { border-bottom: 1px solid var(--line-soft); padding: 12px 16px 14px; }
+.unit:last-child { border-bottom: 0; }
+.unit.branch { padding-left: 34px; position: relative; }
+.unit.branch::before { content: ""; position: absolute; left: 18px; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.unit.is-blocked { background: var(--blocker-soft); }
+
+.uhead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
+.uname { font-family: "Noto Serif TC", serif; font-size: 15px; font-weight: 500; }
+.ushort { font-size: 12px; color: var(--ink-3); }
+.utrans { font-size: 12px; color: var(--ink-2); font-style: italic; }
+.tag { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; padding: 2px 6px; border-radius: 2px; border: 1px solid var(--line); color: var(--ink-3); }
+.tag.blocked { background: var(--blocker); border-color: var(--blocker); color: #fff; font-weight: 600; }
+
+/* two-track body: the office payload and the address rows, side by side */
+.ubody { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.15fr); gap: 16px; margin-top: 10px; }
+@media (max-width: 900px) { .ubody { grid-template-columns: 1fr; } }
+.pane { min-width: 0; }
+.pane > h4 { margin: 0 0 6px; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.pane.b > h4 { color: var(--warn); }
+
+dl.kv { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 2px 12px; margin: 0; font-size: 12.5px; }
+dl.kv dt { color: var(--ink-3); font-family: "IBM Plex Mono", monospace; font-size: 11.5px; }
+dl.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.null { color: var(--ink-3); font-style: italic; }
+
+/* seat rows + timeline */
+.seat { border-top: 1px solid var(--line-soft); padding-top: 7px; margin-top: 7px; }
+.seat:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+.seatline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 12.5px; }
+.years { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; font-weight: 500; }
+.arrow { color: var(--ink-3); }
+.coord { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--ink-2); }
+.coord.none { color: var(--blocker); }
+.track-line { position: relative; height: 7px; margin: 6px 0 2px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
+.track-line i { position: absolute; top: 0; bottom: 0; background: var(--bar); border-radius: 2px; }
+.unit.ming .track-line i { background: var(--ming); }
+.unit.qing .track-line i { background: var(--qing); }
+.belongs { margin-top: 5px; font-size: 11.5px; color: var(--ink-2); }
+.belongs > span, .belongs > b { margin-right: 5px; }
+.belongs .mono { margin: 0 4px; }
+.belongs b { font-weight: 500; color: var(--ink); }
+.belongs .han { font-size: 12.5px; }
+
+.belongs.rejected { color: var(--ink-3); }
+.rownotes { margin-top: 5px; font-size: 11.5px; }
+.rownotes > summary { cursor: pointer; color: var(--ink-3); }
+.rownotes > div { white-space: pre-line; padding: 5px 0 0 10px; color: var(--ink-2);
+  border-left: 2px solid var(--line); margin-top: 4px; }
+.decision { display: block; margin-top: 3px; font-size: 11px; color: var(--warn);
+  border-left: 2px solid var(--warn); padding-left: 6px; }
+.decision .mono { color: var(--ink-2); }
+.pill { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 2px; background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.ufind { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.ufind div { font-size: 12px; padding: 5px 8px; border-radius: 2px; }
+.ufind .blocker { background: var(--blocker-soft); color: var(--blocker); }
+.ufind .warning { background: var(--warn-soft); color: var(--warn); }
+.ufind .note { background: var(--note-soft); color: var(--note); }
+
+/* --- coincidence --------------------------------------------------------- */
+table.coin { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.coin th { text-align: left; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); border-bottom: 1px solid var(--line); padding: 6px 10px 6px 0; font-weight: 600; }
+table.coin td { border-bottom: 1px solid var(--line-soft); padding: 8px 10px 8px 0; vertical-align: top; }
+table.coin td.n { font-family: "IBM Plex Mono", monospace; font-weight: 500; font-size: 16px; width: 1%; }
+.scroll-x { overflow-x: auto; }
+
+.empty { padding: 40px; text-align: center; color: var(--ink-3); border: 1px dashed var(--line); border-radius: 3px; }
+footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 12px; color: var(--ink-3); }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap" id="app">
+  <div class="empty">Loading <span class="mono">dataset.json</span>…</div>
+</div>
+
+<script>
+/* The page holds no data. It reads data/salt-admin/dataset.json, produced by
+   tools/salt-admin/build_dataset.py, exactly as tools/review/index.html reads a
+   batch's review.json - see docs/08 for why the review surface is a committed,
+   network-free file rather than a page generated per batch. */
+
+const H = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const han = (s) => `<span class="han">${H(s)}</span>`;
+const nul = (v, fmt) => (v === null || v === undefined || v === "")
+  ? '<span class="null">null</span>' : (fmt ? fmt(v) : H(v));
+
+const DYN = { "明代": { cls: "ming", lo: 1368, hi: 1643 },
+              "清代": { cls: "qing", lo: 1644, hi: 1911 } };
+
+const SCHEMA = 2;   // must match build_dataset.py's `schema_version`.
+                    // v1 -> v2: `stats.units_blocked` became `units_excluded`, every
+                    // unit gained `emitted` (blocked in the source OR carrying a
+                    // blocker finding) and `romanization`/`romanization_alt`.
+
+let DATA = null;
+const filters = { dynasty: "all", kind: "all", only: "all", q: "" };
+
+function boot(data) {
+  if (data.schema_version !== SCHEMA) {
+    document.getElementById("app").innerHTML = `
+      <div class="empty">
+        <p>This page reads <span class="mono">schema_version ${SCHEMA}</span>;
+        that dataset is <span class="mono">${H(data.schema_version)}</span>.</p>
+        <p>Refusing to render it — a mis-rendered review is worse than none.
+        Re-run <span class="mono">tools/salt-admin/build_dataset.py</span>.</p>
+      </div>`;
+    return;
+  }
+  DATA = data;
+  render();
+}
+
+function render() {
+  const d = DATA, s = d.stats;
+  const blocked = d.units.filter(u => !u.emitted);
+  const app = document.getElementById("app");
+
+  app.innerHTML = `
+    <header class="masthead">
+      <p class="eyebrow">CBDB reference data · pre-submission review</p>
+      <h1>明清鹽運使司與分司</h1>
+      <p class="standfirst">Ning Hao's compilation of the Ming and Qing salt
+      administration, prepared for CBDB as <strong>both</strong> office names and
+      place names. Every row below is a proposed change to global reference data —
+      visible to every CBDB user and referenced by any number of person records.
+      Nothing here has been submitted.</p>
+      <p class="provenance">
+        <span>Source · ${H(d.source.xlsx)}</span>
+        <span>Snapshot · <span class="mono">${H(d.source.snapshot)}</span> (${H((d.source.snapshot_generated_at||"").slice(0,10))})</span>
+        <span>Generated · <span class="mono">${H(d.generated_at.slice(0,16).replace("T"," "))}</span></span>
+      </p>
+    </header>
+
+    <div class="tracks">
+      <div class="track a">
+        <h2>Track A · 官名表 <span class="pill">API</span></h2>
+        <p><span class="verdict">${H(s.office_creates)} <code>office</code> aggregate creates.</span>
+        Goes through the normal staged, previewed, audit-logged path. Approval-gated:
+        the batch stays refused until a named human signs <code>approved_by</code>.</p>
+      </div>
+      <div class="track b">
+        <h2>Track B · 地名表 <span class="pill" style="background:var(--warn-soft);color:var(--warn)">no API</span></h2>
+        <p><span class="verdict">${H(s.address_rows)} <code>ADDR_CODES</code> rows,
+        ${H(s.belongs_edges)} <code>ADDR_BELONGS_DATA</code> edges.</span>
+        <code>/api/v2</code> has no create path for either table, so these ship as a
+        transactional SQL script for someone with database access — not submitted by
+        this client.</p>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b>${H(s.units_total)}</b><span>units in source</span></div>
+      <div class="stat${s.units_excluded ? " is-blocker" : ""}"><b>${H(s.units_excluded)}</b><span>excluded</span></div>
+      <div class="stat"><b>${H(s.office_creates)}</b><span>office creates</span></div>
+      <div class="stat"><b>${H(s.address_rows)}</b><span>address rows</span></div>
+      <div class="stat"><b>${H(s.belongs_edges)}</b><span>parent edges</span></div>
+      <div class="stat${s.findings_blocker ? " is-blocker" : ""}"><b>${H(s.findings_blocker)}</b><span>blockers</span></div>
+      <div class="stat"><b>${H(d.coincident_points.length)}</b><span>shared points</span></div>
+    </div>
+
+    ${blocked.length ? `
+    <h2 class="sec">Excluded<span class="count">${blocked.length} units, absent from every output</span></h2>
+    <p class="sec-note">These are not deferred rows — they are not in the staging batch,
+    not in the CSVs and not in the SQL. Each has a defect in the source that no default
+    can settle honestly.</p>
+    ${blocked.map(u => `
+      <div class="finding">
+        <span class="sev blocker">blocked</span>
+        <div><div class="ftitle">${han(u.name_short)} <span class="ushort">${H(u.dynasty)}</span></div>
+        <div class="fdetail">${H(u.blocked_reason
+          || (DATA.findings.filter(f => f.unit_key === u.key && f.severity === "blocker")
+                .map(f => f.title + " — " + f.detail).join("; ")))}</div></div>
+      </div>`).join("")}` : ""}
+
+    <h2 class="sec">Findings<span class="count">${d.findings.length}</span></h2>
+    <p class="sec-note">Everything the generator noticed and did not silently correct.
+    A <em>note</em> records a decision it made under a stated rule; a <em>warning</em>
+    wants a human to look; a <em>blocker</em> stops the unit.</p>
+    <div id="findings">${d.findings.map(f => `
+      <div class="finding">
+        <span class="sev ${H(f.severity)}">${H(f.severity)}</span>
+        <div>
+          <div class="ftitle">${H(f.title)}</div>
+          <div class="fdetail">${H(f.detail)}</div>
+          ${f.unit_key ? `<div class="funit mono">${H(f.unit_key)}</div>` : ""}
+        </div>
+      </div>`).join("")}</div>
+
+    <h2 class="sec">Every proposed row<span class="count">by 運司, both tracks side by side</span></h2>
+    <p class="sec-note">The left pane is what goes to the API; the right pane is what
+    goes in the SQL script. They are two representations of one unit, which is the
+    whole point of the request. The bar under each seat shows the period against its
+    dynasty, so a gap, an overlap or a missing stretch reads without arithmetic.</p>
+
+    <div class="controls">
+      ${chip("dynasty", "all", "Both dynasties")}
+      ${chip("dynasty", "明代", "明")}
+      ${chip("dynasty", "清代", "清")}
+      ${chip("kind", "all", "All units")}
+      ${chip("kind", "運司", "運司 only")}
+      ${chip("kind", "分司", "分司 only")}
+      ${chip("only", "findings", "Has findings")}
+      ${chip("only", "multiseat", "Seat moved")}
+      ${chip("only", "nocoord", "No coordinate")}
+      <span class="spacer"></span>
+      <input class="search" id="q" type="search" placeholder="Search name, seat, code, note…" value="${H(filters.q)}">
+    </div>
+    <div id="groups"></div>
+
+    <h2 class="sec">Coincident points<span class="count">${d.coincident_points.length} groups</span></h2>
+    <p class="sec-note">Where a 分司 sits in its parent's seat, the copied coordinate
+    says nothing about the 分司 itself. A note in <code>c_notes</code> does not stop a
+    GIS join returning stacked markers, so the pile-ups are counted here rather than
+    left for a map to reveal.</p>
+    <div class="scroll-x"><table class="coin">
+      <thead><tr><th>n</th><th>Dynasty</th><th>運司</th><th>Point</th><th>Rows on it</th></tr></thead>
+      <tbody>${d.coincident_points.map(c => `
+        <tr>
+          <td class="n">${H(c.count)}</td>
+          <td><span class="dyn ${DYN[c.dynasty].cls}">${H(c.dynasty)}</span></td>
+          <td>${han(c.region)}</td>
+          <td class="mono">${H(c.x.toFixed(5))}, ${H(c.y.toFixed(5))}</td>
+          <td>${c.members.map(m => han(m)).join("、")}</td>
+        </tr>`).join("")}</tbody>
+    </table></div>
+
+    <footer>
+      Source note written into every <code>c_notes</code> on both tracks:
+      <span class="han">${H(d.source_note)}</span><br>
+      <code>c_source</code> / <code>source_id</code> is <code>0</code> (<span class="han">未詳</span>),
+      by decision — the dataset rests on four bodies of material and the column holds one.
+      Design and reasoning: <code>docs/11-salt-administration-design.md</code>.
+    </footer>
+  `;
+
+  app.querySelectorAll(".chip").forEach(b => b.addEventListener("click", () => {
+    const k = b.dataset.k, v = b.dataset.v;
+    filters[k] = (k === "only" && filters[k] === v) ? "all" : v;
+    render();
+  }));
+  const q = document.getElementById("q");
+  q.addEventListener("input", () => { filters.q = q.value; renderGroups(); });
+  q.addEventListener("keydown", e => e.stopPropagation());
+  renderGroups();
+}
+
+function chip(k, v, label) {
+  const on = filters[k] === v;
+  return `<button class="chip" data-k="${k}" data-v="${H(v)}" aria-pressed="${on}">${H(label)}</button>`;
+}
+
+function matches(u) {
+  if (filters.dynasty !== "all" && u.dynasty !== filters.dynasty) return false;
+  if (filters.kind !== "all" && u.kind !== filters.kind) return false;
+  const fs = DATA.findings.filter(f => f.unit_key === u.key);
+  if (filters.only === "findings" && fs.length === 0) return false;
+  if (filters.only === "multiseat" && u.addresses.length < 2) return false;
+  if (filters.only === "nocoord" && !u.addresses.some(a => a.x === null)) return false;
+  if (filters.q) {
+    const hay = [u.name, u.name_short, u.office.translation, u.office.pinyin,
+                 u.office.notes, u.key, ...u.addresses.map(a => a.seat.raw),
+                 ...u.addresses.map(a => String(a.seat.addr_id)),
+                 ...u.office.type_ids].join(" ").toLowerCase();
+    if (!hay.includes(filters.q.toLowerCase())) return false;
+  }
+  return true;
+}
+
+function renderGroups() {
+  const host = document.getElementById("groups");
+  const shown = DATA.units.filter(matches);
+  if (!shown.length) { host.innerHTML = `<div class="empty">No unit matches these filters.</div>`; return; }
+
+  const order = [];
+  const groups = new Map();
+  for (const u of DATA.units) {
+    const gk = u.dynasty + "|" + u.region;
+    if (!groups.has(gk)) { groups.set(gk, []); order.push(gk); }
+    groups.get(gk).push(u);
+  }
+
+  host.innerHTML = order.map(gk => {
+    const all = groups.get(gk);
+    const vis = all.filter(u => shown.includes(u));
+    if (!vis.length) return "";
+    const [dynasty, region] = gk.split("|");
+    const yunsi = all.find(u => u.kind === "運司");
+    const nBranch = all.filter(u => u.kind === "分司").length;
+    const nBlocked = all.filter(u => !u.emitted).length;
+    return `<details class="group" open>
+      <summary>
+        <span class="dyn ${DYN[dynasty].cls}">${H(dynasty)}</span>
+        <span class="gname">${H(yunsi ? yunsi.name : region)}</span>
+        <span class="gmeta">${nBranch} 分司${nBlocked ? ` · <span style="color:var(--blocker)">${nBlocked} excluded</span>` : ""}
+          · ${vis.length === all.length ? `${all.length} shown` : `${vis.length} of ${all.length} shown`}</span>
+      </summary>
+      ${vis.map(unitHTML).join("")}
+    </details>`;
+  }).join("");
+}
+
+function unitHTML(u) {
+  const d = DYN[u.dynasty];
+  const o = u.office;
+  const fs = DATA.findings.filter(f => f.unit_key === u.key);
+  const types = o.type_labels.map(t =>
+    `<span class="mono">${H(t.id)}</span> ${t.chn ? han(t.chn) : '<span class="null">unknown node</span>'}`).join("<br>");
+
+  return `<div class="unit ${d.cls} ${u.kind === "分司" ? "branch" : ""} ${u.emitted ? "" : "is-blocked"}">
+    <div class="uhead">
+      <span class="uname">${H(u.name)}</span>
+      ${u.kind === "分司" ? `<span class="ushort">${han(u.name_short)}</span>` : ""}
+      <span class="utrans">${H(o.translation)}</span>
+      ${u.emitted ? "" : `<span class="tag blocked">excluded · not emitted</span>`}
+      ${u.succession ? `<span class="tag">succeeded by ${H(u.succession.successor)} @${H(u.succession.year)}</span>` : ""}
+    </div>
+
+    ${!u.emitted ? `<div class="ufind"><div class="blocker">${H(u.blocked_reason || "Carries a blocker finding — see below.")}</div></div>` : `
+    <div class="ubody">
+      <div class="pane a">
+        <h4>Track A · OFFICE_CODES <span class="pill">create</span></h4>
+        <dl class="kv">
+          <dt>name</dt><dd>${han(o.name)}</dd>
+          <dt>name_alt</dt><dd>${nul(o.name_alt, han)}</dd>
+          <dt>translation</dt><dd>${H(o.translation)}</dd>
+          <dt>pinyin</dt><dd class="mono">${H(o.pinyin)}</dd>
+          <dt>dynasty_code</dt><dd class="mono">${H(o.dynasty_code)}</dd>
+          <dt>type_ids</dt><dd>${types}
+            ${o.type_ids.length > 1 ? `<span class="decision">decision · the generic
+              bureau node plus this region's named node; a 分司 gets the generic one
+              only</span>` : ""}</dd>
+          <dt>source_id</dt><dd class="mono">${H(o.source_id)} <span class="null">未詳</span></dd>
+          <dt>notes</dt><dd style="white-space:pre-line">${H(o.notes)}</dd>
+        </dl>
+        ${!(u.existing_office_matches || []).length ? `<div class="belongs" style="color:var(--ink-3)">
+          no similar OFFICE_CODES row in the snapshot — but this is an exact-name
+          scan against a weekly build, so it is weak evidence. The live preflight
+          check is what gates the write.</div>` : ""}
+        ${u.existing_office_matches && u.existing_office_matches.length ? `
+          <div class="ufind"><div class="warning">Snapshot shows similar existing offices:
+          ${u.existing_office_matches.map(m => `${H(m.c_office_id)} ${H(m.c_office_chn)}`).join("; ")}.
+          Advisory — the live preflight check decides.</div></div>` : ""}
+      </div>
+
+      <div class="pane b">
+        <h4>Track B · ADDR_CODES <span class="pill" style="background:var(--warn-soft);color:var(--warn)">SQL only</span></h4>
+        <dl class="kv" style="margin-bottom:8px">
+          <dt>c_name_chn</dt><dd>${han(u.name)}</dd>
+          <dt>c_name</dt><dd class="mono">${H(u.romanization)}
+            <span class="decision">decision · two-token alternative
+              <span class="mono">${H(u.romanization_alt)}</span></span></dd>
+          <dt>c_admin_type</dt><dd class="mono">${u.kind === "運司" ? "Duzhuanyunyanshisi" : "Fensi"}</dd>
+          <dt>c_admin_cat_code</dt><dd class="mono">${DATA.admin_cat_mode === "zero"
+            ? '0 <span class="null">[Unknown]</span>'
+            : "&lt;new:" + (u.kind === "運司" ? "Duzhuanyunyanshisi" : "Fensi") + "&gt;"}</dd>
+        </dl>
+        ${u.addresses.map(a => seatHTML(a, d, u)).join("")}
+      </div>
+    </div>`}
+
+    ${fs.length ? `<div class="ufind">${fs.map(f =>
+      `<div class="${H(f.severity)}"><strong>${H(f.title)}</strong> — ${H(f.detail)}</div>`).join("")}</div>` : ""}
+  </div>`;
+}
+
+function seatHTML(a, d, u) {
+  const span = d.hi - d.lo;
+  const left = ((a.first - d.lo) / span) * 100;
+  const width = Math.max(((a.last - a.first + 1) / span) * 100, 0.6);
+  const coord = a.x === null
+    ? `<span class="coord none">no coordinate</span>`
+    : `<span class="coord">${a.x.toFixed(5)}, ${a.y.toFixed(5)}</span>`;
+  return `<div class="seat">
+    <div class="seatline">
+      <span class="years">${H(a.first)}–${H(a.last)}</span>
+      <span class="arrow">治所</span>
+      ${han(a.seat.raw)}
+      <span class="mono" style="color:var(--ink-3)">${a.seat.addr_id === null ? "unresolved" : "ADDR_CODES " + H(a.seat.addr_id)}</span>
+      <span class="arrow">→</span>
+      ${coord}
+    </div>
+    <div class="track-line" title="${H(a.first)}–${H(a.last)} within ${H(d.lo)}–${H(d.hi)}">
+      <i style="left:${left}%;width:${width}%"></i>
+    </div>
+    ${(a.seat.rejected && a.seat.rejected.length) ? `<div class="belongs rejected">
+      discarded by the coordinate box · ${a.seat.rejected.map(r =>
+        `<span class="mono">${H(r.addr_id)}</span> ${H(r.admin_type || "")}
+         <span class="mono">${H(r.x)}, ${H(r.y)}</span>`).join(" · ")}</div>` : ""}
+    ${(a.seat.duplicates && a.seat.duplicates.length) ? `<div class="belongs rejected">
+      duplicate CBDB rows, not used · ${a.seat.duplicates.map(id =>
+        `<span class="mono">${H(id)}</span>`).join(" · ")}</div>` : ""}
+    <div class="belongs">隸屬 ${a.belongs.map(b =>
+      `<b>${H(b.parent_name)}</b> <span class="mono">${b.parent_addr_id !== null ? "ADDR_CODES " + H(b.parent_addr_id) : "new row"}</span> <span class="years">${H(b.first)}–${H(b.last)}</span>`
+    ).join(" · ") || '<span class="null">no parent</span>'}</div>
+    ${a.end_rule ? `<div class="belongs" style="color:var(--ink-3)">end year · ${H(a.end_rule)}${a.clamped ? " · clamped to parent" : ""} &nbsp; seat match · ${H(a.seat.rule)}</div>` : ""}
+    <details class="rownotes"><summary>c_notes</summary><div>${H(a.notes)}</div></details>
+  </div>`;
+}
+
+/* Inlined payload (published copy) > the generator's output directory > a sibling
+   file > the file picker. The page lives in tools/salt-admin/ and the data lands in
+   data/salt-admin/, so the relative path out of the repo is tried first; a copy
+   sitting next to the page also works. Opened from file://, every fetch fails
+   silently in some browsers, which is what the picker is for. */
+const SOURCES = ["../../data/salt-admin/dataset.json", "dataset.json"];
+
+function tryLoad(i) {
+  if (i >= SOURCES.length) return Promise.reject(new Error("no dataset"));
+  return fetch(SOURCES[i])
+    .then(r => (r.ok ? r.json() : Promise.reject(new Error(r.status))))
+    .catch(() => tryLoad(i + 1));
+}
+
+/* Two-argument .then, not .then().catch(): a .catch() here would also swallow a
+   throw from boot() and report it as "file not found", which is exactly what it did
+   the first time this page was run. Only a LOAD failure reaches showPicker; a
+   rendering bug stays an unhandled rejection and shows up in the console. */
+if (window.SALT_DATASET) {
+  boot(window.SALT_DATASET);
+} else {
+  tryLoad(0).then(boot, () => {
+    document.getElementById("app").innerHTML = `
+      <div class="empty">
+        <p>Could not read <span class="mono">data/salt-admin/dataset.json</span>.
+        Opening this page straight from <span class="mono">file://</span> blocks the
+        read in most browsers — either serve the repo root
+        (<span class="mono">python -m http.server</span>) or pick the file below.</p>
+        <p>Generate it with<br>
+        <span class="mono">python tools/salt-admin/build_dataset.py --xlsx &lt;path&gt;</span><br>
+        then pick <span class="mono">data/salt-admin/dataset.json</span>:</p>
+        <p><input type="file" accept="application/json" id="pick"></p>
+      </div>`;
+    document.getElementById("pick").addEventListener("change", e => {
+      const f = e.target.files[0];
+      if (f) f.text().then(t => boot(JSON.parse(t)));
+    });
+  });
+}
+</script>

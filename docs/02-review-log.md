@@ -1637,3 +1637,96 @@ stage), which was applied.
 
 Sign-off: 0 blockers, 0 serious outstanding. No code changed, so the suite is unchanged
 at **384 tests**.
+
+---
+
+## Milestone: salt-administration generator, review page and Track A batch — 2026-09-10
+
+`tools/salt-admin/` (`salt_data.py`, `build_dataset.py`, `emit_staging.py`,
+`index.html`) implements `docs/11`. It reads Ning Hao's spreadsheet plus the weekly
+snapshot and emits: `dataset.json`, the Track B CSVs and `track_b_load.sql`, and a
+49-proposal Track A staging batch. **No writes were issued.** `validate --staging`
+reports 49 errors, all of them the rule-12 approval gate and nothing else, which is
+the correct resting state.
+
+### Review-agent passes
+
+Two, on the generator. The first returned **2 blockers / 6 serious / 11 minor**; the
+second, after the rewrite, **0 / 6 / 13**.
+
+The two blockers were both of the "ships wrong data quietly" kind:
+
+- **`c_name` was wrong on all 55 address rows.** `romanize_compact` — documented in
+  `salt_data.py` as the form for *one* name part — was applied to the whole
+  four-part name, producing `Lianghuaiduzhuanyunyanshisitongzhoufensi`. Neither the
+  four-token form `docs/11` §5 chose nor anything `ADDR_CODES` contains.
+- **A `blocker` finding blocked nothing.** Only the hand-curated `SD.BLOCKED` list
+  suppressed a unit; an unresolvable 治所 or an orphaned address row was recorded and
+  then exported anyway, exit 0. It was latent only because all three current blockers
+  happen to sit on the two hand-blocked units. `emitted` now means "not hand-blocked
+  *and* carrying no blocker finding", it gates both CSVs and the SQL, and the run
+  exits non-zero.
+
+The second pass found the fix to the second blocker had a hole of its own:
+`_attach_belongs` still chose parents by `u["blocked"]`, so a 運司 excluded by a
+*finding* was still used as a parent — both CSVs landed referencing a symbolic key
+the SQL never binds, and only the SQL raised, after the files were on disk. Emission
+is now settled in two passes around `_attach_belongs`, and `assert_exportable()`
+refuses before anything is written.
+
+Also acted on across the two passes: the SQL had two silent-corruption paths (no
+`SET NAMES utf8mb4`, so a latin1 client commits mojibake rather than failing; and 562
+`\n` escapes that depend on MySQL expanding backslashes, which
+`sql_mode=NO_BACKSLASH_ESCAPES` turns off); the duplicate-row tiebreak compared only
+coordinates, so 清 天津 `7242` (縣) and `700000` (衛) — same point, different
+`c_admin_type` and span — were being resolved by id sort while being *reported* as
+"CBDB holds duplicate rows", which is how the 天津縣/天津衛 anachronism question
+(`docs/11` §3.11) would have been answered by accident; a coordinate box was skipped
+whenever only one candidate matched, which is exactly when it stops protecting
+anything; the box's rejected candidates reached `dataset.json` and stopped there,
+invisible to the reviewer they exist for; `read_sheet` carried `region` forward from
+`None`; and `addresses.csv` left the NOT NULL `c_admin_cat_code` blank.
+
+### The test suite was the largest finding
+
+A reviewer mutation-tested the first version: **17 separate breakages of the design's
+load-bearing rules left all 31 tests green** — the Ming window widened to 1644,
+`SUCCESSIONS` emptied, `BLOCKED` emptied, the 運司→dynasty edge dropped, `SqlVars`
+made to collide, `_valid` hard-wired to `True`. One test that claimed to pin rule (d)
+passed a `blocked` set that skipped the code under test entirely.
+
+The suite was rewritten around an end-to-end build against the real spreadsheet, plus
+`tests/test_salt_admin_staging.py` for the emitter (which had none at all, including
+for the approval gate: `approved_by: None -> "auto"` and `resource: office ->
+offices` both survived). **29 mutants were then re-run and all 29 are caught**;
+`tests/test_salt_admin.py` documents which mutation each assertion kills.
+
+### codex passes
+
+Four, all on the load script, since that is the artifact a human runs against the
+live database. Each pass found something the previous one had not.
+
+1. **`MAX(c_addr_id)+n` was unsafe under concurrency, and the verification could not
+   see it.** A concurrent insert takes an allocated id, our INSERT fails on the PK,
+   and `COUNT(*) WHERE c_addr_id > @addr_base` still reads 55 — 54 of ours plus one
+   stranger — while one row is missing and its edges point elsewhere. Now
+   `SELECT ... ORDER BY c_addr_id DESC LIMIT 1 FOR UPDATE`, and every count is scoped
+   to the exact allocated range *and* to this dataset's `c_admin_type`.
+   Same pass: no test compared the SQL's coordinate columns to the dataset, so
+   emitting `a["y"]` for `x_coord` — every longitude replaced by its latitude, all 55
+   rows — went unnoticed.
+2. **The gap lock only exists under `REPEATABLE READ`**, which the script never
+   required; and the category section's read-then-insert was not atomic, with
+   `c_admin_cat_py` carrying no unique key, so two sessions could both add it. The
+   isolation level is now pinned, `ADMIN_CAT_CODES` is locked before it is read, the
+   codes are re-read *by name* rather than trusted from the arithmetic, and a seventh
+   check counts them.
+3. **Re-running the whole script duplicated everything while all checks passed**,
+   because every check is scoped to the range that run allocated.
+4. The guard added for (3) was a reporting `SELECT`, not a stop, and it ran *before*
+   the lock — so two concurrent runs both saw zero. It is now an abort
+   (`SELECT (SELECT 1 FROM … UNION ALL SELECT 1)` fails with 1242 when the dataset is
+   present) placed *after* the tail lock, which is what serializes concurrent runs.
+   codex confirmed the interleaving closes, including in `--admin-cat zero` mode.
+
+Sign-off: 0 blockers, 0 serious. **514 tests** (384 before this milestone).
