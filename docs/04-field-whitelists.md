@@ -476,6 +476,97 @@ and the worked batch: **`docs/10-office-aggregate-design.md`**. What `models.py`
   `GET /api/select/search/office` and `batch_runner.fetch_current_values()` reports
   "couldn't fetch" for an aggregate proposal — expected, not a bug.
 
+## 16. addr_codes (`ADDR_CODES`) — a code table, not person data ⚠️
+
+Opened for creation by upstream commits dated 2026-09-10, pulled and modelled
+here 2026-09-11 (`API.md` §13.2; `config/code_table_writes.php`).
+Approval-gated: `requires_explicit_approval=True`. **Every field below is writable on
+both `create` and `update`** — upstream's `CodeTableWriteConfigDriftTest` keeps the
+two registries in step for the four tables added that day.
+
+| field | notes |
+|---|---|
+| `c_name` | romanization. No single house convention exists in this table; see `docs/11` §5 |
+| `c_name_chn` | **required by this client** (`required_create_fields`) — a place with no Chinese name is unusable and, with no delete path, permanent |
+| `c_alt_names` | |
+| `c_firstyear` / `c_lastyear` | smallint; an out-of-range value is 422 `out_of_range:<min>..<max>`, not a truncation |
+| `c_admin_type` | free varchar (`Xian`, `Fu`, `Xunfu`, `Duzhuanyunyanshisi`, …) |
+| `c_admin_cat_code` | **NOT NULL**, FK → `ADMIN_CAT_CODES` `ON DELETE RESTRICT`; rejects `""` as well as null |
+| `x_coord` / `y_coord` | |
+| `CHGIS_PT_ID` | null unless the row really *is* that CHGIS point |
+| `c_notes` | `longtext`, exempt from the 255-char cap |
+
+PK `c_addr_id`, **server-assigned** (`max+1` when the key is given in neither
+`target.pk` nor `changes`). Never supply one — `models.py` refuses.
+
+- **No delete** (`403` on `mode=direct`, `501` on `mode=proposal`). Every column is
+  updatable, so a wrong *value* is correctable; a wrong *row* is not removable.
+- **No dedupe and no unique key on `c_name_chn`** — sending the same place twice makes
+  two rows. Unlike `ADMIN_CAT_CODES`, this one has a sanctioned live read
+  (`GET /api/select/search/addr`), so check before creating; `tools/salt-admin/
+  live_state.find_existing_addresses()` is the worked example.
+- **`ADDRESSES` is a derived cache** rebuilt only by
+  `php artisan cbdb:regenerate-addresses-table`. Rows created here are invisible to
+  posting autofill and dynasty homonym disambiguation until someone runs it.
+- **`/api/v2/get` cannot read this resource** (`501`), so rule 11's read-back is the
+  create response's `result.row`, or `GET /api/select/search/addr` afterwards.
+
+## 17. addr_belongs_data (`ADDR_BELONGS_DATA`) — the least reversible write here ⚠️
+
+The hierarchy edge: which place this place belonged to, and when.
+
+| field | notes |
+|---|---|
+| `c_source` | `TEXT_CODES.c_textid`; `0` is the "unknown" sentinel |
+| `c_pages` | |
+| `c_notes` | |
+
+PK `(c_addr_id, c_belongs_to, c_firstyear, c_lastyear)` — **all four required, none
+assigned**. A composite key has no "next id", so upstream will not allocate any part
+of it; `server_assigned_pk_fields` is empty, and `staging.find_issues()` therefore
+requires the complete key, with values, on create.
+
+**This is the one table in the client where a mistake cannot be repaired at all.**
+There is no delete, and the update whitelist is the three columns above — the key is
+write-once. A wrong parent or a wrong year is permanent. Two specific traps:
+
+- **Out-of-range key values are refused**: 422
+  `target.pk.<column>: ["out_of_range:<min>..<max>"]`. `c_firstyear`/`c_lastyear` are
+  smallint, and the guard is there because without it, outside strict sql_mode,
+  `40000` would store as `32767` while the response echoed `40000` — the row would
+  land on a key you did not specify, on the one table whose key can never be fixed.
+- **A parent that does not exist yet is `422 changes: ["foreign_key_violation"]`.**
+  Create the parent place first. When the parent is created in the same batch, carry
+  its id as `{"ref": "<proposal id>"}` and let `batch_runner` substitute the real
+  `result.pk` (`staging.substitute_pk_refs`).
+
+## 18. admin_cat_codes (`ADMIN_CAT_CODES`) — the FK target `addr_codes` needs ⚠️
+
+| field | notes |
+|---|---|
+| `c_admin_cat_py` | **required by this client** |
+| `c_admin_cat_hz` | **required by this client** |
+| `c_admin_cat_trans` | |
+| `c_notes` | `longtext`, exempt from the 255-char cap |
+
+PK `c_admin_cat_code`, server-assigned. Both name columns are required on create
+because a category with neither is unusable, undeletable, and the FK target of every
+`ADDR_CODES` row that picks it.
+
+- **No read endpoint of any kind** — no `/api/select/*`, and `/api/v2/get` is `501`.
+  This is the table that forced `tools/salt-admin/live_state.py`: the only way to ask
+  "does this already exist?" is to compose the weekly snapshot's state at its build
+  date with every `GET /api/v2/operations` row for the table since.
+- **No unique key on the names, and duplicates already exist** (`Dao` is both 道 and
+  島; also `Diqu`, `Jun`, `Shi`). Two rows with one name split every `ADDR_CODES`
+  reference between them, permanently.
+- **No audit columns.** `c_created_by`/`c_created_date` do not exist on this table, so
+  nothing is stamped; the operator and time are still recorded in `operations` and
+  `audit_log`.
+- Rows are ordered alphabetically by `c_admin_cat_py` in the live table, but the
+  server allocates `max+1`, so a new row appends. That is a display convention, not a
+  constraint.
+
 ## Source citations
 
 - `app/Support/CompositePrimaryKey.php` (`SCHEMAS` const) — authoritative PK schema

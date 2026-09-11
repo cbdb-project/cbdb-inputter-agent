@@ -110,7 +110,19 @@ understand, rather than mis-rendering a newer shape.
   `""` are rendered *differently* — they mean different things to this API
   (`API.md` §1.4), and a reviewer must be able to tell them apart.
 - **Decisions persist in `localStorage`** per batch, so a stray reload doesn't lose
-  an hour of review.
+  an hour of review — **but only onto the proposal they were made about.** Both the
+  batch id and the generated proposal ids survive a regeneration unchanged, so
+  "per batch" was not narrow enough: re-running a generator after settling an open
+  question brought every stored decision, signatures included, back onto rows whose
+  values had changed, and the header read "0 missing approvals" with nobody having
+  typed anything. Since schema 3 each proposal carries a `content_hash` over what
+  actually gets written (`resource`, `operation`, `person_id`, `target_pk`,
+  `changes` — deliberately not `source_quote`, `confidence` or the issue list, which
+  do not change what is sent). The page stores it with each decision and drops the
+  ones whose hash has moved, saying how many and how many were signatures; every
+  exported decision carries it; and `apply_decisions` refuses one whose hash does
+  not match — but only when the decision would actually change something, so
+  re-running `apply-review` on a file it has already applied is still a no-op.
 
 ## 4. Deliberately out of scope
 
@@ -124,6 +136,12 @@ understand, rather than mis-rendering a newer shape.
   submit this row".
 - **Replacing `preview.md`.** It still stands alone with no browser, and is what a
   terminal-only or CI context reads. Tier 1 must keep working (`docs/06` §2).
+- **Deciding *for* a reviewer.** The bulk-approval control writes one name, typed
+  once, onto the rows currently visible — it is a remedy for typing the same name
+  114 times, not a shortcut past reading. It confirms against a dialog naming each
+  table in the selection and what that table cannot undo, it honours the active
+  filters so it never signs a row that is off screen, and it leaves rows already
+  signed individually alone.
 
 ## 4a. One coupling to keep in mind
 
@@ -150,7 +168,8 @@ tests/test_review_page.py        the page itself, driven in headless Chromium
 ```
 
 `apply_decisions()` is **strict**: an unknown proposal or conflict id, a foreign
-`batch_id`, or a mismatched `schema_version` is a hard refusal, not a partial apply.
+`batch_id`, a mismatched `schema_version`, or a decision whose `content_hash` is not
+the one this staging file carries is a hard refusal, not a partial apply.
 A decisions file that no longer matches its batch means one of the two has moved on,
 and applying only the half that still matches is how a reviewer ends up believing
 they settled something they didn't.

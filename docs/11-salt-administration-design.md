@@ -1,6 +1,48 @@
 # Ming/Qing salt administration (鹽運使司 / 分司) as both offices and addresses — design
 
-Status: design. No writes issued. Written 2026-09-10.
+Status: **superseded in its two central claims, 2026-09-11.** Read this header
+before anything below it.
+
+Written 2026-09-10, when the API could not create an address and the office half
+looked like the submittable half. Both turned out the other way round within a day:
+
+1. **Track A is dropped.** A separate import on 2026-09-11 (43 `OFFICE_CODES`
+   creates, 01:42 UTC) already covers the salt administration as *office titles* —
+   鹽使司分司同知, 鹽運司委員, 督銷鹽局委員 and so on. Ning Hao's list names the
+   *institutions*, and checked against production not one of the 49 matches, under
+   any spelling, in any dynasty — they are two different columns of one subject. The
+   user decided the institutions belong in `ADDR_CODES` alone, which was Ning Hao's
+   proposal to begin with, and which avoids the objection §5 Track A already
+   recorded against itself: an office row makes a person appointable to a bureau
+   rather than to a post.
+2. **Track B is no longer an export.** Upstream opened `ADDR_CODES`,
+   `ADDR_BELONGS_DATA`, `ADMIN_CAT_CODES` and `OFFICE_TYPE_TREE` for writing in
+   commits `ea6badb0`, `ba2d0ec6` and `76ac0a47` — all dated 2026-09-10, pulled
+   here on 2026-09-11 — explicitly in answer to §4 of this document.
+   All 55 address rows, 57 edges and 2 category codes now go through the ordinary
+   staged, previewed, audit-logged path. `track_b_load.sql` is superseded and kept
+   only as a record of what was proposed.
+
+**Which sections still govern, precisely.** The first draft of this header said
+"§1–§3 and §5.1–§5.4", which was too generous in both directions — three of those
+sections describe the transport, and two later ones were left standing while saying
+the opposite of what the code now does. The honest list:
+
+| section | status |
+|---|---|
+| §1 precedent, §2 target tables, §3 the spreadsheet's defects | **governs** — the data, not the transport. One exception: §2's aside that `OFFICE_TYPE_TREE` has "no API path to add one" is false since 2026-09-11; it is one of the six creatable tables. |
+| §4 what the API could not do | **history.** Read it for how the gap was established, not for what the API allows. |
+| §5.1 interval arithmetic, §5.2 治所 resolution, §5.3 coordinates | **governs.** |
+| §5.4 identity and id allocation | **superseded, and rewritten in place.** It used to describe client-assigned `c_addr_id`, symbolic keys and `MAX(c_addr_id)` in a SQL transaction; as rewritten it is the only place the `{"ref": ...}` mechanism is spelled out, so read it. |
+| §5 Track B preamble, §6 pipeline, §7 review surface, §8 "what must not happen", §9 items 7 and 10 | **superseded**, and rewritten in place below rather than left to contradict this header. |
+
+What the new path adds, and §5.4 did not anticipate: `c_addr_id` is server-assigned,
+so the belongs-to edges cannot name their own parents in advance. They carry
+`{"ref": "<proposal id>"}` and `batch_runner` substitutes each create's `result.pk`
+at submit time (`staging.substitute_pk_refs`). That is why the whole thing is one
+batch rather than "load the parents, then generate the children": the edges are the
+irreversible half — no delete, and the four-column key is not updatable — so the
+reviewer has to be able to sign the real document, not a promise of one.
 
 The request: record the seven Ming and six Qing 都轉運鹽使司 and their 分司 in CBDB
 **twice** — once as office names (`OFFICE_CODES`) and once as place names
@@ -35,9 +77,11 @@ Fuller / Chen Song):
   and the general question of how postings addresses get XY coordinates is a larger
   open issue to be discussed in Boston.
 
-§4 is the part to read if you read only one section: **half of this cannot be
-submitted through the sanctioned API at all**, and that is a property of the target
-system, not of this client.
+If you read only one section, read §5.1: the interval arithmetic is where this
+dataset is actually difficult, and it is the part that decides what lands in the four
+columns of an `ADDR_BELONGS_DATA` key — the one thing here that can never be
+corrected. (§4, which used to carry this pointer, is now history: it recorded that
+half of this could not be submitted at all, which stopped being true on 2026-09-11.)
 
 ---
 
@@ -89,8 +133,13 @@ matching `分司` or `轉運`, and no 鹽法道/鹽運使司 among the 20101+ Qi
 - No row named 兩淮都轉運鹽使司 / 泰州分司 / etc. in either dynasty.
 
 `OFFICE_TYPE_TREE` — which is where an office's "上層歸屬" lives — already has the
-right hangers, so **no new tree nodes are needed** (which is fortunate, since there is
-no API path to add one — §4):
+right hangers, so **no new tree nodes are needed**:
+
+> Superseded 2026-09-11. This used to add "which is fortunate, since there is no API
+> path to add one". There is now: `office-type-tree` is one of the six creatable code
+> tables (`API.md` §13.2), with a text primary key, a three-column update and a
+> `tree_cycle` guard. Nothing here needs it, but "impossible" was the wrong reason.
+
 
 ```
 19 明朝 › 1907 牧鹽舶政類 › 190728 鹽課鹽運門 › 19072801 都轉鹽運使司
@@ -136,7 +185,7 @@ and none is silently corrected.
    occupied before the commission that sat in it existed. Probably the 治所 column was
    filled with the dynasty span rather than the unit's span.
 3. **明代 北平河間都轉運鹽使司 (1369–1373) has 治所 = 未詳.** No coordinates are
-   possible. It still gets an office row and an address row: the address row takes its
+   possible. It still gets an address row (it would have had an office row too, before Track A was dropped): the address row takes its
    span from the 起/止 columns (`1369–1372` after §5.1's conversion), not from a seat
    period it does not have, and `c_notes` records the seat as
    `治所：未詳（ADDR_CODES 0）` — `0 [未詳] / [Unknown]` is CBDB's standing sentinel
@@ -179,7 +228,16 @@ and none is silently corrected.
    derived from its 治所 spans. Where the sheet gives a 新治所 the two spans share their
    boundary year — see §5.1, which is where that is turned into non-overlapping rows.
 
-## 4. The blocker: the API cannot create addresses
+## 4. The blocker, as it stood on 2026-09-10: the API could not create addresses
+
+> **History, not the current contract.** Every "no write path" verdict in this section
+> was true when it was written and was closed by upstream the same day — the
+> finding here is what
+> prompted the change. `ADDR_CODES`, `ADDR_BELONGS_DATA`, `ADMIN_CAT_CODES` and
+> `OFFICE_TYPE_TREE` are all creatable now (`API.md` §13.2, `AGENTS.md` rule 12,
+> `docs/07` §2.2). Kept because how the gap was established — reading the registries
+> rather than the prose — is the method to reuse next time, and because the record of
+> what was asked for and why is worth having.
 
 **Checked against upstream, not from memory.** `git fetch origin develop` in the
 `cbdb-online-main-server` checkout on 2026-09-10 put `origin/develop` at `6f0c7f0a`;
@@ -206,6 +264,8 @@ a pre-existing digest debt this task exposed rather than caused, and per `AGENTS
 ("upstream wins and the digest is the thing that's wrong — fix it") it should be
 resynced and logged in `docs/02-review-log.md`. Recorded here so it is not lost;
 doing it is not in this task's scope and nothing here depends on it.
+
+(Verdicts as of 2026-09-10. All four "no create path" rows were opened the next day.)
 
 | target | write path | verdict |
 |---|---|---|
@@ -240,7 +300,13 @@ So the work splits in two, and the split is not negotiable from inside this repo
 
 ## 5. The two tracks
 
-### Track A — offices, through the API (submittable)
+### Track A — offices, through the API — **dropped 2026-09-11**
+
+> Not submitted, and `tools/salt-admin/emit_staging.py` now refuses to run. A separate
+> import had already entered the salt-administration *post titles*, and Ning Hao's list
+> names the *institutions* (see the header). The section is kept because the objection
+> it records against itself — that an office row makes a person appointable to a bureau
+> rather than to a post — is the reason the decision went the way it did.
 
 One `office` aggregate `create` per unit — 51 units, of which **2 are blocked pending
 Ning Hao** (§9: 清代 寧紹分司, 嘉松分司), so the first batch is **49 creates**. One
@@ -410,12 +476,32 @@ Every one of these is approval-gated (`requires_explicit_approval` on the `offic
 spec). `staging.find_issues()` will refuse the batch as a **structural error** until a
 human puts their name in `approved_by`. **That field is not the agent's to fill.**
 
-### Track B — addresses, as a reviewed deliverable (not submittable)
+### Track B — addresses, through the API — **this is what ships**
 
-Same dataset, emitted as `ADDR_CODES` + `ADDR_BELONGS_DATA` rows in a form somebody
-with database-side access can load, plus the review page that justifies each row. It
-does **not** go through this client, and no part of this repo will try to sneak it
-through a non-`/api/v2` route.
+Same dataset, emitted as `ADDR_CODES` + `ADDR_BELONGS_DATA` rows — since 2026-09-11 as
+an ordinary staging batch, submitted by this client through `/api/v2/create` like
+anything else. `tools/salt-admin/emit_addresses.py` writes it; `validate --staging`
+previews it; `tools/review/index.html` is where it is signed.
+
+> Superseded wording, 2026-09-11. This section used to open "as a reviewed deliverable
+> (not submittable)" and to say the rows go to "somebody with database-side access".
+> They do not: `track_b_load.sql` is a historical artefact. What survives unchanged is
+> everything below about the *row shape*, which is the same whether it is INSERTed or
+> POSTed.
+
+Two things the API path adds that the export did not have:
+
+* **The parent ids do not exist when the batch is written.** `c_addr_id` is
+  server-assigned, so a 分司's edge to its 運司 carries `{"ref": "<proposal id>"}` and
+  `batch_runner` substitutes the parent create's `result.pk` at submit time. That is
+  why it is one batch and not two phases: `ADDR_BELONGS_DATA` is the irreversible half,
+  so the reviewer has to sign the real document.
+* **A duplicate check runs before anything is emitted.** Neither table has a unique key
+  on its names and neither can be deleted, so `tools/salt-admin/live_state.py` asks
+  `/api/select/search/addr` for every place name and composes snapshot-plus-operations
+  for every category, and the generator refuses to emit if either answer is "already
+  there" or "cannot tell". The result is written into the batch, so the signature
+  covers the evidence as well as the rows.
 
 Row shape, following the `Xunfu` precedent plus coordinates:
 
@@ -450,8 +536,13 @@ and any new category row must be inserted **before** the `ADDR_CODES` rows that
 reference it or the insert fails.
 
 `ADMIN_CAT_CODES` has no code for either type (211 rows, max code 225, nothing matching
-鹽 or 分司) and no create path either. So the loader must either add two category rows
-or set `c_admin_cat_code = 0` (`[Unknown]`, which exists and is the column default).
+鹽 or 分司). It **does** have a create path now, so the choice is between adding two category
+rows through the API and setting `c_admin_cat_code = 0` (`[Unknown]`, which exists
+and is the column default). The choice is made once, at
+`build_dataset.py --admin-cat {new,zero}`, and recorded in `dataset.json`;
+`emit_addresses.py` follows it and **refuses** a `--admin-cat` that disagrees,
+because the review page renders the dataset's value and the two silently differing
+is not something a reviewer could see.
 
 **These two options are not equally precedented, and the export says so.** Every one of
 the 362 jurisdiction rows in §1's seven groups carries a *real* category code, and
@@ -471,15 +562,32 @@ jurisdiction rows in CBDB with an unknown category. The export defaults to the n
 rows and carries `0` as the labelled fallback, rather than presenting them as a
 coin-flip.
 
-If new rows are chosen, **this repo does not pick their numbers.** `226`/`227` would be
-`max(snapshot)+1`, which is exactly the snapshot-decides-an-ID-allocation move §5.4
-refuses for `c_addr_id`, and the objection is identical: a row added since the
-2026-08-15 build is invisible here. The loader allocates against the live table. Two
-things worth telling them: the table is ordered **alphabetically by
-`c_admin_cat_py`** (`221 Zizhizhou`, `222 Zong`, `223 Zongdu`, `224 Zongguanfu`,
-`225 Zongzhi`), not append-ordered, so appending at the end would be the first
-break in that convention; and the two entries wanted are
+If new rows are chosen, **this repo does not pick their numbers** — and no longer
+needs to. `226`/`227` would have been `max(snapshot)+1`, exactly the
+snapshot-decides-an-allocation move §5.4 refuses for `c_addr_id`. The server assigns
+`max+1` on the live table instead, and `models.py` declares `c_admin_cat_code`
+server-assigned so the client cannot supply one. The two entries wanted are
 `Duzhuanyunyanshisi 都轉運鹽使司` and `Fensi 分司`.
+
+Two consequences worth stating rather than discovering:
+
+* **Ordering.** The table is ordered **alphabetically by `c_admin_cat_py`**
+  (`221 Zizhizhou`, `222 Zong`, `223 Zongdu`, `224 Zongguanfu`, `225 Zongzhi`), not
+  append-ordered. Server-side `max+1` appends, so these two rows will be the first
+  break in that convention. That is now unavoidable through the API, and it is a
+  display-order convention, not a constraint — but nobody should be surprised by it.
+* **Duplicates.** The table has no unique key on its name columns and no read
+  endpoint, so sending a category twice makes two rows and splits every `ADDR_CODES`
+  reference between them, permanently. `tools/salt-admin/live_state.py` composes the
+  answer from the snapshot baseline plus every `operations` row since, the generator
+  refuses to emit if the answer is "already there" or "more than one", and the
+  evidence is written into the batch for the signer to see. There is no flag to skip
+  it.
+
+The ordering constraint that has not changed: a new category row must be created
+**before** the `ADDR_CODES` rows that reference it, or the create fails — now with
+`422 changes: ["foreign_key_violation"]` rather than a SQL FK error. Proposal order
+handles it (`staging.topological_submission_order`).
 
 ### 5.1 One address row per seat period — and the interval arithmetic that makes it work
 
@@ -745,26 +853,43 @@ were independently located. So the coincidence is **counted and displayed** in t
 review page (§7) rather than left for a map to reveal, and the generator emits the
 count per dynasty as a dataset-level statistic.
 
-### 5.4 Address IDs are not assigned by this repo
+### 5.4 Address IDs are assigned by the server
 
-`c_addr_id` is client-assigned in `ADDR_CODES` and there is no API to allocate one.
-`AGENTS.md` is explicit that the snapshot must **never** decide an ID allocation or a
-"does this already exist" check — a row added since the 2026-08-15 build is invisible in
-it. So the export uses **symbolic keys** as the authoritative identity, and the belongs
-edges reference those symbols:
+`c_addr_id` is **server-assigned**: a create that names no key gets `max(c_addr_id)+1`
+(`API.md` §13.2), and the value comes back in `result.pk`. Nothing in this repo picks
+an id, and nothing may: `AGENTS.md` is explicit that the weekly snapshot must never
+decide an allocation or a "does this already exist" answer, because a row added since
+the build is invisible in it.
 
+That creates the one structural problem this batch has. An `ADDR_BELONGS_DATA` row's
+primary key is (`c_addr_id`, `c_belongs_to`, `c_firstyear`, `c_lastyear`), and for a
+分司 under its 運司 **both** ids are values the server has not minted yet. So the edge
+carries a reference instead:
+
+```yaml
+target_pk:
+  c_addr_id:    {ref: addr-ming-兩淮-泰州分司-1368}
+  c_belongs_to: {ref: addr-ming-兩淮-兩淮都轉運鹽使司-1368}
+  c_firstyear:  1368
+  c_lastyear:   1643
 ```
-salt:<ming|qing>:<region>:<unit name>@<first year>
-salt:ming:兩淮:兩淮都轉運鹽使司@1368
-salt:ming:長蘆:滄州分司@1611          ← the second seat period is its own row
-```
 
-**No numeric block is suggested anywhere.** An earlier draft proposed one; that was
-dropped, because any number this repo could offer would come from the weekly
-snapshot, and `AGENTS.md` is explicit that the snapshot must never decide an ID — a
-row added since the build is invisible in it. `track_b_load.sql` allocates instead
-from `MAX(c_addr_id)` on the **live** table, inside the transaction, and binds each
-row's id to a user variable so the edges never carry a hand-copied number.
+`staging.topological_submission_order` puts the parents first, `batch_runner` records
+each create's `result.pk`, and `staging.substitute_pk_refs` rewrites the references
+just before the request is built. A reference that cannot be resolved raises rather
+than going out as a literal dict — which would land as a NULL *inside a primary key*,
+on the one table whose key can never be corrected.
+
+The dataset still carries the symbolic keys it always did
+(`salt:ming:長蘆:滄州分司@1611`), because they are what makes a seat period
+identifiable across a regeneration; they are now the proposal ids, not the database
+identity.
+
+> Superseded 2026-09-11. This section previously said `c_addr_id` is *client*-assigned
+> with no API to allocate one, and described `track_b_load.sql` taking
+> `MAX(c_addr_id)` inside a transaction and binding user variables. That was the right
+> design for the SQL route and is the wrong one now; following it would mean inventing
+> ids the server would reject or, worse, colliding with ones it had assigned.
 
 ## 6. Pipeline and files
 
@@ -772,89 +897,120 @@ One directory for everything this task adds to the repo, named the way `tools/re
 already is:
 
 ```
-明清六個鹽運使司情況（完整版）.xlsx
-        │  tools/salt-admin/build_dataset.py   (reads the xlsx + the snapshot)
-        ▼
-data/salt-admin/dataset.json                   canonical, both tracks, all findings
-        │
-        ├── tools/salt-admin/emit_staging.py ──▶ data/staging/<batch>/proposal.yaml
-        │                                          │ python -m cbdb_agent validate --staging
-        │                                          ▼  review.json + preview.md
-        │                                        tools/review/index.html   (Track A review)
-        │
-        ├──▶ data/salt-admin/addresses.csv
-        │    data/salt-admin/addr_belongs.csv           (Track B deliverable)
-        │
-        └──▶ tools/salt-admin/index.html + dataset.json (whole-dataset review, §7)
+tools/salt-admin/
+    salt_data.py        the curated decisions: source note, dynasty windows, seat
+                        variants and boxes, blocked units, successions, romanization
+    build_dataset.py    xlsx -> data/salt-admin/dataset.json  (+ the CSV/SQL
+                        byproducts below), and every finding the arithmetic raised
+    index.html          the whole-dataset review page, reads dataset.json
+    emit_addresses.py   dataset.json -> data/staging/<batch>/proposal.yaml   <- ships
+    live_state.py       the pre-create duplicate checks emit_addresses depends on
+    emit_staging.py     Track A. Dropped 2026-09-11; main() refuses to run.
+
+data/salt-admin/          (gitignored - generated, and derived from unpublished data)
+    dataset.json          the single source every consumer reads
+    addresses.csv         byproduct: the ADDR_CODES rows, for reading in a spreadsheet
+    addr_belongs.csv      byproduct: the edges, likewise
+    track_b_load.sql      superseded. The transactional loader from the no-API era,
+                          kept as a record of what was proposed, not a route to take.
+
+data/staging/<batch-id>/  (gitignored)
+    proposal.yaml         the 114 proposals - 2 categories, 55 places, 57 edges
+    preview.md            written by `validate --staging`
+    review.json           likewise; what tools/review/index.html reads
 ```
 
-`data/salt-admin/` is gitignored like the rest of `data/`: the generator and the page
-are the durable, reviewable-as-code artifacts, and the data is reproducible from the
-spreadsheet plus a snapshot at any time. It needs a `.gitignore` entry of its own —
-the existing rules name `data/inbox`, `data/processed` and `data/staging` individually
-rather than ignoring `data/*`.
+The path, end to end:
+
+```
+xlsx ──▶ build_dataset.py ──▶ dataset.json ──▶ emit_addresses.py ──▶ proposal.yaml
+                                   │                   │
+                                   │                   └─ live_state.py: duplicate
+                                   │                      checks, refuses on doubt
+                                   └─ tools/salt-admin/index.html (the data review)
+
+proposal.yaml ──▶ validate --staging ──▶ review.json ──▶ tools/review/index.html
+                                              │                   │
+                                         preview.md          decisions.json
+                                                                  │
+                     proposal.yaml ◀── apply-review ──────────────┘
+                          │
+                          └──▶ submit --staging   (then: php artisan
+                                                   cbdb:regenerate-addresses-table)
+```
+
+The CSVs and the SQL are byproducts now, not the deliverable. `build_dataset.py`
+still writes them because they are the easiest way to read 55 rows at a glance in a
+spreadsheet; nothing downstream consumes them.
 
 ## 7. Review surface
 
-Track A alone could ride the existing `tools/review/index.html` — it is a normal
-staging batch and gets code labels, the approval-gate panel and bulk conflict
-resolution for free. But a reviewer cannot judge this dataset from proposal rows: the
-questions are "is this hierarchy right", "did the seat move when the source says it
-moved", "is this point in the right province", and those are questions about the
-dataset, not about individual field values.
+Two pages, because they answer two different questions.
 
-So there is a second, purpose-built page, `tools/salt-admin/index.html`, built on the
-same principles as `docs/08` — one committed HTML file, no data inside it, no network,
-loads a local `dataset.json`:
+**`tools/salt-admin/index.html`** — the *data* review, reading `dataset.json`. Every
+unit, both readings side by side, each seat period drawn against its dynasty so a gap
+or an overlap reads without arithmetic, plus every finding the generator raised and
+the coincident-point check. This is where you decide whether the *dataset* is right.
+The office panels are kept in it, labelled as dropped, because the two readings side
+by side is what the original request was about.
 
-- 運司 → 分司 tree per dynasty, with each unit's seat periods nested under it;
-- a Gantt-style timeline so a gap, an overlap or a reversed range (§3.1) is visible
-  rather than arithmetic;
-- the coordinate copy shown as *seat → point*, with the seat's own `c_addr_id` and name;
-- both tracks side by side per unit — the `OFFICE_CODES` payload and the `ADDR_CODES`
-  row(s) it corresponds to — since the whole point of the request is that they are two
-  representations of one thing;
-- **a coincident-point count per dynasty** (§5.3): which units share a point, and how
-  many. This is the one statistic that answers Fuller's objection honestly, and it
-  cannot be seen by reading rows;
-- every finding from §3 attached to the row it concerns;
-- the two per-row judgements a CBDB editor may want to overturn, shown as decisions
-  rather than as settled: the Qing `type_ids` choice (§5, Track A) and the four-token
-  `c_name` romanization (§5, Track B);
-- an explicit, unmissable marker on Track B rows saying they are **not** submittable
-  through this client.
+**`tools/review/index.html`** — the *batch* review, reading `review.json`. The 114
+proposals exactly as they will be sent, grouped by table (`person_id: 0` means a row
+belongs to no person, so grouping by person is meaningless here), each with its
+resolved code labels, its source quote, and the rule-12 approval box. This is where
+the batch is signed.
+
+Three things the batch page had to gain for this dataset:
+
+* **Per-table risk wording on the approval box.** What is irreversible differs
+  sharply: an `ADDR_CODES` row cannot be deleted but every column stays editable; an
+  `ADDR_BELONGS_DATA` row cannot be deleted *or* have its four-column key changed.
+  Telling a reviewer the same worst case for both teaches them to ignore it.
+* **A bulk signature.** 114 separate boxes is fatigue, not scrutiny. One name, typed
+  once, confirmed against a dialog that lists each table in the selection and what it
+  cannot undo. Rows already signed individually are left alone.
+* **A content hash per proposal.** Proposal ids and batch ids both survive a
+  regeneration, so a signature stored in the browser (or sitting in a `decisions.json`)
+  used to re-attach itself to rows whose values had since changed. Both the page and
+  `apply-review` now refuse a signature given for a different version of the row.
 
 ## 8. What must not happen
 
-- **No `approved_by` written by the agent.** Track A is approval-gated and the batch
-  stays refused until a human signs it (`AGENTS.md` rule 12).
-- **No Track B write attempted through any route.** Not `CodesController`, not the
-  legacy `v1` CRUD, not `/api/operations/*`. If the address rows are wanted in the
-  database, either an upstream `address` aggregate is added, or a human with database
-  access loads the reviewed export.
-- **No `TEXT_CODES` row created to unblock anything, and no code-table row created
-  *through this client* at all.** A missing code is a finding reported to the user
-  (§5 lists two: 福建運司志, 增修河東鹽法備覽). This is a rule about the *client*: it
-  is rule 12's approval gate plus the fact that `TEXT_CODES` create is the one
-  code-table write `/api/v2` exposes, so it is the one the agent could reach for.
+Rewritten 2026-09-11. The original list forbade the three things this branch now
+does — Track B through the API, a code-table create from this client, an
+`ADMIN_CAT_CODES` row that is not a hand-run `INSERT` — because on 2026-09-10 none of
+them had a sanctioned route. They do now. What the section was actually protecting is
+unchanged, so here it is against the current shape:
 
-  **`ADMIN_CAT_CODES` is the deliberate exception, and it is worth being precise
-  about why**, because §5's Track B and this list looked contradictory until it was
-  written down. Nothing reaches `ADMIN_CAT_CODES` through the API — there is no
-  create path (§4) — so the two category rows are `INSERT`s inside the Track B
-  script, run by hand by a person with database access who is already deciding to
-  run it. The generator does not decide this on its own initiative either: it is
-  `--admin-cat {new,zero}`, the SQL says which mode produced it, and the choice is
-  §9.7's open item. What remains forbidden is the agent quietly minting a category
-  row to make a batch go through, which is what the rule is actually for.
-- **No snapshot-based existence check gating a write.** The generator's "does CBDB
-  already have this office" pass is *advisory*, shown in the review page. Before a real
-  submission, `preflight.assert_office_create_is_not_a_duplicate()` runs its **live**
-  check, which is the only one that counts.
+* **No write outside `/api/v2`.** Unchanged and absolute. The SQL loader was written
+  for a human with database access precisely so that this client would not be the one
+  bypassing the audit log; now that the endpoints exist, nothing needs a second route
+  at all. `track_b_load.sql` is a record, not a fallback.
+* **No `approved_by` filled in by the agent.** 114 proposals, every one gated,
+  every one `null` until a named human types their name. The generator is tested
+  by parsing its own AST for that, not by grepping it.
+* **No invented primary key.** `c_addr_id` and `c_admin_cat_code` come from the
+  server's `result.pk`; the snapshot may never decide an allocation. An unresolvable
+  `{"ref": ...}` raises instead of going out as a literal.
+* **No create without a duplicate check.** Both tables lack a unique key on their
+  names and both lack a delete path, so an unanswered "is it already there?" is not a
+  risk to accept. The check is mandatory, its result is recorded in the batch, and
+  "cannot tell" stops the run exactly like "already there".
+* **No silent regeneration over a reviewed file.** An existing `proposal.yaml` may
+  carry signatures; a batch id already under `data/processed/` has already been
+  submitted. Both refuse.
+* **No blocked unit smuggled through.** 清代 寧紹分司 and 嘉松分司 are absent from
+  every output, not present-and-deferred, until Ning Hao answers §9.
 
 ## 9. Open items for the user / Ning Hao
 
-**Blocking — the generator refuses to emit these units until they are answered:**
+**Blocking — the generator refuses to emit these units until they are answered.**
+Answering one means re-running `build_dataset.py` and `emit_addresses.py`, which
+produces a new `proposal.yaml` — and every proposal id in it is derived from the
+source row, so the ids are the same while the values may not be. Signatures do not
+carry over: each proposal now ships a content hash, and both the review page and
+`apply-review` refuse a signature given for a different version of a row (§7). Expect
+to re-review the rows that changed.
 
 1. §3.1 清代 寧紹分司. Two defects, not one: the reversed `1793 → 1685`, *and* the
    1644–1793 first seat that outlives the merge recorded on 寧紹溫台分司. Blocks the
@@ -870,14 +1026,19 @@ loads a local `dataset.json`:
    columns win.
 5. §3.11 清代 長蘆's 天津府 from 1677 is an anachronism (天津衛 until 1725). Default:
    resolve as the sheet writes it; `700000 天津 (Wei) 1644–1910` is the alternative.
-6. The Qing `type_ids` choice and the four-token `c_name` romanization (§5) — both are
-   this design's judgement, both are shown per-row in the review page.
+6. The four-token `c_name` romanization (§5) — this design's judgement, shown
+   per-row in the review page. (The Qing `type_ids` choice was the other half of this
+   item; it belonged to the dropped Track A office payloads and no longer arises.)
 
-**For whoever loads Track B:**
+**Still open, for the user:**
 
 7. `c_admin_cat_code`: add two `ADMIN_CAT_CODES` rows (`Duzhuanyunyanshisi 都轉運鹽使司`,
    `Fensi 分司`), or use `0 [Unknown]`. The column is NOT NULL with an FK, so there is
-   no third option, and if rows are added they must be inserted first (§5, Track B).
+   no third option. Now a build-time flag rather than a note to a loader:
+   `build_dataset.py --admin-cat {new,zero}`, recorded in `dataset.json` and followed
+   by `emit_addresses.py`, with the two creates ordered ahead of the addresses that
+   reference them. The precedent argues for `new` (§5, Track B); the batch as generated takes
+   it, and the two category proposals are signed separately from the rest.
 8. Whether to create `TEXT_CODES` rows for **福建運司志** and **增修河東鹽法備覽**,
    neither of which CBDB has (§5, Track A). Reported as a finding only — a code-table
    create needs the user's named approval under rule 12, and nothing here depends on it
@@ -885,7 +1046,11 @@ loads a local `dataset.json`:
 9. ~~Whether to keep `source_id: 0`.~~ **Settled 2026-09-10 by the user:** the code
    stays `0` and the four source bodies go into `c_notes` verbatim (§5, Track A). Not
    reopened without a decision on how to represent four sources in a one-valued column.
-10. Whether an `address` entity aggregate should be requested from
-   `cbdb-online-main-server`. Everything in Track B would become ordinary,
-   audit-logged, rate-limited API work if it existed, and the same gap will block the
-   next 巡撫/兵備道-shaped contribution too.
+10. ~~Whether an `address` entity aggregate should be requested from
+   `cbdb-online-main-server`.~~ **Closed 2026-09-11**, by a different route than
+   asked for: upstream added `ADDR_CODES`, `ADDR_BELONGS_DATA`, `ADMIN_CAT_CODES` and
+   `OFFICE_TYPE_TREE` to the code-table write registry rather than building an
+   aggregate. Track B is ordinary, audit-logged, rate-limited API work now. The one
+   thing an aggregate would still have given is transactional grouping: the 114 rows
+   go one request at a time, so a mid-batch failure leaves the earlier rows written.
+   `batch_runner` isolates and reports that, but it cannot undo it.

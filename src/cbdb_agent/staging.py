@@ -338,6 +338,27 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
                     ),
                 )
             )
+        elif spec.requires_explicit_approval:
+            # Length is a submit-time rule in mutation_api; front-run it here, or a
+            # batch signed with a pasted paragraph validates clean and then fails
+            # per-proposal mid-run - the same class of gap as the key check above.
+            from .mutation_api import MAX_APPROVED_BY_LEN
+
+            signature = str(p.approved_by)
+            if len(signature) > MAX_APPROVED_BY_LEN:
+                issues.append(
+                    Issue(
+                        proposal_id=p.id,
+                        severity="error",
+                        message=(
+                            f"approved_by is {len(signature)} characters; the "
+                            f"server accepts at most {MAX_APPROVED_BY_LEN}. It "
+                            f"records who decided, not why - the reasoning belongs "
+                            f"in the batch's `source_excerpt` or the proposal's "
+                            f"`source_quote`"
+                        ),
+                    )
+                )
 
         # Some creates are meaningless without specific content - and for a resource
         # with no delete path (the code tables; API.md 13.3) permanently so - even
@@ -401,6 +422,52 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
                         )
                     )
         elif p.operation == "create":
+            # A composite key with no server-assigned part must be complete HERE.
+            # Left to mutation_api's own check it surfaces mid-run, after earlier
+            # rows of the batch have committed - and for ADDR_BELONGS_DATA those
+            # are rows with no delete path.
+            required_pk = {
+                f for f in spec.pk_fields
+                if f != STAGING_PERSONID_FIELD
+                and f not in spec.server_assigned_pk_fields
+                and f not in spec.optional_pk_fields
+            }
+            # ONLY for a resource the server assigns nothing for. That is the
+            # case this exists for: `ADDR_BELONGS_DATA`'s four-column key has no
+            # "next id", so every column must arrive complete or the create 422s
+            # mid-batch - after earlier, undeletable rows have committed.
+            #
+            # It must NOT fire where the server does assign a key. `postings` has
+            # `c_office_id` in its PK tuple and a server-assigned `c_posting_id`
+            # alongside; a posting staged with an unresolved office code is a
+            # normal mid-review state that the reviewer settles or defers, not a
+            # structural error - and making it one left every such batch
+            # unsubmittable even after deferring the row.
+            #
+            # Value, not just key: a key column present but null or "" is a 422
+            # server-side (completeness is checked before normalization, digest
+            # 1.5) and a key-set difference could not see it. `{"ref": ...}`
+            # counts as supplied - it resolves to a real id before the request is
+            # built. `0` does not count as missing: it is a real year and a real
+            # code.
+            given = {**(p.changes or {}), **(p.target_pk or {})}
+            missing_pk = sorted(
+                f for f in required_pk
+                if f not in given
+                or (not is_pk_ref(given[f]) and is_missing_value(given[f]))
+            ) if not spec.server_assigned_pk_fields else []
+            if missing_pk:
+                issues.append(
+                    Issue(
+                        proposal_id=p.id,
+                        severity="error",
+                        message=(
+                            f"create on {p.resource!r} is missing primary-key "
+                            f"field(s) {missing_pk} - the server assigns none of "
+                            f"them, so the whole key must be given here"
+                        ),
+                    )
+                )
             bad = supplied & spec.server_assigned_pk_fields
             if bad:
                 issues.append(
@@ -438,9 +505,173 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
                 )
             )
 
+    issues.extend(_pk_ref_issues(batch, by_id))
     issues.extend(_find_person_reference_cycles(batch))
     return issues
 
+
+# --- cross-proposal primary-key references ----------------------------------
+#
+# A value of the form `{"ref": "<proposal id>"}` means "the primary key the server
+# assigned to that sibling create". It exists for one shape that person data never
+# had: a child row whose own COMPOSITE key is built out of server-assigned parent
+# ids. `ADDR_BELONGS_DATA`'s key is (c_addr_id, c_belongs_to, c_firstyear,
+# c_lastyear) and the first two are `ADDR_CODES.c_addr_id` values the server mints
+# on create, so neither can be written down in advance.
+#
+# Why not submit the parents first and generate the children afterwards: the
+# belongs-to rows are the *irreversible* half of this data. Code-table `delete` is
+# 403 (API.md 13.3) and the update whitelist covers only c_source/c_pages/c_notes,
+# so a wrong parent or a wrong year on an edge can never be corrected or removed.
+# Generating that file only after the parents exist would mean the reviewer signs
+# `approved_by` on a document that did not exist when they reviewed the data.
+#
+# Deliberately narrow:
+#   * the target must be a `create` in the same batch;
+#   * that create's resource must have EXACTLY ONE server-assigned PK field, so
+#     "the key it was assigned" is unambiguous - no field name to get wrong;
+#   * a reference is resolved at submit time by batch_runner, never by staging, and
+#     an unresolved one is a hard error rather than a silently-null column.
+PK_REF_KEY = "ref"
+
+
+def is_pk_ref(value: Any) -> bool:
+    return isinstance(value, dict) and set(value) == {PK_REF_KEY} \
+        and isinstance(value[PK_REF_KEY], str)
+
+
+def pk_ref_target(value: Any) -> str | None:
+    return value[PK_REF_KEY] if is_pk_ref(value) else None
+
+
+def iter_pk_refs(proposal: "Proposal"):
+    """(where, field, target id) for every reference this proposal carries.
+
+    Lists are walked too. The address pseudo-fields (`postings.c_addr`,
+    `events.c_addr_id`, `possessions.c_addr_id`) are lists of address ids, and now
+    that a batch can create an address they are the natural place to reference one.
+    Looking only at top-level values left such a reference invisible to all three
+    mechanisms at once: nothing ordered the proposal after its parent, nothing
+    substituted it, and the "a dict where a scalar belongs" guard could not fire
+    because a dict inside those lists is not obviously wrong. It went on the wire
+    as a literal `{"ref": ...}`, which PHP casts to 1 - a plausible wrong address,
+    not a 422.
+    """
+    for where, fieldname, value in _iter_pk_ref_slots(proposal):
+        target = pk_ref_target(value)
+        if target is not None:
+            yield where, fieldname, target
+
+
+def _iter_pk_ref_slots(proposal: "Proposal"):
+    """(where, field label, value) for every slot a reference may legitimately sit
+    in - top-level values and list elements."""
+    for where, mapping in (("target_pk", proposal.target_pk or {}),
+                           ("changes", proposal.changes or {})):
+        for fieldname, value in (mapping or {}).items():
+            yield from _walk_slot(where, fieldname, value)
+
+
+def _walk_slot(where: str, label: str, value: Any):
+    """One slot, recursing into lists. Depth rather than one level, because
+    "one level" is an assumption about a shape nobody is validating."""
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            yield from _walk_slot(where, f"{label}[{index}]", item)
+    else:
+        yield where, label, value
+
+
+def _pk_ref_issues(batch: "StagingBatch", by_id: dict) -> list["Issue"]:
+    from .models import (
+        FieldWhitelistError,
+        find_spec_by_alias,
+        pk_ref_target_resource,
+    )
+
+    issues: list[Issue] = []
+    for p in batch.proposals:
+        # A dict that ALMOST looks like a reference is the dangerous shape: not a
+        # reference, so nothing orders this proposal after its parent and nothing
+        # substitutes it; not a scalar either, so it goes on the wire as a dict
+        # where a primary key belongs. `{"ref": 1}` (an int, not a proposal id),
+        # `{"ref": "p1", "why": "..."}` and `{"Ref": "p1"}` are all plausible
+        # hand-edits. These columns hold scalars only, so any dict that is not a
+        # well-formed reference is a mistake worth naming.
+        for where, fieldname, value in _iter_pk_ref_slots(p):
+            if isinstance(value, dict) and not is_pk_ref(value):
+                issues.append(Issue(
+                    proposal_id=p.id, severity="error",
+                    message=f"{where}.{fieldname} is a dict but not a valid "
+                            f"reference: expected exactly "
+                            f"{{'ref': '<proposal id>'}} with a string id, "
+                            f"got {value!r}"))
+        try:
+            ref_spec = find_spec_by_alias(p.resource)
+        except FieldWhitelistError:
+            ref_spec = None
+        for where, fieldname, target in iter_pk_refs(p):
+            label = f"{where}.{fieldname}"
+            # WHICH column, and WHICH kind of row. Without both, a reference in
+            # `c_firstyear` had an address id substituted into it, and a reference
+            # to the category create resolved into an address-id slot - each
+            # writing a permanently wrong ADDR_BELONGS_DATA key.
+            base_field = fieldname.split("[", 1)[0]
+            expected = (pk_ref_target_resource(ref_spec.key, base_field)
+                        if ref_spec else None)
+            if expected is None:
+                issues.append(Issue(
+                    proposal_id=p.id, severity="error",
+                    message=f"{label} is not a field that may carry a reference. "
+                            f"A `{{'ref': ...}}` stands for a primary key another "
+                            f"proposal is about to be assigned, so it belongs only "
+                            f"in a foreign-key column - see models.PK_REF_TARGETS"))
+                continue
+            if target == p.id:
+                issues.append(Issue(
+                    proposal_id=p.id, severity="error",
+                    message=f"{label} references its own proposal id {target!r}"))
+                continue
+            parent = by_id.get(target)
+            if parent is not None and expected is not None:
+                try:
+                    parent_key = find_spec_by_alias(parent.resource).key
+                except FieldWhitelistError:
+                    parent_key = None
+                if parent_key != expected:
+                    issues.append(Issue(
+                        proposal_id=p.id, severity="error",
+                        message=f"{label} references {target!r}, which creates "
+                                f"{parent.resource!r} - but this column holds a "
+                                f"{expected!r} primary key. Substituting the wrong "
+                                f"table's id here would be undetectable afterwards"))
+                    continue
+            if parent is None:
+                issues.append(Issue(
+                    proposal_id=p.id, severity="error",
+                    message=f"{label} references {target!r}, which is not a "
+                            f"proposal in this batch"))
+                continue
+            if parent.operation != "create":
+                issues.append(Issue(
+                    proposal_id=p.id, severity="error",
+                    message=f"{label} references {target!r}, which is a "
+                            f"{parent.operation}; only a create is assigned a new "
+                            f"primary key"))
+                continue
+            try:
+                pspec = find_spec_by_alias(parent.resource)
+            except FieldWhitelistError:
+                continue          # the parent's own alias error is reported separately
+            assigned = sorted(pspec.server_assigned_pk_fields)
+            if len(assigned) != 1:
+                issues.append(Issue(
+                    proposal_id=p.id, severity="error",
+                    message=f"{label} references {target!r} ({parent.resource}), "
+                            f"whose server-assigned primary key fields are "
+                            f"{assigned or 'none'} - a reference needs exactly one, "
+                            f"so there is no unambiguous value to substitute"))
+    return issues
 
 def _sibling_dependency(proposal: Proposal, by_id: dict[str, Proposal]) -> str | None:
     """Return the sibling proposal id `proposal.person_id` depends on, or None if
@@ -457,7 +688,32 @@ def _sibling_dependency(proposal: Proposal, by_id: dict[str, Proposal]) -> str |
     return proposal.person_id if proposal.person_id in by_id else None
 
 
+def _dependencies(proposal: Proposal, by_id: dict[str, Proposal]) -> list[str]:
+    """Every sibling this proposal must be submitted after.
+
+    Two kinds, and both have to be here or the ordering is wrong in a way that
+    only shows up against a live server: the person_id reference (a sub-resource
+    after its person) and any `{"ref": ...}` primary-key reference (a child row
+    after the parent whose assigned id it borrows).
+    """
+    out = []
+    person = _sibling_dependency(proposal, by_id)
+    if person is not None:
+        out.append(person)
+    for _where, _field, target in iter_pk_refs(proposal):
+        if target in by_id and target != proposal.id and target not in out:
+            out.append(target)
+    return out
+
+
 def _find_person_reference_cycles(batch: StagingBatch) -> list[Issue]:
+    """Cycles over BOTH kinds of dependency, not just person_id.
+
+    Walking person_id alone left a pure `{"ref": ...}` cycle invisible here: the
+    batch validated clean, the preview said it was ready, and
+    topological_submission_order raised mid-run instead - naming the child rather
+    than the cycle.
+    """
     by_id = {p.id: p for p in batch.proposals}
     issues: list[Issue] = []
     state: dict[str, str] = {}  # id -> "visiting" | "done"
@@ -471,13 +727,12 @@ def _find_person_reference_cycles(batch: StagingBatch) -> list[Issue]:
                 Issue(
                     proposal_id=pid,
                     severity="error",
-                    message=f"person_id reference cycle: {cycle}",
+                    message=f"proposal reference cycle: {cycle}",
                 )
             )
             return
         state[pid] = "visiting"
-        dep = _sibling_dependency(by_id[pid], by_id) if pid in by_id else None
-        if dep is not None:
+        for dep in (_dependencies(by_id[pid], by_id) if pid in by_id else []):
             visit(dep, path + [pid])
         state[pid] = "done"
 
@@ -508,7 +763,8 @@ def submittable_proposals(batch: StagingBatch) -> list[Proposal]:
     """Proposals to actually submit: excludes any proposal with a conflict
     resolved as "defer" (docs/03 section 2.2: "'defer' (skip this one field/row
     for now, submit the rest of the batch)") - AND, transitively, any proposal
-    that (directly or indirectly) depends on a deferred proposal's person_id.
+    that (directly or indirectly) depends on a deferred proposal - by person_id
+    OR by a `{"ref": ...}` primary-key reference.
 
     Without the transitive step, deferring a `basicinformation` create while a
     sub-resource proposal still references it as a sibling would either silently
@@ -530,8 +786,11 @@ def submittable_proposals(batch: StagingBatch) -> list[Proposal]:
         for p in batch.proposals:
             if p.id in excluded:
                 continue
-            dep = _sibling_dependency(p, by_id)
-            if dep is not None and dep in excluded:
+            # Both dependency kinds. Cascading only person_id left a child of a
+            # deferred addr-codes create in the submittable set, which
+            # topological_submission_order then refused - aborting the whole
+            # batch for a batch find_issues had just called clean.
+            if any(dep in excluded for dep in _dependencies(p, by_id)):
                 excluded.add(p.id)
                 changed = True
 
@@ -566,8 +825,8 @@ def topological_submission_order(
         progressed = False
         next_remaining = []
         for p in remaining:
-            depends_on = _sibling_dependency(p, by_id)
-            if depends_on is None or depends_on in resolved_ids:
+            pending = [d for d in _dependencies(p, by_id) if d not in resolved_ids]
+            if not pending:
                 resolved.append(p)
                 resolved_ids.add(p.id)
                 progressed = True
@@ -581,6 +840,35 @@ def topological_submission_order(
         remaining = next_remaining
 
     return resolved
+
+
+def substitute_pk_refs(mapping: dict[str, Any], assigned: dict[str, Any]) -> dict[str, Any]:
+    """Replace every `{"ref": id}` with the primary key that proposal was assigned.
+
+    Raises rather than leaving a hole: an unresolved reference would otherwise be
+    sent as a literal dict and land as NULL or a type error, and for
+    ADDR_BELONGS_DATA that NULL would be part of the primary key.
+    """
+    def resolve(key: str, value: Any) -> Any:
+        target = pk_ref_target(value)
+        if target is None:
+            return value
+        if target not in assigned:
+            raise StagingError(
+                f"{key}: reference to proposal {target!r} cannot be resolved - it "
+                f"has not been submitted successfully in this run")
+        return assigned[target]
+
+    def walk(label: str, value: Any) -> Any:
+        # The address pseudo-fields are lists of ids; a reference can sit in one.
+        # Recursing rather than handling one level keeps this in step with
+        # iter_pk_refs, which is what decides the submission order - the two
+        # disagreeing is how an unsubstituted ref reaches the wire.
+        if isinstance(value, (list, tuple)):
+            return [walk(f"{label}[{i}]", item) for i, item in enumerate(value)]
+        return resolve(label, value)
+
+    return {key: walk(key, value) for key, value in (mapping or {}).items()}
 
 
 def resolve_target_pk(

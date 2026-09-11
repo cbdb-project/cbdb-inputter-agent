@@ -780,6 +780,132 @@ RESOURCE_SPECS["office"] = ResourceSpec(
 )
 
 
+# --- Place-name code tables (NOT person data). AGENTS.md rule 12 applies. -------
+#
+# Opened upstream 2026-09-10, pulled and modelled here 2026-09-11 (API.md 13.1/13.2;
+# `config/code_table_writes.php`).
+# Before that there was no `/api/v2` create for an address at all and no write path
+# whatsoever for the belongs-to graph, which is why `docs/11` had to ship half its
+# output as a hand-run SQL script. All three are gated: they are global reference
+# data, `delete` is still 403 on every code table (API.md 13.3), and a wrong row is
+# visible to every CBDB user.
+#
+# ALIASES: the server accepts several spellings for each, and unlike `text_codes`
+# the create and update sets are symmetric (upstream's `CodeTableWriteConfigDriftTest`
+# enforces that mechanically). None of these strings collides with a person
+# sub-resource - `addresses`/`address`/`biog_addr_data` is BIOG_ADDR_DATA, a
+# different table with a different meaning - but the near-miss is worth knowing
+# about, because `addresses` (a person's recorded places) and `addr-codes` (the
+# place-name authority list) read almost identically in a staging file.
+
+_ADDR_CODES_FIELDS = frozenset(
+    {
+        "c_name", "c_name_chn", "c_alt_names",
+        "c_firstyear", "c_lastyear",
+        "c_admin_type", "c_admin_cat_code",
+        "x_coord", "y_coord", "CHGIS_PT_ID",
+        "c_notes",
+    }
+)
+
+RESOURCE_SPECS["addr_codes"] = ResourceSpec(
+    key="addr_codes",
+    create_aliases=frozenset({"addr-codes", "addr_codes", "addrcodes"}),
+    update_aliases=frozenset({"addr-codes", "addr_codes", "addrcodes"}),
+    delete_aliases=frozenset(),   # 403 server-side on every code table
+    pk_fields=("c_addr_id",),
+    server_assigned_pk_fields=frozenset({"c_addr_id"}),
+    create_fields=_ADDR_CODES_FIELDS,
+    update_fields=_ADDR_CODES_FIELDS,
+    requires_explicit_approval=True,
+    # A place row with no Chinese name is unusable and, with delete disabled,
+    # permanent. Same reasoning as text_codes' c_title_chn.
+    required_create_fields=frozenset({"c_name_chn"}),
+)
+
+
+RESOURCE_SPECS["addr_belongs_data"] = ResourceSpec(
+    key="addr_belongs_data",
+    create_aliases=frozenset(
+        {"addr-belongs-data", "addr_belongs_data", "addr-belongs", "addr_belongs"}
+    ),
+    update_aliases=frozenset(
+        {"addr-belongs-data", "addr_belongs_data", "addr-belongs", "addr_belongs"}
+    ),
+    delete_aliases=frozenset(),
+    # All four are client-supplied: a composite key has no "next id", and upstream
+    # refuses auto-assignment for it. `server_assigned_pk_fields` is therefore empty,
+    # which is what makes staging require the whole key on create.
+    pk_fields=("c_addr_id", "c_belongs_to", "c_firstyear", "c_lastyear"),
+    create_fields=frozenset({"c_source", "c_pages", "c_notes"}),
+    update_fields=frozenset({"c_source", "c_pages", "c_notes"}),
+    requires_explicit_approval=True,
+)
+
+
+RESOURCE_SPECS["admin_cat_codes"] = ResourceSpec(
+    key="admin_cat_codes",
+    create_aliases=frozenset(
+        {"admin-cat-codes", "admin_cat_codes", "admin-cat", "admin_cat"}
+    ),
+    update_aliases=frozenset(
+        {"admin-cat-codes", "admin_cat_codes", "admin-cat", "admin_cat"}
+    ),
+    delete_aliases=frozenset(),
+    pk_fields=("c_admin_cat_code",),
+    server_assigned_pk_fields=frozenset({"c_admin_cat_code"}),
+    create_fields=frozenset(
+        {"c_admin_cat_py", "c_admin_cat_hz", "c_admin_cat_trans", "c_notes"}
+    ),
+    update_fields=frozenset(
+        {"c_admin_cat_py", "c_admin_cat_hz", "c_admin_cat_trans", "c_notes"}
+    ),
+    requires_explicit_approval=True,
+    # Both name columns: a category with neither is unusable, undeletable, and
+    # referenced by an FK from every ADDR_CODES row that picks it.
+    required_create_fields=frozenset({"c_admin_cat_py", "c_admin_cat_hz"}),
+)
+
+
+# Where a cross-proposal `{"ref": "<proposal id>"}` may appear, and what it may
+# point at: {resource key: {field: the resource key the value must come from}}.
+#
+# A reference is a promise that "the value of this column is the primary key another
+# proposal in this batch is about to be assigned". Without saying WHICH column and
+# WHICH kind of row, the mechanism accepted both halves wrong: a reference in
+# `ADDR_BELONGS_DATA.c_firstyear` validated and then had a minted `c_addr_id`
+# substituted into it, and a reference to the `ADMIN_CAT_CODES` create resolved
+# happily into an address-id slot. Both write a permanently wrong four-column key on
+# the one table whose key can never be corrected.
+#
+# So the slots are enumerated. A reference anywhere else is a structural error, and
+# adding one here is a deliberate act that names the foreign key it stands for.
+PK_REF_TARGETS: dict[str, dict[str, str]] = {
+    "addr_belongs_data": {
+        # ADDR_BELONGS_DATA's key is (child, parent, firstyear, lastyear); the first
+        # two are ADDR_CODES ids, the last two are years and are never references.
+        "c_addr_id": "addr_codes",
+        "c_belongs_to": "addr_codes",
+    },
+    "addr_codes": {
+        # NOT NULL FK to ADMIN_CAT_CODES, and the category may be created in the
+        # same batch.
+        "c_admin_cat_code": "admin_cat_codes",
+    },
+    # The address pseudo-fields: lists of ADDR_CODES ids on a person's records.
+    "postings": {"c_addr": "addr_codes"},
+    "events": {"c_addr_id": "addr_codes"},
+    "possessions": {"c_addr_id": "addr_codes"},
+    "addresses": {"c_addr_id": "addr_codes"},
+}
+
+
+def pk_ref_target_resource(spec_key: str, field: str) -> str | None:
+    """The resource key a reference in `spec_key.field` must point at, or None if a
+    reference is not accepted there at all."""
+    return PK_REF_TARGETS.get(spec_key, {}).get(field)
+
+
 def approval_gated_aliases() -> frozenset[str]:
     """Every resource string that must never be written without an `approved_by`.
 

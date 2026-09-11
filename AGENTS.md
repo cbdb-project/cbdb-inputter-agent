@@ -14,9 +14,11 @@ staging-file → human-review pipeline), `docs/04-field-whitelists.md` (per-reso
 allowed fields), `docs/05-testing-strategy.md` (mocking/fixture conventions),
 `docs/08-review-interface-design.md` (the offline review page and the
 `review.json` → `decisions.json` → `apply-review` round trip),
-`docs/11-salt-administration-design.md` (**which reference tables have no API write
-path at all** — read before promising a contributor that place-name or hierarchy data
-can be submitted).
+`docs/11-salt-administration-design.md` (the Ming/Qing salt import, and the worked
+example of **place names and hierarchy edges going in through the API** — read before
+touching `ADDR_CODES`/`ADDR_BELONGS_DATA`. Its §4 records the gap as it stood before
+2026-09-11, when neither table had a create; that gap is closed, and the header says
+which of its sections that supersedes).
 
 ## The target system's API contract — where it lives, and keeping it in sync
 
@@ -28,8 +30,8 @@ anything in this repo:
   see `.env.sample`; exposed as `Config.online_main_server_repo_dir`). That checkout
   is **read-only to us** — never modify the target repo.
 - Digested for this repo, with a sync stamp and a re-sync procedure:
-  **`docs/07-api-md-digest.md`** (last synced against `origin/develop` `b2df35f5`,
-  2026-09-04).
+  **`docs/07-api-md-digest.md`** (last synced against `origin/develop` `76ac0a47`,
+  2026-09-11).
 
 `API.md` **is under active, continuing revision** (§1.3's write-throttling contract and
 the failed-auth rate cap were both added in the days before that sync). So:
@@ -213,11 +215,32 @@ user how old the build is instead of quietly trusting it.
     these paths — it is enforced before every `create`/`update` in `mutation_api.py`, so
     never work around it. **Note the client does not yet verify writes for you**:
     `batch_runner.run_batch()` records a `200` as `status="success"` without inspecting
-    `result.row`. After a real (non-dry-run) write that matters, read the row back
+    `result.row`. It does, however, **stop the whole batch on an indeterminate
+    write** — a timeout or a 5xx on a mutating request, where the row may or may not
+    exist. Neither is retried (the retry would be the second write), and continuing
+    past one would mean later rows referencing something whose id was never learned,
+    with a re-run duplicating whatever did land. One uncertain row, named in
+    `results.json`, is the recoverable outcome; reconcile it against
+    `GET /api/v2/operations` before re-sending anything. For the same reason a write
+    never follows an HTTP redirect: `requests` would re-send the body transparently. After a real (non-dry-run) write that matters, read the row back
     yourself via `/api/v2/get` and compare — don't infer it from the exit code.
+    **One exception, of capability rather than judgement — and it is narrower than
+    "these resources cannot be read".** `/api/v2/get`'s resource table
+    (`API.md` §566–581) covers the 13 person resources plus `nianhao`; anything else
+    is `501 目前尚未支援此取得模式`, which is the documented answer there, not a
+    failure. So read back through the **public lookups** instead, which several of
+    these do have: `GET /api/select/search/addr` or `/api/code/addr` for `ADDR_CODES`,
+    `GET /api/select/search/office` for `office` (`docs/07` §2.3 — this is why
+    `fetch_current_values()` reports "couldn't fetch" for an aggregate proposal).
+    `ADDR_BELONGS_DATA`, `ADMIN_CAT_CODES`, `char_variant_map` and `OFFICE_TYPE_TREE`
+    have no read surface at all: for those the create response is the only sighting,
+    so take `result.pk` **and** `result.row` (§13.2) at the time, and afterwards
+    `GET /api/v2/operations` is the only record.
 12. **Code-table and entity-aggregate writes are a different, higher risk class than
     person data — never do one without explicit, specific user approval.** This covers
-    `text-codes` (new `TEXT_CODES` rows), `char-variant-map`, the `office`,
+    every code table that can be written — `text-codes` (new `TEXT_CODES` rows),
+    `char-variant-map`, and, since 2026-09-11, **`addr-codes`, `addr-belongs-data`,
+    `admin-cat-codes` and `office-type-tree`** — plus the `office`,
     `social-institution` and `text-entity` entity aggregates, and `merged-person`. What
     they share is
     **blast radius**: they are global reference data, referenced by potentially tens of
@@ -239,36 +262,82 @@ user how old the build is instead of quietly trusting it.
     into `meta.comment`, so the sign-off lands in the **server's** `operations` row too,
     not only in this repo. **Never fill in `approved_by` yourself** — it exists precisely
     to record that a human, named, made the call.
-    Two such resources are modelled today:
+    Five such resources are modelled today:
     **`text-codes`** (create only; `update` is not modelled since the server only allows
-    `c_title`, and `delete` is disabled server-side), and **`office`** (create + update,
-    no delete — see `docs/04-field-whitelists.md` §15 and
+    `c_title`, and `delete` is disabled server-side), the three place-name tables opened
+    (committed upstream 2026-09-10, pulled and modelled here 2026-09-11) —
+    **`addr-codes`**, **`addr-belongs-data`** and **`admin-cat-codes`**
+    (create + update, no delete; see the six-table note below) — and **`office`**
+    (create + update, no delete — see `docs/04-field-whitelists.md` §15 (and §16–18
+    for the three place-name tables) and
     `docs/10-office-aggregate-design.md`). Two things about `office` that do not apply to
     the code tables: its `update` is a **full-row overwrite**, so an omitted field is
     written as `NULL` (the client refuses a partial payload — `full_overwrite_update`),
     and **the server has no duplicate-name guard on create**, so
     `preflight.assert_office_create_is_not_a_duplicate()` runs a *live* check before any
     office create and must never be replaced by a snapshot lookup.
-    The rest (`char-variant-map`, `social-institution`, `text-entity`, `merged-person`)
-    are still unmodelled, so a staging file naming one is rejected as an unknown alias —
-    a safe outcome, but by absence rather than by design.
-    **Separately, and more often the actual blocker: several reference tables have no
-    `/api/v2` write path at all, and no amount of modelling here will change that.**
-    `config/code_table_writes.php` in the target system registers exactly two creatable
-    tables, `TEXT_CODES` and `char_variant_map`; everything else 501s. So `ADDR_CODES`
-    is **update-only and only `c_name`**, `ADMIN_CAT_CODES` update-only and only
-    `c_admin_cat_py`, and `ADDR_BELONGS_DATA` (the address parent chain) and
-    `OFFICE_TYPE_TREE` are not writable through `/api/v2` in any form — they are
-    reachable only via the session-authenticated web `CodesController`, which rule 1
-    forbids. Do not go looking for a way around this: a new place name, a new address
-    hierarchy edge, or a new office-type node is **a finding you report and a
-    deliverable someone with database access loads**, not something this client
-    submits. Worked example, with the evidence and the export format:
-    `docs/11-salt-administration-design.md` §4–5.
-    If you model one, set `requires_explicit_approval=True` on it — and note that
-    the refusal messages in `staging.py` and `http_client.py` still assert the
-    *code-table* rationale ("no delete path", "no way to undo it"), which is false for
-    the three aggregates: those **are** deletable while unreferenced (`API.md` §13.4).
+    The rest (`char-variant-map`, `office-type-tree`, `social-institution`,
+    `text-entity`, `merged-person`) are still unmodelled, so a staging file naming one
+    is rejected as an unknown alias — a safe outcome, but by absence rather than by
+    design — **and by absence only here**: upstream accepts writes for all five
+    (`char_variant_map` create and update, `office-type-tree` create and update,
+    `social-institution` and `text-entity` create/update/delete, `merged-person`
+    create and delete). So if a task needs one of them, modelling it is the work;
+    routing around `models.py` is not.
+    **The creatable set grew and is now six tables** (upstream commits dated
+    2026-09-10; pulled here 2026-09-11).
+    `config/code_table_writes.php` in the target system is the registry
+    `CodeTableCreateHandler` reads; anything not in it 501s. It holds `TEXT_CODES`,
+    `char_variant_map`, and — new — **`ADDR_CODES`, `ADDR_BELONGS_DATA`,
+    `ADMIN_CAT_CODES` and `OFFICE_TYPE_TREE`**, each with a matching `update`
+    registered in `config/code_table_mutations.php` over the same column set.
+    "Matching" means the whitelists agree, not that the write is a full-row
+    overwrite: a code-table `update` is **per-field** (omit a column and it keeps its
+    value; an empty `changes` is a 422). Full-row overwrite is the *aggregate*
+    behaviour, below. And the symmetry is a fact about these four: `TEXT_CODES`
+    update remains `c_title` only. `docs/11-salt-administration-design.md` §4 records what the gap used to
+    be and why half that dataset had to ship as a SQL script; that half now goes
+    through the API like anything else.
+
+    Five properties of these six that shape how you use them, none of which the
+    person-resource habits cover:
+    - **`delete` is disabled on all of them** (`API.md` §13.3): `403` on
+      `mode=direct`, `501` on `mode=proposal` — the second means "no such handler",
+      not "not allowed for you". `ADDR_CODES` and
+      `ADMIN_CAT_CODES` have a full-row update so a wrong value is correctable;
+      **`ADDR_BELONGS_DATA`'s update whitelist is only `c_source`/`c_pages`/`c_notes`,
+      so a wrong parent or a wrong year in its four-column key is permanent.**
+    - **`create` is `direct` only** — `mode: proposal` gets a 501. Code tables can be
+      *changed* by proposal but not *added to*.
+    - **No `/api/v2/get`.** `API.md` §13.2 words this as "no `/api/v2/read`
+      definition", but the endpoint is `/api/v2/get` and for these six it answers
+      `501`; among the code tables only `nianhao` has one. `ADDR_CODES` is still
+      readable through the public lookups (`/api/select/search/addr`,
+      `/api/code/addr`) — which is what makes its duplicate check an ordinary live
+      query. The other five have no read surface at all, so take `result.pk` **and**
+      `result.row` at create time; afterwards `GET /api/v2/operations` is the only
+      record.
+    - **The server does not dedupe, and the name columns have no unique key.** Sending
+      the same `ADMIN_CAT_CODES` name twice makes two rows, and every address that
+      then picks one splits across two synonyms. Check before creating — and check
+      **twice**, because the two moments are different: once where the batch is
+      generated (`tools/salt-admin/live_state.py` shows the composition that answers
+      this for a table with no read endpoint, without letting the snapshot decide on
+      its own), and again immediately before the request
+      (`preflight.assert_addr_create_is_not_a_duplicate`, called from
+      `mutation_api`). The review sits between the two and is meant to take time;
+      anything anyone else enters in that window would otherwise land as a permanent
+      duplicate. `ADMIN_CAT_CODES` gets only the first check — it has no read
+      endpoint to ask at submit time — which is one more reason to keep the number
+      of category rows in a batch to the two that are genuinely needed.
+    - **`ADDRESSES` is a derived cache**, rebuilt only by
+      `php artisan cbdb:regenerate-addresses-table`. Places created through the API
+      stay invisible to posting autofill and dynasty homonym disambiguation until
+      someone runs it.
+    If you model one, set `requires_explicit_approval=True` on it. The refusal
+    messages in `staging.py` and `http_client.py` already distinguish the two cases —
+    code tables have no delete path at all, the entity aggregates do while nothing
+    references the row (`API.md` §13.4) — so keep that distinction if you touch them.
     See `models.py`'s comment on `requires_explicit_approval`.
     **One more trap: near-identical strings mean entirely different resources.**
     `office` is the entity aggregate (needs approval) while `offices` resolves to the

@@ -150,7 +150,12 @@
   .freetext{margin-top:6px;display:flex;gap:6px;align-items:center}
   .freetext input{flex:1;min-width:120px}
 
-  .approval{border-left:3px solid var(--bad);background:var(--bad-soft);
+  .stat.bulk{display:inline-flex;gap:6px;align-items:center}
+.bulksig{font:inherit;font-size:12px;padding:3px 7px;border:1px solid var(--line);
+  border-radius:3px;background:var(--bg);color:var(--fg);min-width:170px}
+.bulkbtn{font:inherit;font-size:12px;padding:3px 10px;border:1px solid var(--bad);
+  border-radius:3px;background:var(--bad);color:#fff;cursor:pointer}
+.approval{border-left:3px solid var(--bad);background:var(--bad-soft);
     padding:8px 10px;margin:7px 0;border-radius:0 6px 6px 0}
   .approval.done{border-left-color:var(--good);background:var(--good-soft)}
   .issue{font-size:12px;color:var(--bad);margin-top:4px}
@@ -221,10 +226,12 @@
 
 <script>
 "use strict";
-const SCHEMA = 2;   // must match review.REVIEW_JSON_SCHEMA_VERSION
+const SCHEMA = 3;   // must match review.REVIEW_JSON_SCHEMA_VERSION
                     //   1: initial
                     //   2: + code_labels / field_code_tables /
                     //      list_valued_fields / code_table_names
+                    //   3: + content_hash per proposal, carried on every stored and
+                    //      exported decision
 let DATA = null;
 // decisions[proposalId] = {conflicts:{cid:value}, fields:{name:value}, approved_by:str}
 let D = {};
@@ -233,14 +240,41 @@ const $ = (s) => document.querySelector(s);
 const el = (t, cls, txt) => { const n = document.createElement(t);
   if (cls) n.className = cls; if (txt !== undefined) n.textContent = txt; return n; };
 
-/* ---------- persistence: survive an accidental reload, per batch ---------- */
+/* ---------- persistence: survive an accidental reload, per batch ----------
+   Keyed by batch id, which the operator chooses and which is STABLE across
+   regenerations - and so are the generated proposal ids. So a stored decision is
+   only trustworthy while the proposal it was made about still says the same thing.
+   Each one records that proposal's content_hash and is dropped if it moved.
+   Without this, re-running the generator after settling an open question brought
+   every earlier signature back onto rows whose parent, years or category had
+   changed, and the page reported "0 missing approvals" with nobody having typed
+   anything. */
 const key = () => "cbdb-review:" + (DATA ? DATA.batch_id : "?");
 function save(){ try{ localStorage.setItem(key(), JSON.stringify(D));
   $("#saveHint").textContent = "saved locally"; }catch(e){ $("#saveHint").textContent = ""; } }
 function restore(){
-  try{ const raw = localStorage.getItem(key()); if(raw){ D = JSON.parse(raw);
-    $("#saveHint").textContent = "restored your earlier decisions from this browser"; } }
-  catch(e){ D = {}; }
+  let raw = null;
+  try{ raw = localStorage.getItem(key()); }catch(e){ raw = null; }
+  if (!raw) return;
+  let stored;
+  try{ stored = JSON.parse(raw); }catch(e){ D = {}; return; }
+
+  const live = new Map(DATA.proposals.map(p => [p.id, p.content_hash]));
+  const kept = {}; let dropped = 0, droppedSigs = 0;
+  for (const pid in stored){
+    const d = stored[pid] || {};
+    if (live.get(pid) === d.h){ kept[pid] = d; continue; }
+    dropped++;
+    if (String(d.approved_by || "").trim()) droppedSigs++;
+  }
+  D = kept;
+  let msg = "restored your earlier decisions from this browser";
+  if (dropped){
+    msg += " \u2014 discarded " + dropped + " for proposal(s) that have changed since"
+         + (droppedSigs ? ", including " + droppedSigs + " signature(s)" : "");
+    try{ localStorage.setItem(key(), JSON.stringify(D)); }catch(e){}
+  }
+  $("#saveHint").textContent = msg;
 }
 
 /* ---------- value formatting ----------
@@ -347,7 +381,15 @@ function codeInfoNode(field, value){
 }
 
 /* ---------- decision accessors ---------- */
-const dec = (pid) => (D[pid] = D[pid] || {});
+/* Every decision records the content_hash of the proposal it was made about, so
+   `restore()` and `apply-review` can tell a decision about THIS row from one about
+   a row that has since been regenerated with different values. */
+const dec = (pid) => {
+  const d = (D[pid] = D[pid] || {});
+  const p = DATA && DATA.proposals.find(x => x.id === pid);
+  if (p) d.h = p.content_hash;
+  return d;
+};
 function setConflict(pid, cid, value){
   const d = dec(pid); d.conflicts = d.conflicts || {}; d.conflicts[cid] = value; save(); render();
 }
@@ -515,6 +557,44 @@ function conflictNode(p, c){
   return box;
 }
 
+/* What is actually irreversible differs per table, and a reviewer deciding
+   whether to sign deserves the specific answer rather than the worst case. */
+function approvalRisk(resource){
+  const r = String(resource || "");
+  // Matched on the ALIASES models.py actually accepts, not on a guessed prefix:
+  // `addrcodes` and `textcodes` are both valid and both used to fall through to
+  // the generic wording - the weakest text for the sharpest tables.
+  if (r.startsWith("text-code") || r.startsWith("text_code")
+      || r === "textcodes")
+    return "A TEXT_CODES row cannot be deleted, and its Chinese title can never "
+         + "be edited afterwards — only the romanized title can.";
+  if (r.startsWith("addr-belongs") || r.startsWith("addr_belongs"))
+    return "This is the sharpest one: an ADDR_BELONGS_DATA row cannot be deleted, "
+         + "and its four-column key (child, parent, first year, last year) cannot "
+         + "be updated either — only the source, pages and notes can. A wrong "
+         + "parent or a wrong year here is permanent.";
+  if (r.startsWith("addr-code") || r.startsWith("addr_code")
+      || r === "addrcodes")
+    return "An ADDR_CODES row cannot be deleted, but every column is editable "
+         + "afterwards, so a wrong value is correctable.";
+  if (r.startsWith("admin-cat") || r.startsWith("admin_cat"))
+    return "An ADMIN_CAT_CODES row cannot be deleted and is an FK target for every "
+         + "address that picks it; its columns remain editable. There is no unique "
+         + "key on the name, so a duplicate would silently split the references.";
+  if (r === "office")
+    return "An office code IS deletable while nothing references it — but not from "
+         + "here: this client models no delete for it, and the web UI is out of "
+         + "bounds. Recoverable in principle, by someone else, and only until a "
+         + "posting points at it.";
+  // No guess for an unrecognised resource. The old fallback asserted "no delete
+  // path for a code table" for anything it did not know, which is the sentence
+  // AGENTS.md already flags as false for the entity aggregates — those ARE
+  // deletable while unreferenced (API.md 13.4). Saying "check" is weaker advice
+  // and true; saying "permanent" is stronger advice and sometimes a lie.
+  return "This writes global reference data. What can be undone afterwards depends "
+       + "on the table — check API.md 13.3/13.4 before signing.";
+}
+
 function approvalNode(p){
   const cur = approvalValue(p);
   const has = !!(cur.value || "").trim();
@@ -522,10 +602,10 @@ function approvalNode(p){
   box.appendChild(el("div", "cid", (has ? "🔓 " : "🔒 ") + "approved_by — global reference data"));
   box.appendChild(el("div", "cdesc",
     "This proposal writes GLOBAL reference data, not one person's record: it is " +
-    "referenced by potentially tens of thousands of rows, the server offers no " +
-    "delete path for a code table, and a TEXT_CODES row's Chinese title can never " +
-    "be edited afterwards. It cannot be submitted until a named human signs off. " +
-    "Type YOUR name — the agent is not allowed to fill this in."));
+    "referenced by potentially tens of thousands of rows and visible to every " +
+    "other user. " + approvalRisk(p.resource) + " It cannot be submitted until a " +
+    "named human signs off. Type YOUR name — the agent is not allowed to fill " +
+    "this in."));
   const ft = el("div", "freetext");
   const inp = el("input"); inp.type = "text"; inp.placeholder = "your name";
   inp.value = cur.value || "";
@@ -643,6 +723,7 @@ function render(){
   }
   renderBulk();
   renderStats();
+  renderBulkApproval();
   $("#pending").innerHTML = "<b>" + pendingCount() + "</b> decision(s) staged in this browser";
 }
 
@@ -687,17 +768,89 @@ function renderStats(){
     add(appr ? "bad" : "good", "missing approvals", appr);
 }
 
+/* The header counts; the footer acts.
+   "Sign all 114" used to sit among the summary chips, between "114 proposals" and
+   "114 missing approvals" - reading as one more piece of status. It now sits in the
+   action bar with Export and Discard, the other two batch-wide controls.
+   This is a grouping, NOT a barrier: the footer is `position:fixed` and on screen
+   from the moment a file loads, so it is exactly as reachable as the chip was. The
+   thing that actually stands between a reviewer and 114 signatures is the
+   confirmation below, which names every table in the selection and what each one
+   cannot undo. */
+function renderBulkApproval(){
+  const foot = $("#footer");
+  const old = foot.querySelector(".stat.bulk");
+  if (old) old.remove();
+  // Counted over the VISIBLE rows, the same set the button will sign, so the
+  // number on the button is the number of signatures it writes.
+  const appr = DATA.proposals.filter(p => missingApproval(p) && visible(p)).length;
+  if (appr > 1) foot.insertBefore(bulkApprovalNode(appr), $("#export"));
+}
+
+/* Sign every still-unsigned gated proposal at once.
+   Not a weakening of the gate: a human still types their own name, deliberately,
+   and confirms a message that says how many rows and which tables they are
+   signing for. Typing it 114 times separately would add fatigue, not scrutiny -
+   and the whole point of the gate is that someone actually reads the batch. Rows
+   already signed individually are left alone. */
+function bulkApprovalNode(n){
+  const wrap = el("span", "stat bulk");
+  wrap.appendChild(el("b", "", ""));
+  const inp = el("input");
+  inp.type = "text";
+  inp.placeholder = "your name, to sign all " + n;
+  inp.className = "bulksig";
+  const btn = el("button", "bulkbtn");
+  btn.textContent = "Sign all " + n;
+  btn.onclick = () => {
+    const sig = inp.value.trim();
+    if (!sig){ inp.focus(); return; }
+    // Only what is on screen. The table honours the filters; a "Sign all" that
+    // did not would sign rows the reviewer had deliberately filtered away.
+    const targets = DATA.proposals.filter(p => missingApproval(p) && visible(p));
+    if (!targets.length){ return; }
+    // Per table, not one worst case: `approvalRisk` exists because what is
+    // irreversible differs sharply between them, and the summary that flattened it
+    // both understated ADDR_BELONGS_DATA (its four-column key can never be edited
+    // or deleted - 57 of the 114 rows here) and overstated `office` (deletable
+    // while unreferenced). A reviewer signing in bulk should see the same answer
+    // the per-row panel gives.
+    const counts = new Map();
+    for (const p of targets)
+      counts.set(p.resource, (counts.get(p.resource) || 0) + 1);
+    const lines = [...counts.entries()].sort()
+      .map(([res, n]) => "  " + n + " × " + res + " — " + approvalRisk(res));
+    const ok = window.confirm(
+      "Sign " + targets.length + " proposals as \"" + sig + "\".\n\n" +
+      lines.join("\n\n") + "\n\n" +
+      "You are recording that you, named, reviewed these rows. They are global " +
+      "reference data, visible to every CBDB user.");
+    if (!ok) return;
+    for (const p of targets) dec(p.id).approved_by = sig;
+    save(); render();
+  };
+  wrap.appendChild(inp);
+  wrap.appendChild(btn);
+  return wrap;
+}
+
 /* ---------- export ---------- */
 function buildDecisions(){
   const out = [];
   for (const p of DATA.proposals){
     const d = D[p.id]; if (!d) continue;
+    /* Every decision carries the hash, not just the signature: a field edit
+       rewrites a value and a conflict choice settles which value is written, and
+       an ungated batch has no approved_by for the check to ride on. */
+    const h = p.content_hash;
     if (d.conflicts) for (const cid in d.conflicts)
-      out.push({proposal_id: p.id, conflict_id: cid, resolution: d.conflicts[cid]});
+      out.push({proposal_id: p.id, conflict_id: cid, resolution: d.conflicts[cid],
+                content_hash: h});
     if (d.fields) for (const name in d.fields)
-      out.push({proposal_id: p.id, field: name, value: d.fields[name]});
+      out.push({proposal_id: p.id, field: name, value: d.fields[name],
+                content_hash: h});
     if (d.approved_by !== undefined)
-      out.push({proposal_id: p.id, approved_by: d.approved_by});
+      out.push({proposal_id: p.id, approved_by: d.approved_by, content_hash: h});
   }
   return {schema_version: SCHEMA, batch_id: DATA.batch_id, decisions: out};
 }

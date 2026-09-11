@@ -28,6 +28,7 @@ writer, one validator, one submitter.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -43,7 +44,68 @@ from .staging import Issue, ProposalCurrentState, StagingBatch, StagingError
 #   2: + code_labels / field_code_tables / list_valued_fields (human-readable names
 #      for every code, so a reviewer can check `c_office_id: 63057` against what it
 #      actually means rather than re-reading the agent's arithmetic)
-REVIEW_JSON_SCHEMA_VERSION = 2
+#   3: + content_hash on every proposal, and on every decision the page exports.
+#      Proposal ids and batch ids are both stable across a regeneration, so without
+#      it a stored or exported signature re-attached itself to a row whose values
+#      had since changed - see proposal_content_hash()
+REVIEW_JSON_SCHEMA_VERSION = 3
+
+
+def proposal_content_hash(proposal: Any) -> str:
+    """A fingerprint of everything about a proposal that decides what gets written.
+
+    The review page keeps a reviewer's in-progress decisions in `localStorage`,
+    keyed by batch id, so an accidental reload does not lose them - and
+    `approved_by` is one of those decisions. But a batch id is chosen by the
+    operator and is stable across regenerations, and a generated proposal id
+    (`addr-ming-...-1368`) is derived from the source row and is stable too. So
+    re-running the generator after settling an open question produced proposals
+    with the SAME ids and DIFFERENT payloads, and the page silently re-attached the
+    old signatures: the header went back to "0 missing approvals" and
+    `decisions.json` carried sign-offs for rows no human had ever seen. The same
+    hole existed on the command line, where a decisions.json from before the
+    regeneration still applied cleanly.
+
+    So each proposal carries a hash of its own content; the page stores it with the
+    decision and exports it, and both the page and `apply_review` refuse a decision
+    whose hash no longer matches. Deliberately NOT covered: `source_quote`,
+    `confidence`, `notes` and the issue list - none of them changes what is
+    written, and re-signing because a comment was reworded would be friction with
+    no safety in it.
+    """
+    payload = {
+        "resource": proposal.resource,
+        "operation": proposal.operation,
+        "person_id": proposal.person_id,
+        "target_pk": proposal.target_pk or {},
+        "changes": proposal.changes or {},
+        # The conflicts too - their ids, the field each is about, and the options
+        # offered. A `conflict` decision settles which value gets written, and
+        # conflict ids are generated (`c1`, `parent`), so a regeneration can reuse
+        # one for a different question. Without this, a stored resolution for the
+        # old `parent` silently answered the new one. The options' rationales are
+        # excluded: rewording one does not change what the choice writes.
+        "conflicts": [
+            {"id": c.id, "field": c.field,
+             "options": [o.value for o in (c.options or [])]}
+            for c in (proposal.conflicts or [])
+        ],
+    }
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                      separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+# The CBDB table behind each `person_id: 0` resource, for the group heading. Named
+# explicitly rather than upper-casing the spec key, because `office` is an aggregate
+# over two tables and would otherwise be labelled with a table that does not exist.
+GLOBAL_REFERENCE_TABLES = {
+    "addr_codes": "ADDR_CODES",
+    "addr_belongs_data": "ADDR_BELONGS_DATA",
+    "admin_cat_codes": "ADMIN_CAT_CODES",
+    "text_codes": "TEXT_CODES",
+    "office": "OFFICE_CODES (+ OFFICE_CODE_TYPE_REL)",
+}
 
 
 def export_review_json(
@@ -74,12 +136,41 @@ def export_review_json(
             return pid  # sibling reference: group under that proposal's id
         if proposal.resource in ("basicinformation", "biogmain", "biog_main"):
             return proposal.id
+        if pid == 0:
+            # `person_id: 0` is the convention for a row that belongs to NO person -
+            # a code-table entry. Grouping those under a group called "0" is not a
+            # grouping: a 114-row place-name batch arrived as one undifferentiated
+            # accordion. The axis a reviewer actually reads them along is the table,
+            # because that is what decides how reversible each row is.
+            #
+            # Keyed on the spec key, not the resource string: `addr-codes` and
+            # `addr_codes` are the same table, and grouping on the raw alias made
+            # two groups under one heading.
+            try:
+                return "table:" + find_spec_by_alias(proposal.resource).key
+            except FieldWhitelistError:
+                return f"table:{proposal.resource}"
         return str(pid)
 
     # Label each group with a human-readable name where we can find one, so the page
     # shows 「丁元善」 rather than 「p01」.
     group_labels: dict[str, str] = {}
     for proposal in batch.proposals:
+        if proposal.person_id == 0 and proposal.resource not in (
+                "basicinformation", "biogmain", "biog_main"):
+            try:
+                key = find_spec_by_alias(proposal.resource).key
+            except FieldWhitelistError:
+                key = proposal.resource
+            table = GLOBAL_REFERENCE_TABLES.get(key)
+            group_labels[group_key(proposal)] = (
+                f"{table} - global reference data, belongs to no person"
+                if table else
+                # Not a known code table. `person_id: 0` on a person sub-resource is
+                # a staging mistake, and calling it "global reference data" would
+                # endorse it.
+                f"{key} - person_id 0, which is not a person"
+            )
         if proposal.resource in ("basicinformation", "biogmain", "biog_main"):
             name = proposal.changes.get("c_name_chn")
             label = str(name) if name else f"person {proposal.person_id}"
@@ -89,6 +180,7 @@ def export_review_json(
 
     proposals_out = []
     for proposal in batch.proposals:
+        content_hash = proposal_content_hash(proposal)
         try:
             spec = find_spec_by_alias(proposal.resource)
             needs_approval = spec.requires_explicit_approval
@@ -116,6 +208,7 @@ def export_review_json(
         proposals_out.append(
             {
                 "id": proposal.id,
+                "content_hash": content_hash,
                 "resource": proposal.resource,
                 "resource_key": resource_key,
                 "operation": proposal.operation,
@@ -193,6 +286,47 @@ class AppliedChange:
     detail: str
 
 
+def _check_reviewed_version(
+    raw: dict[str, Any], proposal_id: str, reviewed_hash: dict[str, str]
+) -> None:
+    """Refuse a decision made about a different version of this proposal.
+
+    Applies to EVERY decision, not only `approved_by`. The first version of this
+    guard covered signatures alone, on the reasoning that a signature is the thing
+    rule 12 protects - but a `field` decision rewrites a value, and a `conflict`
+    decision settles which value is written. A `decisions.json` produced before the
+    staging file was regenerated applies both of those to rows whose payload has
+    since changed, and for an ungated batch (no `approved_by` anywhere) nothing
+    else would notice.
+
+    Two things keep the guard from firing on legitimate work. The comparison is
+    against the hash of the proposal **as it entered apply_decisions**, not as it
+    stands mid-loop - a reviewer may edit a field and sign the same proposal in one
+    pass, and their own edit must not invalidate their own signature. And it is
+    only consulted when a decision would actually CHANGE something: re-applying a
+    decisions file to a staging file it has already been applied to is a no-op, not
+    a stale decision, and refusing it would break re-running `apply-review`.
+    """
+    stamped = raw.get("content_hash")
+    current = reviewed_hash.get(proposal_id)
+    if stamped == current:
+        return
+    why = (
+        "that decisions file carries no content_hash, so it was exported before "
+        "this check existed"
+        if stamped is None else
+        f"decided against {stamped!r}, this file is {current!r}"
+    )
+    raise StagingError(
+        f"decision for {proposal_id!r} was made about a version of that proposal "
+        f"that is not the one in this staging file ({why}). A proposal id survives "
+        "a regeneration unchanged, so the decision may have been made about "
+        "different values - most likely the staging file was regenerated after the "
+        "review. Re-export review.json, look at the rows that changed, and decide "
+        "again."
+    )
+
+
 def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[AppliedChange]:
     """Apply a decisions.json produced by the review page onto `batch`, in place.
 
@@ -225,6 +359,16 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
         )
 
     by_id = {p.id: p for p in batch.proposals}
+    # The hash of each proposal AS REVIEWED, taken before anything is applied.
+    #
+    # A reviewer may edit a field and sign the same proposal in one pass - that is
+    # the ordinary use of the page, since every field is editable. Their decisions
+    # arrive in one file, field edits first. Recomputing the hash per decision
+    # compared the signature against a proposal this very file had just changed,
+    # and refused the whole file with "re-export and sign again" - which reproduces
+    # the same failure, because the loop is the reviewer's own edit. What the
+    # signature has to be checked against is the version they were shown.
+    reviewed_hash = {p.id: proposal_content_hash(p) for p in batch.proposals}
     applied: list[AppliedChange] = []
 
     for raw in decisions.get("decisions", []):
@@ -244,6 +388,7 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
                 )
             new_value = raw.get("resolution")
             if conflict.resolution != new_value:
+                _check_reviewed_version(raw, proposal_id, reviewed_hash)
                 conflict.resolution = new_value
                 applied.append(
                     AppliedChange(
@@ -258,6 +403,7 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
             field_name = raw["field"]
             if raw.get("drop"):
                 if field_name in proposal.changes:
+                    _check_reviewed_version(raw, proposal_id, reviewed_hash)
                     del proposal.changes[field_name]
                     applied.append(
                         AppliedChange("drop", proposal_id, f"removed field {field_name}")
@@ -265,6 +411,7 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
                 continue
             new_value = raw.get("value")
             if proposal.changes.get(field_name) != new_value:
+                _check_reviewed_version(raw, proposal_id, reviewed_hash)
                 old = proposal.changes.get(field_name)
                 proposal.changes[field_name] = new_value
                 applied.append(
@@ -279,6 +426,7 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
         if "approved_by" in raw:
             signature = raw["approved_by"]
             if proposal.approved_by != signature:
+                _check_reviewed_version(raw, proposal_id, reviewed_hash)
                 proposal.approved_by = signature
                 applied.append(
                     AppliedChange(

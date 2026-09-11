@@ -14,6 +14,7 @@ import responses
 from cbdb_agent.code_lookup import (
     FIELD_CODE_TABLES,
     CodeResolver,
+    _HttpSource,
     code_table_names,
     collect_code_values,
     is_code_value,
@@ -588,3 +589,38 @@ def test_the_two_sources_agree_on_the_same_code(tmp_path, snapshot):
     from_http = _http_resolver(tmp_path).label_for("entry", 124)
     from_db = CodeResolver(snapshot=snapshot).label_for("entry", 124)
     assert from_http == from_db
+
+
+def test_a_code_table_with_no_lookup_endpoint_returns_nothing_over_http():
+    """ADMIN_CAT_CODES has no `/api/select/*` and no `/api/v2/get` (only `nianhao`
+    has one) - the same gap that made tools/salt-admin/live_state.py necessary.
+
+    Without an explicit guard the empty endpoint string was requested as-is: an
+    AUTHENTICATED GET at the bare base URL, once per c_admin_cat_code in the batch.
+    `_check_mutating_flag` normalises "" to "/", which is on neither known-path
+    list, so nothing else stops it.
+    """
+    calls = []
+
+    class _Client:
+        def get(self, path, params=None, public=False):
+            calls.append(path)
+            return {"data": []}
+
+    source = _HttpSource(_Client())
+    assert source.row("admin_cat", "226") is None
+    assert calls == [], f"nothing should have been requested, got {calls}"
+
+
+def test_the_tables_that_do_have_an_endpoint_still_use_it():
+    """The other half, so the guard cannot be "fixed" by disabling every lookup."""
+    calls = []
+
+    class _Client:
+        def get(self, path, params=None, public=False):
+            calls.append(path)
+            return {"data": [{"c_addr_id": 4631, "c_name_chn": "\u6cf0\u5dde"}]}
+
+    row = _HttpSource(_Client()).row("addr", "4631")
+    assert row and row["c_name_chn"] == "\u6cf0\u5dde"
+    assert calls == ["/api/select/search/addr"]

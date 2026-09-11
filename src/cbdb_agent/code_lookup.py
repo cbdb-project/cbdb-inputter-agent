@@ -53,12 +53,17 @@ FIELD_CODE_TABLES: dict[str, str] = {
     "c_text_dy": "dynasty",
     "c_inst_begin_dy": "dynasty",
     "c_addr_id": "addr",
+    # ADDR_BELONGS_DATA's parent column. Without this the single most important
+    # value in a hierarchy proposal - WHICH place this one is being filed under -
+    # was the one value the review page showed as a bare number.
+    "c_belongs_to": "addr",
     "c_index_addr_id": "addr",
     "c_entry_addr_id": "addr",
     "c_inst_addr_id": "addr",
     # postings' address side-table pseudo-field - a LIST of address ids
     "c_addr": "addr",
     "c_office_id": "office",
+    "c_admin_cat_code": "admin_cat",
     # c_source and c_index_year_source_id are both c_textid values
     "c_textid": "text",
     "c_source": "text",
@@ -147,6 +152,11 @@ _TABLES: dict[str, tuple[str, str, str, str, str, bool]] = {
     "office": ("OFFICE_CODES", "c_office_id", "c_office_chn", "c_office_trans", "/api/select/search/office", False),
     "text": ("TEXT_CODES", "c_textid", "c_title_chn", "c_title", "/api/select/search/text", False),
     "addr": ("ADDR_CODES", "c_addr_id", "c_name_chn", "c_name", "/api/select/search/addr", False),
+    # Snapshot only: ADMIN_CAT_CODES has no lookup endpoint and no /api/v2/read
+    # (API.md 13.2 names only `nianhao`), which is the same gap that made
+    # tools/salt-admin/live_state.py necessary. Empty endpoint, handled in
+    # HttpCodeSource.row.
+    "admin_cat": ("ADMIN_CAT_CODES", "c_admin_cat_code", "c_admin_cat_hz", "c_admin_cat_trans", "", False),
 }
 
 # Sentinel values meaning "unknown" rather than naming anything (API.md 4.4).
@@ -490,6 +500,11 @@ class _HttpSource:
 
     def row(self, table_key: str, value: str) -> dict | None:
         _, id_col, _, _, endpoint, whole = _TABLES[table_key]
+        if not endpoint:
+            # No lookup endpoint exists for this table at all, so over HTTP the code
+            # simply stays unlabelled. Best-effort is the contract here (see the
+            # module docstring); with a snapshot present the label is resolved.
+            return None
         if whole:
             if table_key not in self._whole:
                 self._whole[table_key] = {

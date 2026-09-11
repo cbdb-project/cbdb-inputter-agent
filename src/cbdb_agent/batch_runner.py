@@ -25,11 +25,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .http_client import AuthenticationError, AuthorizationError, CbdbApiError
+from .http_client import (
+    AuthenticationError,
+    AuthorizationError,
+    CbdbApiError,
+    RateLimitedError,
+)
 from .models import FieldWhitelistError, find_spec_by_alias
 from .mutation_api import MutationApi
 from .person_id import PersonIdError, get_max_person_id, is_person_id_taken, validate_new_person_id
 from .staging import (
+    StagingError,
+    substitute_pk_refs,
     Proposal,
     ProposalCurrentState,
     StagingBatch,
@@ -60,7 +67,33 @@ class ProposalResult:
 #   - AuthenticationError (401): token invalid/expired/revoked.
 #   - AuthorizationError (403): account not active, or lacks canWriteDirectly().
 # Both are properties of the account, identical for every proposal in the batch.
-_ABORTING_ERRORS = (AuthenticationError, AuthorizationError)
+#   - RateLimitedError (429): the budget is per source IP and shared with every
+#     other client behind the same egress IP, so it is a property of the
+#     ENVIRONMENT, not of this record - the next proposal faces the same wall.
+#     It is also the shape a dead token takes on a write: the per-IP failed-auth
+#     gate answers 429, not 401 (API.md 1.3). http_client already re-sends a 429
+#     up to MAX_RETRIES because it is the one rejection that happens before the
+#     request is processed; continuing the batch on top of that would spend
+#     3 sends per proposal against a 60/minute budget - exactly the blast radius
+#     rule 10 exists to contain.
+_ABORTING_ERRORS = (AuthenticationError, AuthorizationError, RateLimitedError)
+
+
+def _is_batch_wide(exc: Exception) -> bool:
+    """Whether this failure ends the batch rather than one proposal.
+
+    Two kinds. The `_ABORTING_ERRORS` above are conditions of the account or the
+    environment - identical for every remaining proposal. The other kind is an
+    INDETERMINATE write: a timeout or a 5xx on a mutating request, where the row
+    may or may not exist and we will never find out from the response.
+
+    Continuing past one of those is worse than stopping. The rows after it cannot
+    be trusted to reference it; a re-run would duplicate whatever did land, on
+    tables with no delete path; and the longer the batch goes on, the more work a
+    human has to reconcile against `GET /api/v2/operations`. Stopping leaves
+    exactly one uncertain row and a `results.json` that names it.
+    """
+    return isinstance(exc, _ABORTING_ERRORS) or getattr(exc, "indeterminate", False)
 
 
 def _skip_rest_of_batch(
@@ -79,9 +112,11 @@ def _skip_rest_of_batch(
             proposal_id=later.id,
             status="skipped_auth_aborted",
             error=(
-                "batch aborted: authentication/authorization failed on proposal "
-                f"{failed_id!r} ({exc}). Fix the token or the account's permissions "
-                "and re-run; nothing after that proposal was attempted."
+                "batch aborted on proposal "
+                f"{failed_id!r} ({exc}) - a whole-batch condition, not a fault in "
+                "that row: the token, the account's permissions, or the per-IP "
+                "rate budget. Fix it and re-run; nothing after that proposal was "
+                "attempted."
             ),
         )
         for later in order[stopped_at_index + 1 :]
@@ -149,6 +184,69 @@ def _resolve_person_id(
     return None
 
 
+def _is_dry_run_response(response: Any) -> bool:
+    return isinstance(response, dict) and response.get("dry_run") is True
+
+
+def _assigned_pk(response: dict, spec) -> Any | None:
+    """The primary key the server minted for a create, from `result.pk`.
+
+    Only meaningful for a resource with exactly one server-assigned PK field -
+    which is what staging's reference check already requires of any create a
+    `{"ref": ...}` points at. Returns None rather than guessing when the response
+    does not carry a usable key: API.md 13.2 promises `result.pk` (and, for the six
+    code tables, a full `result.row`), but the office aggregate's `row` is only a
+    partial echo (13.4), and a value that reaches a child's primary key can never
+    be taken back.
+
+    Three shapes are refused rather than passed on, because each is a plausible
+    response that would write a permanently wrong ADDR_BELONGS_DATA key:
+
+    * **`0`** - the documented "unknown" sentinel for every numeric id and FK
+      column (digest 1.5), and the value a create-time echo built from validated
+      input carries when the key was never supplied. `max(pk)+1` is never 0, so a
+      real assignment cannot look like this.
+    * **a non-integer** - a string that is not a number, a list, a nested dict.
+      The server's own rule is that a primary key must be an integer or parse as
+      one (API.md 13.2); anything else here means the response is not the shape we
+      think it is.
+    * **a negative id** - `-1` and `-999` are the other documented sentinels.
+
+    Skipping the child is recoverable: it is reported as unresolved and can be
+    re-sent once the real id is known. A wrong key is not.
+    """
+    fields = sorted(spec.server_assigned_pk_fields)
+    if len(fields) != 1:
+        return None
+    result = response.get("result") if isinstance(response, dict) else None
+    if not isinstance(result, dict):
+        return None
+    for container in (result.get("pk"), result.get("row")):
+        if not isinstance(container, dict):
+            continue
+        value = container.get(fields[0])
+        if value is None:
+            continue
+        return _usable_pk(value)
+    return None
+
+
+def _usable_pk(value: Any) -> int | None:
+    """`value` as a positive integer id, or None if it cannot be trusted as one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        number = value
+    elif (isinstance(value, str) and value.strip().isascii()
+          and value.strip().lstrip("-").isdigit()):
+        # `isascii` first: "²".isdigit() is True but int("²") raises, and a
+        # crash here would take down the whole run instead of skipping one child.
+        number = int(value.strip())
+    else:
+        return None
+    return number if number > 0 else None
+
+
 def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
     """Submit every submittable proposal in `batch`, in dependency order.
 
@@ -159,6 +257,10 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
     """
     order = topological_submission_order(batch)
     person_id_map: dict[str, int] = {}
+    # proposal id -> the primary key the server assigned to that create, for
+    # `{"ref": ...}` substitution. Only ever written from a SUCCESSFUL response,
+    # so a child whose parent failed is skipped rather than sent with a hole.
+    assigned_pk: dict[str, Any] = {}
     results: list[ProposalResult] = []
 
     for index, proposal in enumerate(order):
@@ -206,6 +308,22 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                 continue
 
         spec = find_spec_by_alias(proposal.resource)
+
+        # Substitute cross-proposal primary-key references before anything else
+        # looks at the values. A missing one is this proposal's failure, not the
+        # batch's: the parent create failed or was skipped earlier.
+        try:
+            proposal = proposal.model_copy(update={
+                "target_pk": (substitute_pk_refs(proposal.target_pk, assigned_pk)
+                              if proposal.target_pk else proposal.target_pk),
+                "changes": substitute_pk_refs(proposal.changes, assigned_pk),
+            })
+        except StagingError as exc:
+            results.append(ProposalResult(
+                proposal_id=proposal.id, status="skipped_dependency_failed",
+                error=str(exc)))
+            continue
+
         full_target_pk = resolve_target_pk(proposal, resolved_person_id=resolved_pid, spec_key=spec.key)
         # Carry an approval-gated proposal's signer into meta.comment, so the
         # sign-off lands in the SERVER's own `operations` row and is not only
@@ -255,32 +373,18 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                     comment=comment,
                     approved_by=approved_by,
                 )
-        except _ABORTING_ERRORS as exc:
-            # NOT per-record isolation: the credentials are broken, so every
-            # remaining proposal would fail identically while burning the shared
-            # per-IP failed-auth budget (see _ABORTING_ERRORS). Record this one as
-            # failed, mark the rest as skipped, and stop.
-            results.append(
-                ProposalResult(
-                    proposal_id=proposal.id,
-                    status="failed",
-                    error=str(exc),
-                    resolved_person_id=resolved_pid,
-                    resolved_target_pk=full_target_pk,
-                )
-            )
-            if spec.key == "basicinformation" and proposal.operation == "create":
-                person_id_map.pop(proposal.id, None)  # never record a failed create
-            results.extend(_skip_rest_of_batch(order, index, exc, proposal.id))
-            return results
         except (CbdbApiError, FieldWhitelistError) as exc:
-            # Per-record isolation (AGENTS.md rule 5): never retry with modified
-            # data, never let one proposal's failure raise out of the batch loop.
-            # FieldWhitelistError is included because mutation_api.create() can
-            # still raise it here even after validate_for_submit() passed - e.g.
-            # a target_pk/changes value mismatch on a shared PK field, which
-            # find_issues() checks for presence/whitelist membership but not
-            # value agreement between the two.
+            # Per-record isolation (AGENTS.md rule 5) is the default: never retry
+            # with modified data, never let one proposal's failure raise out of
+            # the batch loop. FieldWhitelistError is included because
+            # mutation_api.create() can still raise it here even after
+            # validate_for_submit() passed - e.g. a target_pk/changes value
+            # mismatch on a shared PK field, which find_issues() checks for
+            # presence and whitelist membership but not for value agreement.
+            #
+            # `_is_batch_wide` is the exception to the exception: broken
+            # credentials, an exhausted per-IP budget, or an INDETERMINATE write.
+            # Those stop everything.
             results.append(
                 ProposalResult(
                     proposal_id=proposal.id,
@@ -292,10 +396,27 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
             )
             if spec.key == "basicinformation" and proposal.operation == "create":
                 person_id_map.pop(proposal.id, None)  # never record a failed create
+            if _is_batch_wide(exc):
+                results.extend(_skip_rest_of_batch(order, index, exc, proposal.id))
+                return results
             continue
 
         if spec.key == "basicinformation" and proposal.operation == "create":
             person_id_map[proposal.id] = resolved_pid
+
+        if proposal.operation == "create" and spec.server_assigned_pk_fields:
+            assigned = _assigned_pk(response, spec)
+            if assigned is not None:
+                assigned_pk[proposal.id] = assigned
+            elif _is_dry_run_response(response) and len(spec.server_assigned_pk_fields) == 1:
+                # A dry run has no real id to hand a child - nothing was sent. Left
+                # unresolved, every referencing proposal would be reported as
+                # "dependency failed" and the reviewer would never see the shape of
+                # the rows that matter most. Substitute a placeholder that cannot be
+                # mistaken for a key: it is a string, it names its own proposal, and
+                # it says "dry-run" in it. Nothing leaves the process in this mode,
+                # so it can only ever reach the preview and the audit log.
+                assigned_pk[proposal.id] = f"<dry-run pk of {proposal.id}>"
 
         results.append(
             ProposalResult(
@@ -322,7 +443,8 @@ def fetch_current_values(batch: StagingBatch, api: MutationApi) -> dict[str, Pro
     unknown resource alias) is caught and reported as a
     `ProposalCurrentState(error=...)` for that one proposal, so a preview can
     always render something rather than fail outright over one broken lookup.
-    An auth failure is the one case handled batch-wide instead of per-proposal:
+    A batch-wide failure - auth, permissions, or the per-IP rate budget - is handled
+    batch-wide instead of per-proposal:
     it stops further probing and marks every remaining update/delete proposal with
     the same reason, so one dead token costs one failed request rather than one
     per proposal (see _ABORTING_ERRORS). The preview still renders either way.
@@ -359,7 +481,9 @@ def fetch_current_values(batch: StagingBatch, api: MutationApi) -> dict[str, Pro
             # shared per-IP failed-auth budget (see _ABORTING_ERRORS). The preview
             # still renders - every proposal from here on just shows this reason
             # instead of a live diff.
-            reason = f"live diff unavailable: {exc} (stopped after first auth failure)"
+            reason = (f"live diff unavailable: {exc} (stopped after the first "
+                      f"batch-wide failure - auth, permissions or the per-IP rate "
+                      f"budget)")
             for later in batch.proposals:
                 if later.operation in ("update", "delete") and later.id not in results:
                     results[later.id] = ProposalCurrentState(error=reason)

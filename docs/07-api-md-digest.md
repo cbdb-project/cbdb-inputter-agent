@@ -7,15 +7,16 @@ is the target system's own `API.md`:
 |---|---|
 | Canonical URL | <https://github.com/cbdb-project/cbdb-online-main-server/blob/develop/API.md> |
 | Local path | `${CBDB_ONLINE_MAIN_SERVER_REPO_DIR}/API.md` (see `.env.sample`; `Config.online_main_server_repo_dir`) |
-| **Synced against** | `origin/develop` commit `b2df35f5` (commit date 2026-09-04 16:16:40 +0800), `API.md` blob `ff842de6` |
-| Upstream length at sync | 2701 lines (v2 chapters 1–14, plus a "舊版 API 文檔" v1 appendix from line 1651) |
-| Previous sync | `fd747aba` (commit date 2026-08-18 00:39 +0800), blob `948585d1`, 2667 lines — 8 commits and +50/−16 lines of `API.md` earlier |
+| **Synced against** | `origin/develop` commit `76ac0a47` (commit date 2026-09-10 18:01:31 +0800), `API.md` blob `b847dc89` |
+| **Previous sync** | `b2df35f5` (2026-09-04), blob `ff842de6` — §2.2 below, and every claim about `API.md` §13.2/§13.3, were rewritten at the 2026-09-11 re-sync |
+| Upstream length at sync | 2748 lines (v2 chapters 1–14, plus a "舊版 API 文檔" v1 appendix from line 1698) |
+| Previous sync | `b2df35f5` (2026-09-04), blob `ff842de6`, 2701 lines — 10 commits and +65/−18 lines of `API.md` earlier; before that `fd747aba` (2026-08-18), blob `948585d1`, 2667 lines |
 | Stamp convention | **commit** date (`git log -1 --format=%ci`), not author date — they differ by minutes here and by a day for `fd747aba` |
 
 The user has stated `API.md` **will keep being updated**. Treat every claim below as
 carrying that sync stamp: if the stamp is old, re-verify before relying on it. This
 file exists so an agent can answer "what does the API actually allow" without reading
-2701 lines every session — not so it can skip reading upstream when the answer matters.
+2748 lines every session — not so it can skip reading upstream when the answer matters.
 
 **Precedence between this repo's three reference docs**, when they disagree:
 upstream `API.md` > this digest > `docs/04-field-whitelists.md` / `models.py` >
@@ -207,6 +208,30 @@ nothing to do with proposals: §12.6 defines it as a *read-only* probe of what t
 mirror row currently looks like.) If we ever hit that `409`, the only fix is a human working
 inside the web UI. Do not treat it as retryable.
 
+**What that human has to know, when you hand the problem over** (`API.md` §11, added
+to this digest at the 2026-09-11 re-sync — the debt `docs/11` §4 recorded):
+
+- **A resubmitted *create* proposal must carry `"operation": "create"` explicitly.**
+  The field defaults to `update`, and a create resubmitted without it is validated as
+  an update and 422s with "target.pk missing primary key" — a confusing error for the
+  right payload. `target.pk`, `changes` and `person_id` are all required there, and
+  `changes` unconditionally so, even resubmitting a delete (`{}` is fine).
+- **Only `op_type` 8 and 9 (proposed create / proposed update) can be resubmitted**,
+  and only while `__review_status` is `pending` **or** `rejected` — those two are the
+  resubmittable states, which is what makes this the recovery path for a squatted PK.
+  A proposed *delete* (10) cannot be resubmitted at all. Outside those conditions:
+  422 `operation: not_editable_proposal` / `not_editable_status`. Resubmitting
+  cancels the old proposal, records `superseded_by` / `resubmit_of` on the pair, and
+  rolls the whole thing back if any step fails.
+- **`DELETE /operations/{operation}/cancel`** is the in-site withdrawal for aggregate
+  proposals (code-table and person proposals use
+  `codes/{table_name}/proposals/{operation}` instead). Session + CSRF, like resubmit.
+- **Approving an already-approved proposal applies the change a second time.**
+  `approve`/`reject` accept only `pending`; anything else is 409. That 409 is a
+  guard-rail, not a failure to route around.
+- An approved aggregate proposal records `__applied_operation_id` (§13.4), which is
+  how you find the direct write it turned into.
+
 ### 1.9 The server rewrites your text before storing it — and only sometimes says so
 
 Consolidated here because it grew from an altnames-only quirk into a global one, and
@@ -336,9 +361,11 @@ A missing book title (`c_textid`) is **not** a hard blocker anymore:
   takes `text_codes` only (and only `c_title`). Safest: create with `text-codes`,
   update with `text_codes`.
 - **Deletion of any code table is disabled.** The refusal is table × *mode*, not table
-  alone (§13.3): the two writable tables refuse with `403` **when `mode=direct`**; every
-  other table, *and* any `mode=proposal` delete including on those two, gets `501`.
-  Either way there is no delete path.
+  alone (`API.md` §13.3): the **six** writable tables (see the 2026-09-11 note below)
+  refuse with `403` **when `mode=direct`**; every other table, *and* any
+  `mode=proposal` delete including on those six, gets `501`. Either way there is no
+  delete path, and the `501` half matters when you are reading an error: it means
+  "no such handler", not "not allowed for you".
 
 That last point is why creating a code row is a **higher-stakes** write than creating a
 person row, not a lower one. Precisely: a wrong row is **un-deletable**, and only
@@ -348,8 +375,79 @@ accepted, are frozen the moment the row exists, while staying globally visible a
 referenceable by any person record. See `AGENTS.md`'s hard rule on this.
 
 Other code tables (`nianhao`, `office_codes`, `dynasties`, `choronym_codes`,
-`ethnicity_tribe_codes`, `ganzhi_codes`, `addr_codes`, …) support **`update` only**, and
-only for a couple of pinyin/name columns each (§13.1) — `create`/`delete` → `501`.
+`ethnicity_tribe_codes`, `ganzhi_codes`, …) support **`update` only**, and only for a
+couple of pinyin/name columns each (§13.1) — `create`/`delete` → `501`.
+
+**Updated 2026-09-11 — the creatable set is now six tables, not two.** Upstream added
+`ADDR_CODES`, `ADDR_BELONGS_DATA`, `ADMIN_CAT_CODES` and `OFFICE_TYPE_TREE` to
+`config/code_table_writes.php`, each with a full-row `update` registered alongside in
+`config/code_table_mutations.php`. Upstream's `CodeTableWriteConfigDriftTest` compares
+the two registries — for these four, create and update whitelists are identical.
+`TEXT_CODES` is in that test's `ALLOWED_FIELDS_MAY_DIFFER` list and really is
+asymmetric (update = `c_title` only), so "the whitelists match" is a fact about the
+four new tables, not about all six. `API.md` itself does not mention the drift test;
+this is from the repo. What is worth carrying in your head:
+
+| table | key | create | notable |
+|---|---|---|---|
+| `addr-codes` | `c_addr_id`, auto-assigned | 11 columns | update covers the same 11 |
+| `addr-belongs-data` | 4-column composite, **all required, never assigned** | `c_source`/`c_pages`/`c_notes` | **update touches only those three — the key is write-once** |
+| `admin-cat-codes` | `c_admin_cat_code`, auto-assigned | py/hz/trans/notes | no `c_created_by`/`c_created_date` columns, so none are stamped — the operator and time are still in `operations` and `audit_log` |
+| `office-type-tree` | `c_office_type_node_id`, **text, required** | desc/desc_chn/parent | zero-padded path string; cycle guard returns 422 `tree_cycle` |
+
+Rules that apply to the whole set:
+
+- `delete` is 403 on `mode=direct`, 501 on `mode=proposal`.
+- `create` is **`direct` only** (`proposal` → 501): crowdsourcing can change a code
+  table but not add to it.
+- **No `/api/v2/get`.** `API.md` §13.2 words it as "no `/api/v2/read` definition";
+  the endpoint is `/api/v2/get` and for these six it answers `501` (among code tables
+  only `nianhao` has one). That is not the same as "unreadable": `ADDR_CODES` has two
+  sanctioned public lookups, `GET /api/select/search/addr` and `GET /api/code/addr`,
+  and `OFFICE_CODES` has `/api/select/search/office`. `ADDR_BELONGS_DATA`,
+  `ADMIN_CAT_CODES`, `char_variant_map` and `OFFICE_TYPE_TREE` have none, and for
+  those the create response is the only sighting you get — `result.pk` has the key,
+  **`result.row` has the whole stored row**. Take both.
+- **Nothing dedupes on the name columns**, and a pre-create check is only as good
+  as the moment it ran: this client checks `ADDR_CODES` again immediately before the
+  request (`preflight.assert_addr_create_is_not_a_duplicate`), not only where the
+  batch was generated. `ADMIN_CAT_CODES.c_admin_cat_hz` and the
+  like have no unique key — "送兩次就是兩列" — and the live table already holds
+  duplicate names. Check before creating. (Non-key *unique* keys do exist elsewhere in
+  the set and return `409 target.pk: conflict` when hit — `char_variant_map
+  .c_variant_char` is the example §13.2 gives — so "nothing dedupes" is about the
+  name columns, not about every column.)
+- **Parent before child.** A foreign key pointing at a row that does not exist yet is
+  `422 changes: ["foreign_key_violation"]` — §13.2's own example is
+  `addr-belongs-data.c_belongs_to` naming an `ADDR_CODES` row not yet created, and
+  `c_source` naming a missing `TEXT_CODES.c_textid`. This is why
+  `tools/salt-admin/emit_addresses.py` emits in dependency order and carries parent
+  ids as `{"ref": ...}`.
+- **`"target": {"pk": {}}` is mandatory even when the key is auto-assigned.** The key
+  may be given in `target.pk` or in `changes`, and a single-column key given in
+  neither is assigned `max(pk)+1` — but omitting the `target` key itself is a
+  controller-layer `422`. `mutation_api._envelope()` always sends it.
+- **A key value out of the column's range is refused**: 422
+  `target.pk.<column>: ["out_of_range:<min>..<max>"]`, checked against the column's
+  real type. Handle that code — it is not a generic validation failure. The reason
+  the check exists is worth knowing: `ADDR_BELONGS_DATA.c_firstyear` is a smallint,
+  and outside strict sql_mode an unguarded `40000` would store as `32767` while the
+  response echoed `40000`, so the row would land on **a key you did not specify** and
+  every later reference to the echoed key would 404 — on the one table whose key can
+  never be corrected.
+- **Text-column length is capped at 255 with exemptions.** `ADDR_CODES.c_notes` and
+  `ADMIN_CAT_CODES.c_notes` are `longtext` and exempt, which is what lets the salt
+  import put a full provenance note in them.
+- **`ADDR_CODES.c_admin_cat_code` is NOT NULL** and rejects `""` as well as null.
+- **`ADDRESSES` is a derived cache**, rebuilt only by
+  `php artisan cbdb:regenerate-addresses-table`. Places created here stay invisible to
+  posting autofill, dynasty homonym disambiguation and some natural-language queries
+  until someone runs it. Schedule it after a bulk place-name import.
+- These resources can go inside `batch_mutate`.
+
+Type validation is shared between create and update (`CodeTableFieldValidator`), with
+one deliberate asymmetry: a text column receiving a JSON number is coerced on create
+and 422s on update.
 
 ### 2.3 Entity aggregates: `office`, `social-institution`, `text-entity` (`API.md` §13.4)
 

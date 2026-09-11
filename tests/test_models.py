@@ -237,9 +237,17 @@ def test_text_codes_create_requires_a_chinese_title():
 
 
 def test_required_create_fields_is_only_set_where_intended():
+    """Only where a blank row would be permanent.
+
+    Every resource here is a code table or aggregate whose `delete` is disabled
+    server-side, so `changes: {}` would mint a row nobody can remove. A person
+    sub-resource must stay free to carry whatever the source actually says.
+    """
     assert {k for k, v in RESOURCE_SPECS.items() if v.required_create_fields} == {
         "text_codes",
         "office",
+        "addr_codes",         # c_name_chn - a nameless place is unusable
+        "admin_cat_codes",    # both name columns, and an FK target besides
     }
 
 
@@ -272,10 +280,48 @@ def test_text_codes_supports_neither_update_nor_delete():
 
 
 def test_only_global_reference_data_requires_explicit_approval():
+    """The rule-12 inventory. Adding to it is a decision, not a detail.
+
+    The three place-name tables joined on 2026-09-11, when upstream opened them
+    for writing. Each is global reference data with `delete` still 403, and
+    `addr_belongs_data` is the sharpest of the set: its update whitelist covers
+    only c_source/c_pages/c_notes, so a wrong parent or a wrong year in its
+    four-column key can never be corrected OR removed.
+    """
     approval_required = {
         key for key, spec in RESOURCE_SPECS.items() if spec.requires_explicit_approval
     }
-    assert approval_required == {"text_codes", "office"}
+    assert approval_required == {
+        "text_codes", "office",
+        "addr_codes", "addr_belongs_data", "admin_cat_codes",
+    }
+
+
+def test_the_new_place_tables_model_no_delete():
+    """API.md 13.3: code-table delete is 403 on every table, including these."""
+    for key in ("addr_codes", "addr_belongs_data", "admin_cat_codes"):
+        assert RESOURCE_SPECS[key].delete_aliases == frozenset(), key
+
+
+def test_addr_aliases_do_not_collide_with_the_person_subresource():
+    """`addresses` is BIOG_ADDR_DATA - a person's recorded places - and must never
+    be dragged into the approval gate by a near-miss spelling."""
+    from cbdb_agent.models import approval_gated_aliases
+
+    gated = approval_gated_aliases()
+    for person_alias in ("addresses", "address", "biog_addr_data"):
+        assert person_alias not in gated, person_alias
+    for code_alias in ("addr-codes", "addr_codes", "addrcodes",
+                       "addr-belongs-data", "admin-cat-codes"):
+        assert code_alias in gated, code_alias
+
+
+def test_addr_belongs_data_has_no_server_assigned_key():
+    """A composite key has no "next id"; upstream refuses auto-assignment for it,
+    so all four columns must come from the caller."""
+    spec = RESOURCE_SPECS["addr_belongs_data"]
+    assert spec.server_assigned_pk_fields == frozenset()
+    assert spec.pk_fields == ("c_addr_id", "c_belongs_to", "c_firstyear", "c_lastyear")
 
 
 def test_gating_office_did_not_gate_the_postings_aliases():
@@ -631,3 +677,104 @@ def test_office_update_requires_the_known_id():
     spec.validate_target_pk_for_update_or_delete({"c_office_id": 12304})
     with pytest.raises(FieldWhitelistError):
         spec.validate_target_pk_for_update_or_delete({})
+
+
+# --- The code-table write registry --------------------------------------------
+#
+# Upstream keeps two registries and a test that compares them:
+#   config/code_table_writes.php      what `CodeTableCreateHandler` will create
+#   config/code_table_mutations.php   what `CodeTableMutationHandler` will update
+#   CodeTableWriteConfigDriftTest     asserts the two stay in step
+# Six tables were opened for creation on 2026-09-11 (API.md 13.1/13.2). The specs
+# below are this repo's transcription of those registries, and the tests here pin
+# the *structure* upstream guarantees, so a hand-edit that breaks it fails locally
+# instead of at submit time on an irreversible row.
+#
+# To re-verify against the target system rather than against this file, read the two
+# PHP configs in ${CBDB_ONLINE_MAIN_SERVER_REPO_DIR}/config and compare column by
+# column; check the column names themselves against `pragma table_info` on the weekly
+# SQLite snapshot. Never against another copy of this file.
+CODE_TABLE_SPECS = (
+    "addr_codes", "addr_belongs_data", "admin_cat_codes", "text_codes",
+)
+
+
+def test_no_code_table_offers_a_delete():
+    """`delete` is 403 on every code table (API.md 13.3), with no exceptions and no
+    per-table override. A spec that carried delete aliases would let a proposal reach
+    the wire only to be refused - after the batch had already written other rows."""
+    for key in CODE_TABLE_SPECS:
+        assert RESOURCE_SPECS[key].delete_aliases == frozenset(), key
+
+
+def test_every_code_table_write_is_approval_gated():
+    """AGENTS.md rule 12. These are global reference data with no delete path, so the
+    gate is the only thing between a generated batch and a permanent public row."""
+    for key in CODE_TABLE_SPECS:
+        assert RESOURCE_SPECS[key].requires_explicit_approval is True, key
+
+
+def test_the_code_tables_opened_in_2026_09_have_symmetric_create_and_update_sets():
+    """Upstream's CodeTableWriteConfigDriftTest enforces this mechanically for the
+    tables registered in both configs: the update whitelist is the create whitelist.
+
+    `text_codes` is excluded on purpose - it predates that registry and really is
+    asymmetric, so including it here would push someone to "fix" a difference that
+    upstream intends."""
+    for key in ("addr_codes", "addr_belongs_data", "admin_cat_codes"):
+        spec = RESOURCE_SPECS[key]
+        assert spec.create_fields == spec.update_fields, key
+
+
+def test_no_code_table_whitelist_contains_its_own_primary_key():
+    """The key travels in `target_pk`, never in `changes`. ADDR_BELONGS_DATA is the
+    one that matters: its four-column key IS the row's identity and its update
+    whitelist is only c_source/c_pages/c_notes, so a key column appearing in
+    `changes` would look like an editable field for something that can never be
+    edited or removed."""
+    for key in CODE_TABLE_SPECS:
+        spec = RESOURCE_SPECS[key]
+        overlap = sorted((spec.create_fields | spec.update_fields) & set(spec.pk_fields))
+        assert overlap == [], f"{key}: {overlap}"
+
+
+def test_addr_codes_whitelist_is_exactly_the_registry_list():
+    """Source: config/code_table_writes.php, entry `addr_codes`. Every name is a real
+    ADDR_CODES column (`pragma table_info`, 2026-08-15 snapshot). c_addr_id is absent
+    because the server mints it; c_admin_type is the free-text label and
+    c_admin_cat_code the FK, and both are carried."""
+    spec = get_resource_spec("addr_codes")
+    assert spec.create_fields == frozenset(
+        {
+            "c_name", "c_name_chn", "c_alt_names",
+            "c_firstyear", "c_lastyear",
+            "c_admin_type", "c_admin_cat_code",
+            "x_coord", "y_coord", "CHGIS_PT_ID",
+            "c_notes",
+        }
+    )
+    assert spec.pk_fields == ("c_addr_id",)
+    assert spec.server_assigned_pk_fields == frozenset({"c_addr_id"})
+
+
+def test_addr_belongs_data_has_no_server_assigned_key_at_all():
+    """The property the whole Track B batch depends on.
+
+    A composite key has no "next id" to allocate, so upstream will not assign any of
+    it - which is why staging must require the complete key on create, and why the
+    two ADDR_CODES ids in it have to arrive as `{"ref": ...}` from earlier creates in
+    the same batch rather than being invented here."""
+    spec = get_resource_spec("addr_belongs_data")
+    assert spec.pk_fields == ("c_addr_id", "c_belongs_to", "c_firstyear", "c_lastyear")
+    assert spec.server_assigned_pk_fields == frozenset()
+    assert spec.create_fields == frozenset({"c_source", "c_pages", "c_notes"})
+
+
+def test_admin_cat_codes_requires_both_name_columns():
+    """A category row with no name is unusable, undeletable, and the FK target of
+    every ADDR_CODES row that picked it."""
+    spec = get_resource_spec("admin_cat_codes")
+    assert spec.required_create_fields == frozenset(
+        {"c_admin_cat_py", "c_admin_cat_hz"}
+    )
+    assert spec.server_assigned_pk_fields == frozenset({"c_admin_cat_code"})

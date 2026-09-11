@@ -1,9 +1,16 @@
 import json
 
+import requests
+
 import responses
 
 from cbdb_agent.audit_log import AuditLog
-from cbdb_agent.batch_runner import allocate_person_id, fetch_current_values, run_batch
+from cbdb_agent.batch_runner import (
+    _assigned_pk,
+    allocate_person_id,
+    fetch_current_values,
+    run_batch,
+)
 from cbdb_agent.config import Config
 from cbdb_agent.http_client import HttpClient
 from cbdb_agent.mutation_api import MutationApi
@@ -532,7 +539,7 @@ def test_run_batch_aborts_the_whole_batch_on_401(tmp_path):
     ]
     # Exactly ONE request was sent, not one per proposal - that's the whole point.
     assert len(responses.calls) == 1
-    assert "authentication/authorization failed" in results[1].error
+    assert "batch aborted on proposal" in results[1].error
     assert "p1" in results[1].error  # names which proposal stopped the batch
 
 
@@ -703,4 +710,158 @@ def test_auth_abort_marks_dependent_subresources_as_auth_skipped(tmp_path):
     assert by_id["person1"].status == "success"
     assert by_id["a1"].status == "failed"
     assert by_id["a2"].status == "skipped_auth_aborted"
-    assert "authentication/authorization failed" in by_id["a2"].error
+    assert "batch aborted on proposal" in by_id["a2"].error
+
+
+# --- _assigned_pk: where a child's primary key comes from ----------------------
+#
+# Everything in the Track B batch hangs off this function. It reads the id the server
+# minted for a create, and `substitute_pk_refs` then writes that id into the primary
+# key of every ADDR_BELONGS_DATA row referencing it. An ADDR_BELONGS_DATA key cannot
+# be edited or deleted, so a wrong answer here is permanent - which is why the
+# function returns None rather than guessing.
+
+
+class _Spec:
+    def __init__(self, fields):
+        self.server_assigned_pk_fields = frozenset(fields)
+
+
+def test_assigned_pk_reads_result_pk():
+    """The documented shape (API.md 13.2)."""
+    response = {"ok": True, "result": {"pk": {"c_addr_id": 44512}}}
+    assert _assigned_pk(response, _Spec({"c_addr_id"})) == 44512
+
+
+def test_assigned_pk_falls_back_to_result_row():
+    """Some handlers echo the stored row and no separate `pk`."""
+    response = {"result": {"row": {"c_addr_id": 44512, "c_name_chn": "\u6cf0\u5dde"}}}
+    assert _assigned_pk(response, _Spec({"c_addr_id"})) == 44512
+
+
+def test_assigned_pk_prefers_pk_over_row_when_both_are_present():
+    """`pk` is the promise; `row` is an echo that may be partial or normalised."""
+    response = {"result": {"pk": {"c_addr_id": 1}, "row": {"c_addr_id": 2}}}
+    assert _assigned_pk(response, _Spec({"c_addr_id"})) == 1
+
+
+def test_assigned_pk_refuses_a_composite_server_assigned_key():
+    """With two candidates there is no single id to hand a child, and picking one
+    would put the wrong column's value into a primary key. None means "the child is
+    reported as unresolved", which is recoverable; a wrong id is not."""
+    response = {"result": {"pk": {"c_a": 1, "c_b": 2}}}
+    assert _assigned_pk(response, _Spec({"c_a", "c_b"})) is None
+
+
+def test_assigned_pk_returns_none_when_the_response_does_not_carry_the_key():
+    spec = _Spec({"c_addr_id"})
+    assert _assigned_pk({"ok": True}, spec) is None
+    assert _assigned_pk({"result": "created"}, spec) is None
+    assert _assigned_pk({"result": {"pk": {"c_other": 7}}}, spec) is None
+    assert _assigned_pk({"result": {"pk": {"c_addr_id": None}}}, spec) is None
+
+
+def test_assigned_pk_refuses_the_unknown_sentinel():
+    """0 is the documented "unknown" value for every numeric id and FK column, and
+    it is what a create-time echo carries when the key was never supplied.
+    `max(pk)+1` is never 0, so a real assignment cannot look like this - and a 0
+    substituted into an ADDR_BELONGS_DATA key would file the whole sub-hierarchy
+    under 未詳, permanently."""
+    spec = _Spec({"c_addr_id"})
+    assert _assigned_pk({"result": {"pk": {"c_addr_id": 0}}}, spec) is None
+    assert _assigned_pk({"result": {"row": {"c_addr_id": 0}}}, spec) is None
+    assert _assigned_pk({"result": {"pk": {"c_addr_id": -1}}}, spec) is None
+    assert _assigned_pk({"result": {"pk": {"c_addr_id": -999}}}, spec) is None
+
+
+def test_assigned_pk_refuses_anything_that_is_not_an_integer_id():
+    """A primary key is an integer or a string that parses as one (API.md 13.2).
+    Anything else means the response is not the shape we think it is, and passing
+    it on writes it into a key that can never be edited."""
+    spec = _Spec({"c_addr_id"})
+    for bad in ("", "  ", "abc", "44512x", [44512], {"c_addr_id": 1}, True, 1.5):
+        assert _assigned_pk({"result": {"pk": {"c_addr_id": bad}}}, spec) is None, bad
+
+
+def test_assigned_pk_accepts_a_numeric_string():
+    """PDO with emulated prepares hands back "44512", not 44512."""
+    assert _assigned_pk({"result": {"pk": {"c_addr_id": "44512"}}},
+                        _Spec({"c_addr_id"})) == 44512
+
+
+@responses.activate
+def test_run_batch_aborts_the_whole_batch_on_429(tmp_path):
+    """A rate limit is a property of the environment, not of the row.
+
+    The budget is counted per source IP and shared with every other client behind
+    the same egress IP, so the next proposal faces the same wall - and on a write a
+    dead token shows up as 429 rather than 401, because the per-IP failed-auth gate
+    answers first (API.md 1.3). http_client already re-sends a 429 up to
+    MAX_RETRIES; continuing the batch on top of that spends three sends per
+    proposal against a 60/minute budget.
+    """
+    api = make_api(tmp_path)
+    for _ in range(HttpClient.MAX_RETRIES):
+        responses.add(
+            responses.POST, "http://localhost:8000/api/v2/create",
+            json={"message": "Too Many Requests"}, status=429,
+        )
+    batch = StagingBatch(
+        batch_id="b",
+        proposals=[_altname("a1", person_id=703334),
+                   _altname("a2", person_id=703334),
+                   _altname("a3", person_id=703334)],
+    )
+    results = run_batch(batch, api)
+    assert [r.status for r in results] == [
+        "failed", "skipped_auth_aborted", "skipped_auth_aborted"]
+    assert "per-IP rate budget" in results[1].error
+    assert len(responses.calls) == HttpClient.MAX_RETRIES, \
+        "only the first proposal may be attempted"
+
+
+@responses.activate
+def test_an_indeterminate_write_stops_the_batch(tmp_path):
+    """A timeout on a write is not a per-record failure.
+
+    The row may exist. Continuing means later rows reference something whose id we
+    never learned, and re-running to fix it duplicates whatever did land - on
+    tables with no delete path. One uncertain row and a results.json naming it is
+    the recoverable outcome.
+    """
+    api = make_api(tmp_path)
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        body=requests.exceptions.ReadTimeout("timed out"),
+    )
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        json={"ok": True, "result": {"pk": {"c_alt_name_id": 1}}}, status=200,
+    )
+    batch = StagingBatch(
+        batch_id="b",
+        proposals=[_altname("a1", person_id=703334),
+                   _altname("a2", person_id=703334)],
+    )
+    results = run_batch(batch, api)
+    assert [r.status for r in results] == ["failed", "skipped_auth_aborted"]
+    assert len(responses.calls) == 1, "nothing after the uncertain write is sent"
+
+
+@responses.activate
+def test_an_ordinary_422_still_isolates_to_one_proposal(tmp_path):
+    """The other half: per-record isolation is still the default (rule 5)."""
+    api = make_api(tmp_path)
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        json={"ok": False, "errors": {"changes": ["invalid"]}}, status=422)
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        json={"ok": True, "result": {"pk": {"c_alt_name_id": 2}}}, status=200)
+    batch = StagingBatch(
+        batch_id="b",
+        proposals=[_altname("a1", person_id=703334),
+                   _altname("a2", person_id=703334)],
+    )
+    results = run_batch(batch, api)
+    assert [r.status for r in results] == ["failed", "success"]

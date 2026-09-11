@@ -51,6 +51,13 @@ class RateLimitedError(CbdbApiError):
 class ServerError(CbdbApiError):
     """5xx persisted past the retry budget."""
 
+    #: True when this was a MUTATING request, i.e. the write may have been applied
+    #: even though we never saw a success. `batch_runner` stops the whole batch on
+    #: one of these rather than isolating it: "we do not know whether row 60 exists"
+    #: is not a per-record condition when rows 61+ may reference it, and when
+    #: re-running to fix it would duplicate whatever did land.
+    indeterminate = False
+
 
 class UnexpectedResponseError(CbdbApiError):
     """Any other non-2xx status this client doesn't have a specific mapping for."""
@@ -58,6 +65,9 @@ class UnexpectedResponseError(CbdbApiError):
 
 class NetworkError(CbdbApiError):
     """A connection/timeout/DNS failure persisted past the retry budget."""
+
+    #: See ServerError.indeterminate.
+    indeterminate = False
 
 
 class NotFoundError(CbdbApiError):
@@ -309,7 +319,18 @@ def _summarize_public_response(body: Any) -> Any:
 
 
 class HttpClient:
+    # Reads only. A MUTATING request is never retried after a network error or a
+    # 5xx, because neither means "not applied" - see the two branches in _request.
+    # 429 remains retryable on both paths: it is a pre-processing rejection.
     MAX_RETRIES = 3
+
+    # A 3xx on a mutating request is a second send that no retry rule can see:
+    # `requests` follows it transparently, re-POSTing the same body (307/308 keep
+    # the method and the body by definition), and the client only ever observes the
+    # final response. On a table with no delete path that is two rows. Writes
+    # therefore do not follow redirects at all; a 3xx on one is an error to look at,
+    # not a detour to take. Reads still follow them.
+    FOLLOW_REDIRECTS_ON_WRITE = False
 
     def __init__(
         self,
@@ -494,6 +515,12 @@ class HttpClient:
                         params=params,
                         json=json_body,
                         timeout=30,
+                        # A write never follows one. `requests` would re-send the
+                        # body transparently (307/308 preserve the method by
+                        # definition) and we would only ever see the final
+                        # response - two rows, one success, on tables with no
+                        # delete path. Reads follow redirects as usual.
+                        allow_redirects=not mutating,
                     )
             except requests.RequestException as exc:
                 self._audit_log.record(
@@ -510,6 +537,32 @@ class HttpClient:
                 last_error = NetworkError(
                     f"Network error: {exc}", status_code=None, body=None
                 )
+                if mutating:
+                    # NEVER retry a write that may already have been applied.
+                    #
+                    # A timeout does not mean "not processed". `timeout=30` below is
+                    # exactly the production `max_execution_time` API.md section 1
+                    # records, so the slow write is precisely the one that times out
+                    # here while the server goes on to commit. Re-sending then makes
+                    # a second row - and for the code tables that is unrecoverable:
+                    # they have no unique key on their content ("送兩次就是兩列",
+                    # API.md 13.2) and no delete path at all (13.3). The duplicate
+                    # would also be the row whose id `batch_runner` hands to every
+                    # child that references this create, so the hierarchy would hang
+                    # off the orphan.
+                    #
+                    # Failing here costs one proposal, which batch_runner isolates
+                    # and reports. API.md section 1 says the same thing for the same
+                    # reason: reconcile against GET /api/v2/operations, do not
+                    # re-send.
+                    error = NetworkError(
+                        f"Network error on a mutating request, NOT retried: {exc}. "
+                        f"The write may already have been applied - reconcile "
+                        f"against GET /api/v2/operations before re-sending.",
+                        status_code=None, body=None,
+                    )
+                    error.indeterminate = True
+                    raise error from exc
                 if attempt < self.MAX_RETRIES:
                     self._sleep(2 ** (attempt - 1))
                     continue
@@ -577,12 +630,40 @@ class HttpClient:
                 last_error = RateLimitedError(
                     "Rate limited (429)", status_code=429, body=body
                 )
+            elif mutating and 300 <= response.status_code < 400:
+                # Unfollowed, so nothing was re-sent - but a write that answers
+                # with a redirect is not a write we can call applied or not
+                # applied, and the next hop would have re-POSTed the body.
+                raise ServerError(
+                    f"Redirect ({response.status_code}) on a mutating request to "
+                    f"{response.headers.get('Location')!r}. Not followed: "
+                    f"following it would re-send the write. Point the client at "
+                    f"the canonical URL (CBDB_API_BASE_URL) and try again.",
+                    status_code=response.status_code, body=body,
+                )
             elif response.status_code >= 500:
                 last_error = ServerError(
                     f"Server error ({response.status_code})",
                     status_code=response.status_code,
                     body=body,
                 )
+                if mutating:
+                    # Same reasoning as the network branch: a 5xx can be raised
+                    # after the row has been written (a failure in a post-commit
+                    # step, a proxy giving up on a response the app already sent).
+                    # 429 is different and stays retryable - the application layer
+                    # does not throttle writes at all (rule 9), so a 429 on this
+                    # path comes from a proxy or WAF that rejected the request
+                    # before it reached the app.
+                    error = ServerError(
+                        f"Server error ({response.status_code}) on a mutating "
+                        f"request, NOT retried. The write may already have been "
+                        f"applied - reconcile against GET /api/v2/operations "
+                        f"before re-sending.",
+                        status_code=response.status_code, body=body,
+                    )
+                    error.indeterminate = True
+                    raise error
             else:
                 raise UnexpectedResponseError(
                     f"Unexpected status code {response.status_code}",
