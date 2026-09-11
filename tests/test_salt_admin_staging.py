@@ -148,37 +148,43 @@ class TestExclusion:
         assert "通州分司" in batch["source_excerpt"]
 
 
-class TestCliGuards:
-    def test_a_stale_schema_is_refused_rather_than_crashing(self, tmp_path, capsys):
+class TestTrackAIsDropped:
+    """The emitter must not still offer to run.
+
+    Track A was dropped on 2026-09-11: a separate import had already covered the
+    salt post titles, and Ning Hao's list names the institutions, which belong in
+    the place-name tables. `OFFICE_CODES` has no delete path, so an accidental run
+    producing 49 office creates would not be undoable. `build_batch` stays
+    importable - the tests above are what records the decision - but nothing
+    writes a file any more.
+    """
+
+    def test_main_refuses_and_says_what_to_run_instead(self, tmp_path, capsys):
         import json
         p = tmp_path / "dataset.json"
-        p.write_text(json.dumps({"schema_version": 1, "units": []}), encoding="utf-8")
+        p.write_text(json.dumps(_dataset([_unit("salt:ming:兩淮:泰州分司")]),
+                                ensure_ascii=False), encoding="utf-8")
         rc = ES.main(["--dataset", str(p), "--batch-id", "b",
                       "--staging-root", str(tmp_path)])
         assert rc == 1
-        assert "schema_version" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "dropped on 2026-09-11" in err
+        assert "emit_addresses.py" in err
 
-    def test_a_dataset_with_unexpected_blockers_is_refused(self, tmp_path, capsys):
+    def test_it_writes_nothing_at_all(self, tmp_path):
         import json
-        ds = _dataset([_unit("salt:ming:兩淮:泰州分司")])
-        ds["findings"] = [{"severity": "blocker", "unit_key": "salt:ming:兩淮:泰州分司",
-                           "title": "t", "detail": "d", "id": "f01"}]
         p = tmp_path / "dataset.json"
-        p.write_text(json.dumps(ds, ensure_ascii=False), encoding="utf-8")
-        rc = ES.main(["--dataset", str(p), "--batch-id", "b",
-                      "--staging-root", str(tmp_path)])
-        assert rc == 1
-        assert "blocker" in capsys.readouterr().err
+        p.write_text(json.dumps(_dataset([_unit("salt:ming:兩淮:泰州分司")]),
+                                ensure_ascii=False), encoding="utf-8")
+        ES.main(["--dataset", str(p), "--batch-id", "b",
+                 "--staging-root", str(tmp_path)])
+        assert not (tmp_path / "b").exists()
 
-    def test_a_clean_dataset_writes_a_loadable_batch(self, tmp_path):
-        import json
-        import yaml
-        ds = _dataset([_unit("salt:ming:兩淮:泰州分司")])
-        p = tmp_path / "dataset.json"
-        p.write_text(json.dumps(ds, ensure_ascii=False), encoding="utf-8")
-        assert ES.main(["--dataset", str(p), "--batch-id", "b",
-                        "--staging-root", str(tmp_path)]) == 0
-        written = (tmp_path / "b" / "proposal.yaml").read_text(encoding="utf-8")
-        parsed = yaml.safe_load(written)
-        assert StagingBatch.model_validate(parsed).batch_id == "b"
-        assert "\\" not in written.split("\n")[2], "the header must not carry a Windows path"
+    def test_the_docstring_no_longer_calls_track_b_unsubmittable(self):
+        """It used to say "the address rows have no API path at all", which is the
+        claim docs/11's header supersedes and the claim that would send a reader
+        back to the SQL script."""
+        src = (REPO / "tools" / "salt-admin" / "emit_staging.py").read_text(
+            encoding="utf-8")
+        assert "no API path at all" not in src
+        assert "DROPPED on 2026-09-11" in src

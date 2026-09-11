@@ -39,3 +39,7 @@ Thumbs.db
 
 # Claude Code local runtime state
 .claude/
+
+# The user's own scratch file: raw pasted source material and task notes for
+# whatever is in flight. Unpublished person data, and nothing the repo needs.
+/notes.md

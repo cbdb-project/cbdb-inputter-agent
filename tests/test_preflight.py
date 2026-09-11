@@ -18,6 +18,7 @@ from cbdb_agent.config import Config
 from cbdb_agent.http_client import HttpClient
 from cbdb_agent.preflight import (
     PreflightError,
+    assert_addr_create_is_not_a_duplicate,
     assert_office_create_is_not_a_duplicate,
     describe_office_conflicts,
     find_office_name_conflicts,
@@ -449,3 +450,45 @@ def test_an_authorization_failure_is_not_downgraded_to_a_preflight_error(tmp_pat
         assert_office_create_is_not_a_duplicate(
             make_client(tmp_path), name="知某州事", dynasty_code=6
         )
+
+
+# --- ADDR_CODES: the duplicate check that runs at SUBMIT time ----------------
+
+
+@responses.activate
+def test_addr_create_is_blocked_by_an_exact_live_name_match(tmp_path):
+    """The generate-to-submit window is the point of this one.
+
+    `emit_addresses.py` checks when it builds the batch; the review then takes
+    minutes or days, and anything entered by anyone else in between would become a
+    permanent duplicate - no unique key on `c_name_chn`, no delete, and the
+    duplicate then collects ADDR_BELONGS_DATA edges whose keys can never change.
+    """
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{"c_addr_id": 90001, "c_name_chn": "\u5169\u6dee\u90fd\u8f49\u904b\u9e7d\u4f7f\u53f8"}]},
+        status=200,
+    )
+    with pytest.raises(PreflightError, match="90001"):
+        assert_addr_create_is_not_a_duplicate(
+            make_client(tmp_path), name="\u5169\u6dee\u90fd\u8f49\u904b\u9e7d\u4f7f\u53f8")
+
+
+@responses.activate
+def test_a_substring_match_does_not_block_an_addr_create(tmp_path):
+    """`q` is a substring search. 泰州 is not a duplicate of
+    兩淮都轉運鹽使司泰州分司, and blocking on it would train the operator to click
+    past the check that matters."""
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{"c_addr_id": 4631, "c_name_chn": "\u6cf0\u5dde"}]},
+        status=200,
+    )
+    assert_addr_create_is_not_a_duplicate(
+        make_client(tmp_path), name="\u5169\u6dee\u90fd\u8f49\u904b\u9e7d\u4f7f\u53f8\u6cf0\u5dde\u5206\u53f8")
+
+
+def test_an_addr_create_with_no_chinese_name_is_refused(tmp_path):
+    """A check that cannot block anything is worse than no check."""
+    with pytest.raises(PreflightError, match="c_name_chn"):
+        assert_addr_create_is_not_a_duplicate(make_client(tmp_path), name="")

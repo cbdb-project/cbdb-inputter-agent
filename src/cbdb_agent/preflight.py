@@ -393,3 +393,49 @@ def assert_office_create_is_not_a_duplicate(
             "the existing office, send an `update` against that c_office_id instead."
         )
     return conflicts
+
+
+def find_addr_name_matches(client: HttpClient, name: str) -> list[dict[str, Any]]:
+    """Live ADDR_CODES rows whose `c_name_chn` is exactly `name`.
+
+    `/api/select/search/addr` is a substring search, so the filter matters: a hit on
+    泰州 while creating 兩淮都轉運鹽使司泰州分司 is a different place, and reporting
+    it as a duplicate would train the operator to click past this check.
+    """
+    body = client.get("/api/select/search/addr", params={"q": name}, public=True)
+    rows = body.get("data") if isinstance(body, dict) else body
+    if rows is None and isinstance(body, dict):
+        rows = body.get("raw")
+    return [r for r in (rows or [])
+            if isinstance(r, dict)
+            and str(r.get("c_name_chn", "")).strip() == str(name).strip()]
+
+
+def assert_addr_create_is_not_a_duplicate(client: HttpClient, *, name: str) -> None:
+    """Raise unless no live ADDR_CODES row already carries exactly this name.
+
+    `tools/salt-admin/emit_addresses.py` runs the same check when it generates a
+    batch, but that is minutes or days before the batch is submitted, and the
+    review in between is the whole point of the delay. Anything entered by anyone
+    else in that window would otherwise become a permanent duplicate: `ADDR_CODES`
+    has no unique key on `c_name_chn` and no delete path, and the duplicate then
+    collects `ADDR_BELONGS_DATA` edges whose keys can never be changed.
+
+    Live, not from the snapshot - AGENTS.md names "does this row already exist" as
+    exactly what the weekly build may never answer.
+    """
+    if not str(name or "").strip():
+        raise PreflightError(
+            "cannot check an ADDR_CODES create for duplicates without a "
+            "c_name_chn - and models.py requires one on create anyway"
+        )
+    matches = find_addr_name_matches(client, name)
+    if matches:
+        ids = ", ".join(str(m.get("c_addr_id")) for m in matches)
+        raise PreflightError(
+            f"a place named {name!r} already exists in ADDR_CODES ({ids}). The "
+            "server does not dedupe and offers no delete, so submitting this would "
+            "add a second permanent row and split the hierarchy between the two. "
+            "If the intent is to amend the existing place, send an `update` against "
+            "that c_addr_id instead."
+        )

@@ -6,6 +6,7 @@ from cbdb_agent.review import (
     REVIEW_JSON_SCHEMA_VERSION,
     apply_decisions,
     export_review_json,
+    proposal_content_hash,
 )
 from cbdb_agent.staging import (
     Conflict,
@@ -55,8 +56,13 @@ def a_conflict(cid="c1", field="c_office_id", options=(65759, 63111), suggestion
     )
 
 
+_LAST_BATCH: list = []
+
+
 def batch(*proposals, bid="b1"):
-    return StagingBatch(batch_id=bid, proposals=list(proposals))
+    b = StagingBatch(batch_id=bid, proposals=list(proposals))
+    _LAST_BATCH[:] = [b]
+    return b
 
 
 # --- export -------------------------------------------------------------------
@@ -204,8 +210,24 @@ def test_export_survives_an_unknown_resource():
 # --- apply --------------------------------------------------------------------
 
 
-def _decisions(*items, bid="b1", version=REVIEW_JSON_SCHEMA_VERSION):
-    return {"schema_version": version, "batch_id": bid, "decisions": list(items)}
+def _decisions(*items, bid="b1", version=REVIEW_JSON_SCHEMA_VERSION, stamp=True):
+    """Build a decisions.json, stamping each entry with the proposal's content hash.
+
+    The page stamps every decision it exports, and `apply_decisions` refuses one
+    without a matching hash - so a helper that omitted it would make every test here
+    a test of the guard rather than of the thing under test. `stamp=False` is for the
+    two tests that are about the guard.
+    """
+    by_id = {p.id: p for p in _LAST_BATCH[0].proposals} if _LAST_BATCH else {}
+    out = []
+    for item in items:
+        item = dict(item)
+        if stamp and "content_hash" not in item:
+            proposal = by_id.get(item.get("proposal_id"))
+            if proposal is not None:
+                item["content_hash"] = proposal_content_hash(proposal)
+        out.append(item)
+    return {"schema_version": version, "batch_id": bid, "decisions": out}
 
 
 def test_apply_sets_a_conflict_resolution():
@@ -257,10 +279,70 @@ def test_apply_sets_an_approval():
     )
     b = batch(tc)
     apply_decisions(
-        b, _decisions({"proposal_id": "tc1", "approved_by": "Hongsu Wang"})
+        b,
+        _decisions({"proposal_id": "tc1", "approved_by": "Hongsu Wang",
+                    "content_hash": proposal_content_hash(tc)}),
     )
     assert b.proposals[0].approved_by == "Hongsu Wang"
     assert [i for i in find_issues(b) if i.severity == "error"] == []
+
+
+def test_apply_refuses_a_signature_for_a_version_of_the_proposal_that_changed():
+    """The gate has to survive a regeneration.
+
+    Proposal ids and batch ids are both derived from stable inputs, so a
+    decisions.json from before an open question was settled applied cleanly to the
+    rows that answering it had just altered - signing values no human had seen.
+    """
+    tc = Proposal(
+        id="tc1", resource="text-codes", operation="create", person_id=0,
+        changes={"c_title_chn": "聽雪先生集"},
+        source_quote="q", confidence="high",
+    )
+    signed_hash = proposal_content_hash(tc)
+    tc.changes["c_title_chn"] = "勤齋集"      # the regeneration
+    b = batch(tc)
+    with pytest.raises(StagingError, match="not the one in this staging file"):
+        apply_decisions(b, _decisions({
+            "proposal_id": "tc1", "approved_by": "Hongsu Wang",
+            "content_hash": signed_hash}))
+    assert b.proposals[0].approved_by is None
+
+
+def test_apply_refuses_a_signature_with_no_content_hash_at_all():
+    """A decisions.json exported before the check existed cannot be trusted either,
+    and the message has to say so rather than printing `None` at the reader."""
+    tc = Proposal(
+        id="tc1", resource="text-codes", operation="create", person_id=0,
+        changes={"c_title_chn": "聽雪先生集"},
+        source_quote="q", confidence="high",
+    )
+    b = batch(tc)
+    with pytest.raises(StagingError, match="before this check existed"):
+        apply_decisions(
+            b, _decisions({"proposal_id": "tc1", "approved_by": "Hongsu Wang"},
+                          stamp=False))
+
+
+def test_a_content_hash_ignores_wording_and_tracks_what_gets_written():
+    """Re-signing because a source_quote was reworded would be friction with no
+    safety in it; re-signing because the parent id changed is the whole point."""
+    def prop(**kw):
+        base = dict(id="p", resource="addr-belongs-data", operation="create",
+                    person_id=0,
+                    target_pk={"c_addr_id": 1, "c_belongs_to": 2,
+                               "c_firstyear": 1368, "c_lastyear": 1643},
+                    changes={"c_source": 0}, source_quote="q", confidence="high")
+        base.update(kw)
+        return Proposal(**base)
+
+    same = proposal_content_hash(prop())
+    assert proposal_content_hash(prop(source_quote="reworded")) == same
+    assert proposal_content_hash(prop(confidence="medium")) == same
+    assert proposal_content_hash(prop(
+        target_pk={"c_addr_id": 1, "c_belongs_to": 99,
+                   "c_firstyear": 1368, "c_lastyear": 1643})) != same
+    assert proposal_content_hash(prop(changes={"c_source": 1})) != same
 
 
 def test_apply_reports_nothing_when_the_decision_matches_the_current_value():
@@ -325,3 +407,171 @@ def test_apply_is_atomic_in_effect_when_it_raises_midway():
         )
     # The in-memory object did get the first change; the point is the CLI never saves.
     assert b.proposals[1].conflicts[0].resolution == 65759
+
+
+# --- Grouping global reference data -------------------------------------------
+
+
+def _code_table_batch():
+    """Three code-table creates, no person anywhere - the salt-administration shape."""
+    from cbdb_agent.staging import Proposal, StagingBatch
+
+    def p(pid, resource, changes, target_pk=None):
+        kw = {}
+        if target_pk is not None:
+            kw["target_pk"] = target_pk
+        return Proposal(
+            id=pid, resource=resource, operation="create", person_id=0,
+            changes=changes, source_quote="q", confidence="high",
+            approved_by="Hongsu Wang", **kw,
+        )
+
+    return StagingBatch(batch_id="b", proposals=[
+        p("c1", "admin-cat-codes",
+          {"c_admin_cat_py": "Fensi", "c_admin_cat_hz": "分司"}),
+        p("a1", "addr-codes", {"c_name_chn": "泰州"}),
+        p("a2", "addr-codes", {"c_name_chn": "通州"}),
+        p("e1", "addr-belongs-data", {"c_source": 0},
+          target_pk={"c_addr_id": 1, "c_belongs_to": 2,
+                     "c_firstyear": 1368, "c_lastyear": 1643}),
+    ])
+
+
+def test_code_table_rows_are_grouped_by_table_not_under_person_zero():
+    """`person_id: 0` means "belongs to no person", not "belongs to person 0".
+
+    Grouped by person, a 114-row place-name batch arrived as a single accordion
+    headed "0" - which is not a grouping, and defeats the whole point of reviewing a
+    large batch at a glance. The axis that matters here is the table, because that
+    is what decides how reversible each row is.
+    """
+    batch = _code_table_batch()
+    payload = json.loads(export_review_json(batch, find_issues(batch)))
+    groups = {p["group"] for p in payload["proposals"]}
+    assert groups == {"table:admin_cat_codes", "table:addr_codes",
+                      "table:addr_belongs_data"}
+    assert payload["summary"]["groups"] == 3
+    assert "0" not in groups
+
+
+def test_each_such_group_is_labelled_with_the_cbdb_table():
+    batch = _code_table_batch()
+    payload = json.loads(export_review_json(batch, find_issues(batch)))
+    labels = payload["group_labels"]
+    assert labels["table:addr_belongs_data"].startswith("ADDR_BELONGS_DATA")
+    assert labels["table:addr_codes"].startswith("ADDR_CODES")
+    assert all("belongs to no person" in v for v in labels.values())
+
+
+def test_person_rows_are_still_grouped_by_person():
+    """The change must not touch the ordinary case: person_id 0 is the marker, and a
+    real c_personid still groups a person's sub-resources together."""
+    from cbdb_agent.staging import Proposal, StagingBatch
+
+    batch = StagingBatch(batch_id="b", proposals=[
+        Proposal(id="n1", resource="altnames", operation="create",
+                 person_id=703334, changes={"c_alt_name_chn": "字"},
+                 source_quote="q", confidence="high"),
+        Proposal(id="n2", resource="altnames", operation="create",
+                 person_id=703334, changes={"c_alt_name_chn": "號"},
+                 source_quote="q", confidence="high"),
+    ])
+    payload = json.loads(export_review_json(batch, find_issues(batch)))
+    assert {p["group"] for p in payload["proposals"]} == {"703334"}
+
+
+# --- The content-hash guard, in the shapes a reviewer actually produces -------
+
+
+def test_editing_a_field_and_signing_the_same_proposal_both_apply():
+    """The ordinary use of the page: every field is editable, and the same pass
+    ends with a signature.
+
+    The page exports field edits before the approval, both stamped with the hash as
+    exported. Recomputing the hash per decision compared the signature against a
+    proposal the same file had just edited and refused the whole thing - and the
+    advice it gave ("re-export and sign again") reproduced the failure, because the
+    loop was the reviewer's own edit.
+    """
+    tc = Proposal(
+        id="tc1", resource="text-codes", operation="create", person_id=0,
+        changes={"c_title_chn": "\u807d\u96ea\u5148\u751f\u96c6", "c_title": "old"},
+        source_quote="q", confidence="high",
+    )
+    b = batch(tc)
+    applied = apply_decisions(b, _decisions(
+        {"proposal_id": "tc1", "field": "c_title", "value": "Tingxue xiansheng ji"},
+        {"proposal_id": "tc1", "approved_by": "Hongsu Wang"},
+    ))
+    assert len(applied) == 2
+    assert b.proposals[0].changes["c_title"] == "Tingxue xiansheng ji"
+    assert b.proposals[0].approved_by == "Hongsu Wang"
+
+
+def test_a_stale_field_decision_is_refused_even_with_nothing_signed():
+    """The guard cannot ride on `approved_by`.
+
+    An ordinary person-data batch has no gated proposal at all, so a decisions.json
+    from before a regeneration would rewrite values on rows whose payload had
+    changed with nothing to notice.
+    """
+    p = person()
+    b = batch(p)
+    stale = _decisions({"proposal_id": "p1", "field": "c_dy", "value": 19})
+    p.changes["c_name_chn"] = "\u675c\u752b"          # the regeneration
+    b2 = batch(p)
+    with pytest.raises(StagingError, match="not the one in this staging file"):
+        apply_decisions(b2, stale)
+
+
+def test_re_applying_a_decisions_file_that_already_landed_is_still_a_no_op():
+    """Applying the same file twice changes the staging file the first time, so its
+    hash has moved by the second - but nothing would be changed, and refusing would
+    break re-running `apply-review`."""
+    b = batch(person(), posting(conflicts=[a_conflict("c1")]))
+    d = _decisions({"proposal_id": "p1o1", "conflict_id": "c1", "resolution": 65759})
+    assert len(apply_decisions(b, d)) == 1
+    assert apply_decisions(b, d) == []
+
+
+def test_the_hash_covers_the_conflicts_a_decision_would_settle():
+    """Conflict ids are generated (`c1`, `parent`), so a regeneration can reuse one
+    for a different question - and a stored resolution for the old `parent` would
+    silently answer the new one, clearing a review blocker nobody looked at."""
+    def prop(conflicts):
+        return Proposal(
+            id="p1", resource="postings", operation="create", person_id=5000,
+            changes={"c_office_id": 1}, source_quote="q", confidence="high",
+            conflicts=conflicts,
+        )
+
+    def conflict(field, options):
+        return Conflict(
+            id="c1", field=field, description="which one?",
+            options=[ConflictOption(value=v, rationale="r") for v in options],
+        )
+
+    base = proposal_content_hash(prop([conflict("c_office_id", [1, 2])]))
+    assert proposal_content_hash(
+        prop([conflict("c_office_id", [1, 2])])) == base
+    assert proposal_content_hash(
+        prop([conflict("c_office_id", [1, 3])])) != base, "options changed"
+    assert proposal_content_hash(
+        prop([conflict("c_addr", [1, 2])])) != base, "a different question"
+    assert proposal_content_hash(prop([])) != base, "the conflict is gone"
+
+
+def test_rewording_a_rationale_does_not_invalidate_a_decision():
+    """The other half. Re-deciding because a sentence was rephrased would be
+    friction with no safety in it."""
+    def prop(rationale):
+        return Proposal(
+            id="p1", resource="postings", operation="create", person_id=5000,
+            changes={"c_office_id": 1}, source_quote="q", confidence="high",
+            conflicts=[Conflict(
+                id="c1", field="c_office_id", description="which one?",
+                options=[ConflictOption(value=1, rationale=rationale)])],
+        )
+
+    assert proposal_content_hash(prop("first wording")) \
+        == proposal_content_hash(prop("second wording"))

@@ -1,26 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Turn dataset.json into a Track A staging batch.
+"""Track A: 49 `office` aggregate creates. **DROPPED on 2026-09-11 - will not run.**
 
-    python tools/salt-admin/emit_staging.py \
-        --dataset data/salt-admin/dataset.json \
-        --batch-id 2026-09-10-salt-administration
+This emitter is kept as the working behind a decision, not as a tool. Two things
+changed on 2026-09-11:
 
-Writes `data/staging/<batch-id>/proposal.yaml`: one `office` aggregate create per
-emitted unit, in the schema `src/cbdb_agent/staging.py` validates. From there it is
-an ordinary batch:
+* A separate import had already entered the salt-administration **post titles**
+  into `OFFICE_CODES`. Running this would propose 49 more office codes on top.
+* Ning Hao's list names the **institutions** (都轉運鹽使司 and its 分司), not the
+  posts held in them. An institution with a 治所 and a parent is a place, which is
+  where he proposed putting it in the first place. It now goes to `ADDR_CODES` and
+  `ADDR_BELONGS_DATA` through `tools/salt-admin/emit_addresses.py`.
 
-    python -m cbdb_agent validate --staging data/staging/<batch-id>/proposal.yaml
-    # -> preview.md + review.json, reviewed in tools/review/index.html
-    python -m cbdb_agent submit   --staging data/staging/<batch-id>/proposal.yaml
+So `main()` refuses. `build_batch()` is left importable because the tests around it
+still document what Track A would have written and why the approval gate held -
+but nothing here produces a file any more, and `OFFICE_CODES` has no delete path
+(API.md 13.3), so an accidental run would not be undoable.
 
-**`approved_by` is written as an explicit `null` on every proposal and this script
-will not fill it in.** `office` is approval-gated (AGENTS.md rule 12): global
-reference data, visible to everyone, referenced by any number of person rows.
-`staging.find_issues()` raises a structural error until a named human puts their name
-there, and that refusal is the feature. Nothing here should make it easier to skip.
-
-Only Track A. The address rows have no API path at all - see
-`docs/11-salt-administration-design.md` §4, and `build_dataset.py`'s SQL output.
+See `docs/11-salt-administration-design.md`, header and §5.
 """
 
 from __future__ import annotations
@@ -117,7 +113,25 @@ def build_batch(dataset: dict, batch_id: str) -> dict:
     }
 
 
+DROPPED = (
+    "Track A was dropped on 2026-09-11: a separate import had already covered the "
+    "salt-administration post titles, and Ning Hao's list names the INSTITUTIONS, "
+    "which belong in the place-name tables. This emitter no longer produces a "
+    "batch - OFFICE_CODES has no delete path, so 49 accidental office creates "
+    "could not be undone.\n"
+    "What to run instead:\n"
+    "  python tools/salt-admin/emit_addresses.py --batch-id <id>"
+)
+
+
 def main(argv=None) -> int:
+    print("error: " + DROPPED, file=sys.stderr)
+    return 1
+
+
+def _superseded_main(argv=None) -> int:
+    """The body as it stood on 2026-09-10, unreachable. Kept so the decision can be
+    read against what it replaced rather than against an empty function."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", type=Path, default=Path("data/salt-admin/dataset.json"))

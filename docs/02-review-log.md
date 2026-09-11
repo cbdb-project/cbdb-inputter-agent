@@ -1730,3 +1730,240 @@ live database. Each pass found something the previous one had not.
    codex confirmed the interleaving closes, including in `--admin-cat zero` mode.
 
 Sign-off: 0 blockers, 0 serious. **514 tests** (384 before this milestone).
+
+---
+
+## Milestone: the salt-administration addresses go through the API — 2026-09-11
+
+The day after the design was written, both of its central claims stopped being true.
+Upstream added `ADDR_CODES`, `ADDR_BELONGS_DATA`, `ADMIN_CAT_CODES` and
+`OFFICE_TYPE_TREE` to `config/code_table_writes.php` (`ea6badb0`, `ba2d0ec6`,
+`76ac0a47`), in answer to `docs/11` §4; and a separate import entered 43 salt-related
+`OFFICE_CODES` rows, which turned out to be the *post titles* rather than the
+institutions Ning Hao's list names.
+
+### What was built
+
+Three approval-gated resources in `models.py` — `addr_codes`, `addr_belongs_data`,
+`admin_cat_codes` — with their whitelists transcribed from
+`config/code_table_writes.php` and pinned by a drift guard (`docs/04` §16–18 is the
+written form). Cross-proposal primary-key references, `{"ref": "<proposal id>"}`, in
+`staging.py` and `batch_runner.py`, because an `ADDR_BELONGS_DATA` key is built out
+of ids the server has not minted yet. `tools/salt-admin/emit_addresses.py` and
+`live_state.py`, which turn `dataset.json` into the batch and answer "is this
+already there?" for two tables with two different read surfaces. `c_belongs_to` and
+`c_admin_cat_code` resolve to names in the review page, and `code_lookup` gained an
+`admin_cat` table with no endpoint at all. `AGENTS.md` rules 11 and 12 were
+rewritten around the six creatable code tables.
+
+### The office half was checked, then dropped
+
+The 43 rows that landed in production at 01:42 UTC are internally clean and have
+**zero overlap** with the 49 institutions — checked name by name, under every
+spelling, in both dynasties. They are two different columns of one subject:
+鹽使司分司同知 and 鹽運司委員 are posts; 兩淮都轉運鹽使司泰州分司 is a bureau. One
+observation worth recording: the 43 attach one `OFFICE_TYPE_TREE` level higher than
+the 38 salt offices that were already there.
+
+The user decided the institutions belong in `ADDR_CODES` alone, which was Ning Hao's
+proposal in the first place and which avoids the objection Track A had already
+recorded against itself. `tools/salt-admin/emit_staging.py` now refuses to run:
+`OFFICE_CODES` has no delete path, so 49 accidental creates would not be undoable.
+
+### `docs/07` re-sync
+
+`76ac0a47` (commit date 2026-09-10 18:01:31 +0800), `API.md` blob `b847dc89`, 2748
+lines, v1 appendix from line 1698. Previous stamp `b2df35f5` (2026-09-04), 2701
+lines — 10 commits, +65/−18 lines apart. §2.2 was rewritten around the six-table
+registry, and the four §11 facts `docs/11` had recorded as digest debt (resubmit
+needs an explicit `"operation": "create"`; `DELETE /operations/{id}/cancel`;
+re-approving re-applies the change; `__applied_operation_id`) were finally written
+down.
+
+### What the review passes found
+
+Three review agents on the working tree, then codex. The findings that changed the
+shape of the work, rather than a line of it:
+
+**A mutating request was being retried.** `http_client`'s `timeout=30` is exactly the
+production `max_execution_time`, so the slow write is precisely the one that times
+out client-side while the server commits — and the retry then makes a second,
+undeletable row whose id `_assigned_pk` hands to every child referencing that create.
+Neither a network error nor a 5xx means "not applied". Both now raise immediately on
+a mutating request; `429` stays retryable because it is a pre-processing rejection,
+and it now aborts the batch (the budget is per source IP, so the next proposal faces
+the same wall — and on a write a dead token shows up as 429, not 401).
+
+**`_assigned_pk` would have handed a child the sentinel `0`.** `0` is the documented
+"unknown" value for every numeric id in CBDB, and it is what a create-time echo
+carries when the key was never supplied. Substituted into an `ADDR_BELONGS_DATA` key
+it would have filed the whole sub-hierarchy under 未詳, permanently. It now refuses
+`0`, negative sentinels, and anything that is not an integer.
+
+**A `{"ref": ...}` inside a list was invisible to all three mechanisms at once.** The
+address pseudo-fields (`postings.c_addr` and friends) are lists of address ids and
+are the natural place to reference a place the same batch creates. `iter_pk_refs`,
+the malformed-dict guard and `substitute_pk_refs` all looked only at top-level
+values, so such a reference was not ordered after its parent, not substituted, and
+not flagged — it went out as a literal dict, which PHP casts to `1`. All three walk
+lists now.
+
+**The composite-key check tested presence, not value.** `c_lastyear: null` passed
+`find_issues` and failed server-side mid-run — which is exactly the failure the check
+had been added to prevent.
+
+**A signature survived into a different batch.** The review page stores decisions in
+`localStorage` keyed by batch id, and both batch ids and generated proposal ids are
+stable across a regeneration. So settling one of `docs/11` §9's open items and
+re-running the generator brought every earlier signature back onto rows whose parent,
+years or category had changed: the header read "0 missing approvals" with nobody
+having typed anything, and `decisions.json` exported sign-offs for rows no human had
+seen. The same hole existed on the command line. Each proposal now carries a
+`content_hash` over what actually gets written; the page drops stored decisions whose
+hash moved and says how many, and `apply-review` refuses a signature stamped for a
+different version. `review.json` schema → 3.
+
+**Nothing checked the 55 place names for duplicates.** The whole duplicate-check
+argument had been applied to the 2 category rows and not to the 55 `ADDR_CODES`
+creates, which are equally undeletable and equally undeduped — and which, unlike
+`ADMIN_CAT_CODES`, *can* be read live. `live_state.find_existing_addresses()` now
+asks `/api/select/search/addr` for each, matching `c_name_chn` exactly (the endpoint
+does substring search, and a hit on 泰州 is not a duplicate of
+兩淮都轉運鹽使司泰州分司). Both checks are mandatory — the `--skip-live-check` escape
+hatch is gone, because `confidence: low` gates nothing anywhere, so "marked
+low-confidence" was a comment, not a safeguard.
+
+**`operations_since` could skip a row.** Paging is by offset over a list ordered
+`updated_at DESC`, and with a month-old baseline the walk is ~90 sequential
+rate-limited requests. Anything written during it pushes the tail down one slot and
+one already-passed row is never read — possibly the create being checked for. It now
+remembers the newest operation id, re-reads page 1 afterwards, and redoes the walk if
+the log moved; three unsettled attempts raise rather than answer. A response with no
+`pagination.last_page` raises too, instead of silently degrading the composition to
+snapshot-only.
+
+**A rename was matched with `!=` across two sources.** SQLite gives a native int;
+`resource_data` from PDO-MySQL under emulated prepares gives `"300"`. The mismatch
+left a stale "exists" answer for a category that had been renamed away.
+
+**Re-running the generator was indistinguishable from running it.** It would
+overwrite a `proposal.yaml` a human had just signed, and recreate an archived batch
+id whose rows had already landed. Both now refuse.
+
+**43 edges would have written a generator key into a public column.** `c_notes` got
+`兩淮都轉運鹽使司@揚州府` — the `@治所` half distinguishes the parent's seat periods
+and is worth keeping, the `@` is programmer syntax. It now reads
+`隸屬：兩淮都轉運鹽使司（治揚州府）`, with the source note the design requires.
+
+**The bulk-approval control claimed a safeguard it did not provide.** Moving "Sign
+all 114" from the header chips into the footer was described in the code and in a
+test as meaning the reviewer had scrolled past what they were signing — but the
+footer is `position:fixed`. The comment now says what is true (it is a grouping with
+the other batch-wide controls), and the actual safeguard is the confirmation, which
+now lists each table in the selection with its own irreversibility instead of one
+flattened worst case that both understated `ADDR_BELONGS_DATA` and was false for
+`office`.
+
+**`person_id: 0` is not a person.** All 114 proposals grouped under a single
+accordion headed "0". They group by table now — the axis that decides how reversible
+each row is.
+
+### Tests
+
+**656 tests** (514 at the end of the previous milestone). The suite gained the things three reviewers separately found it could
+not fail on: the dry-run placeholder escaping into a live run, reference cycles at
+validate time (the old test exercised `topological_submission_order`, which raised
+before the change too), the composite-key check, the empty-endpoint guard, and every
+refusal path in `emit_addresses.main()` — which had no test at all, so deleting the
+ambiguity check left the whole suite green. Mutation-checked: 14 deliberate breakages
+across `staging.py`, `batch_runner.py`, `live_state.py` and `emit_addresses.py`, all
+caught.
+
+`tools/salt-admin/index.html` and `docs/11` were brought in line with what the code
+now does; `docs/11` §8 ("what must not happen") had been forbidding exactly the three
+things this branch does, and §5.4 still described client-assigned ids and a
+`MAX(c_addr_id)` transaction.
+
+### The second review round
+
+Three more that mattered, all found by re-reviewing the fixes rather than the
+original code:
+
+- **The hash guard refused the ordinary case.** A reviewer who edits a field and
+  signs the same proposal exports both decisions in one file, the signature stamped
+  with the hash as exported. Recomputing the hash per decision compared the
+  signature against a proposal that same file had just edited, refused the whole
+  file, and advised "re-export and sign again" — which reproduces the failure,
+  because the loop is the reviewer's own edit. The comparison is now against the
+  proposal as it entered `apply_decisions`, and it only fires when a decision would
+  actually change something, so re-running `apply-review` stays a no-op.
+- **The guard also covered too little.** It rode on `approved_by`, but a `field`
+  decision rewrites a value and a `conflict` decision settles which value is
+  written — and an ungated person-data batch has no signature for the check to ride
+  on. Every decision carries the hash now.
+- **The composite-key check hard-failed `postings`.** Scoped by "the resource
+  assigns no key", it also caught `postings`, whose PK tuple contains `c_office_id`
+  while the server assigns `c_posting_id` — so a posting staged with an unresolved
+  office code became a structural error, and deferring the row did not clear it. It
+  is now limited to resources the server assigns nothing for, which is the case it
+  was written for.
+- **A category update was read as a deletion.** An `operations` row for an update
+  carries only the changed columns; the key lives in `resource_id`. The replay
+  removed the baseline row by its enriched code and put back a payload with no code,
+  so an existing category resolved to "absent" — and the generator would have minted
+  the permanent duplicate while writing "absent" into the evidence the human signs.
+- **`find_existing_addresses` read one response shape of three.** `HttpClient.get`
+  wraps a bare JSON array as `{"raw": [...]}`, and a paginated answer was read as
+  complete. Both produced "no duplicates". It now handles all three and refuses a
+  partial page rather than concluding "absent" from it.
+
+Documentation: the digest had inverted the resubmit precondition (`pending`/
+`rejected` are the states that *can* be resubmitted, not the ones that cannot), and
+both it and `docs/04` presented `API.md`'s counterfactual — what smallint truncation
+*would* do without the guard — as live behaviour, when the actual answer is
+422 `out_of_range`. `AGENTS.md` called a code-table `update` a "full-row" write
+(that is the aggregate semantics), claimed `office-type-tree` was the only writable
+one of the unmodelled five (all five are), said there is "nowhere to read back" for
+resources that have public lookups, and described a defect in `staging.py` /
+`http_client.py` that had already been fixed. The three upstream commits are dated
+2026-09-10, not 2026-09-11 — that is the date they were pulled here.
+
+### codex
+
+Four that the three review agents had all missed, and two of them are about the
+mechanism this whole branch introduced:
+
+- **A `{"ref": ...}` was accepted in any column, pointing at any create with one
+  server-assigned key.** Nothing said which column a reference belongs in or what
+  kind of row it may name — so `c_firstyear: {ref: a1}` validated and then had a
+  minted `ADDR_CODES` id substituted into the first year of a key that can never be
+  corrected, and `c_belongs_to: {ref: cat-yunsi}` filed a place under a category
+  code. `models.PK_REF_TARGETS` now enumerates the foreign-key slots and the
+  resource each must point at; anything else is a structural error.
+- **The duplicate check had a generate-to-submit window** — and the review that sits
+  in that window is the point of the delay. `ADDR_CODES` is now re-checked live
+  immediately before every create (`preflight.assert_addr_create_is_not_a_duplicate`,
+  the same shape as the existing office guard, and the "if a second one appears,
+  make this spec-driven" note in `mutation_api` finally acted on).
+  `ADMIN_CAT_CODES` cannot be: it has no read endpoint, so the composed answer at
+  generation time is all there is — one more reason to keep category creates to the
+  two that are genuinely needed.
+- **A redirect re-sent the write.** `requests` follows a 307/308 transparently,
+  re-POSTing the body, and the client only ever sees the final response: two rows,
+  one reported success. Writes no longer follow redirects at all; a 3xx on one is an
+  error to look at.
+- **An indeterminate write did not stop the batch.** Not retrying a timed-out write
+  was only half the fix — the other half is that the row may exist, so the rows
+  after it cannot be trusted to reference it and a re-run duplicates whatever
+  landed. Those two errors now carry `indeterminate = True` and `batch_runner` stops
+  the batch, leaving one uncertain row named in `results.json`.
+- Smaller: the content hash now covers each proposal's conflicts (their ids, fields
+  and option values), because conflict ids are generated and a regeneration can
+  reuse one for a different question.
+
+Sign-off: 0 blockers, 0 serious outstanding. **656 tests**, and 21 deliberate
+breakages of the rules above were re-run and caught. The batch is generated,
+validated and reviewed, with **114 errors, all of them the missing `approved_by`**,
+and a dry run through `batch_runner` returns 114 successes with every `{"ref": ...}`
+resolved in dependency order. Nothing has been submitted; the signature is the
+user's to give.

@@ -306,10 +306,17 @@ function render() {
       <p class="eyebrow">CBDB reference data · pre-submission review</p>
       <h1>明清鹽運使司與分司</h1>
       <p class="standfirst">Ning Hao's compilation of the Ming and Qing salt
-      administration, prepared for CBDB as <strong>both</strong> office names and
-      place names. Every row below is a proposed change to global reference data —
-      visible to every CBDB user and referenced by any number of person records.
-      Nothing here has been submitted.</p>
+      administration, prepared for CBDB as place names. Every row below is a
+      proposed change to global reference data — visible to every CBDB user and
+      referenced by any number of person records. Nothing here has been
+      submitted.</p>
+      <p class="standfirst" style="border-left:3px solid var(--warn);padding-left:12px">
+      <strong>Track A was dropped on 2026-09-11.</strong> A separate import had
+      already covered the salt-administration <em>post titles</em>, and Ning Hao's
+      list names the <em>institutions</em> — which belong in the place-name tables,
+      as he proposed. The office panels below are kept only as the working that led
+      to that decision; <strong>nothing in Track A is being submitted</strong>. What
+      ships is Track B, and it now goes through the API like anything else.</p>
       <p class="provenance">
         <span>Source · ${H(d.source.xlsx)}</span>
         <span>Snapshot · <span class="mono">${H(d.source.snapshot)}</span> (${H((d.source.snapshot_generated_at||"").slice(0,10))})</span>
@@ -319,25 +326,28 @@ function render() {
 
     <div class="tracks">
       <div class="track a">
-        <h2>Track A · 官名表 <span class="pill">API</span></h2>
-        <p><span class="verdict">${H(s.office_creates)} <code>office</code> aggregate creates.</span>
-        Goes through the normal staged, previewed, audit-logged path. Approval-gated:
-        the batch stays refused until a named human signs <code>approved_by</code>.</p>
+        <h2>Track A · 官名表 <span class="pill" style="background:var(--warn-soft);color:var(--warn)">dropped</span></h2>
+        <p><span class="verdict">${H(s.office_creates)} <code>office</code> aggregate creates — NOT submitted.</span>
+        Superseded on 2026-09-11 by a separate import of the salt post titles. Kept
+        here as the working behind that decision, not as a plan.</p>
       </div>
       <div class="track b">
-        <h2>Track B · 地名表 <span class="pill" style="background:var(--warn-soft);color:var(--warn)">no API</span></h2>
+        <h2>Track B · 地名表 <span class="pill">API</span></h2>
         <p><span class="verdict">${H(s.address_rows)} <code>ADDR_CODES</code> rows,
         ${H(s.belongs_edges)} <code>ADDR_BELONGS_DATA</code> edges.</span>
-        <code>/api/v2</code> has no create path for either table, so these ship as a
-        transactional SQL script for someone with database access — not submitted by
-        this client.</p>
+        <code>/api/v2</code> gained create paths for both tables on 2026-09-11, so
+        these go through the normal staged, previewed, audit-logged path.
+        Approval-gated: the batch stays refused until a named human signs
+        <code>approved_by</code>. Emitted by
+        <code>tools/salt-admin/emit_addresses.py</code>; the SQL script this page
+        used to point at is superseded.</p>
       </div>
     </div>
 
     <div class="stats">
       <div class="stat"><b>${H(s.units_total)}</b><span>units in source</span></div>
       <div class="stat${s.units_excluded ? " is-blocker" : ""}"><b>${H(s.units_excluded)}</b><span>excluded</span></div>
-      <div class="stat"><b>${H(s.office_creates)}</b><span>office creates</span></div>
+      <div class="stat" style="opacity:.55"><b>${H(s.office_creates)}</b><span>office creates (dropped)</span></div>
       <div class="stat"><b>${H(s.address_rows)}</b><span>address rows</span></div>
       <div class="stat"><b>${H(s.belongs_edges)}</b><span>parent edges</span></div>
       <div class="stat${s.findings_blocker ? " is-blocker" : ""}"><b>${H(s.findings_blocker)}</b><span>blockers</span></div>
@@ -346,9 +356,9 @@ function render() {
 
     ${blocked.length ? `
     <h2 class="sec">Excluded<span class="count">${blocked.length} units, absent from every output</span></h2>
-    <p class="sec-note">These are not deferred rows — they are not in the staging batch,
-    not in the CSVs and not in the SQL. Each has a defect in the source that no default
-    can settle honestly.</p>
+    <p class="sec-note">These are not deferred rows — they are not in the staging batch
+    and not in the CSVs. Each has a defect in the source that no default can settle
+    honestly.</p>
     ${blocked.map(u => `
       <div class="finding">
         <span class="sev blocker">blocked</span>
@@ -373,10 +383,12 @@ function render() {
       </div>`).join("")}</div>
 
     <h2 class="sec">Every proposed row<span class="count">by 運司, both tracks side by side</span></h2>
-    <p class="sec-note">The left pane is what goes to the API; the right pane is what
-    goes in the SQL script. They are two representations of one unit, which is the
-    whole point of the request. The bar under each seat shows the period against its
-    dynasty, so a gap, an overlap or a missing stretch reads without arithmetic.</p>
+    <p class="sec-note">The left pane is the office reading of each unit, kept for
+    reference after Track A was dropped; <strong>the right pane is what actually
+    ships</strong>, now through the API rather than a SQL script. They are two
+    representations of one unit, which is the whole point of the request. The bar
+    under each seat shows the period against its dynasty, so a gap, an overlap or a
+    missing stretch reads without arithmetic.</p>
 
     <div class="controls">
       ${chip("dynasty", "all", "Both dynasties")}
@@ -504,7 +516,7 @@ function unitHTML(u) {
     ${!u.emitted ? `<div class="ufind"><div class="blocker">${H(u.blocked_reason || "Carries a blocker finding — see below.")}</div></div>` : `
     <div class="ubody">
       <div class="pane a">
-        <h4>Track A · OFFICE_CODES <span class="pill">create</span></h4>
+        <h4>Track A · OFFICE_CODES <span class="pill" style="background:var(--warn-soft);color:var(--warn)">dropped 2026-09-11</span></h4>
         <dl class="kv">
           <dt>name</dt><dd>${han(o.name)}</dd>
           <dt>name_alt</dt><dd>${nul(o.name_alt, han)}</dd>
@@ -529,7 +541,7 @@ function unitHTML(u) {
       </div>
 
       <div class="pane b">
-        <h4>Track B · ADDR_CODES <span class="pill" style="background:var(--warn-soft);color:var(--warn)">SQL only</span></h4>
+        <h4>Track B · ADDR_CODES <span class="pill">create</span></h4>
         <dl class="kv" style="margin-bottom:8px">
           <dt>c_name_chn</dt><dd>${han(u.name)}</dd>
           <dt>c_name</dt><dd class="mono">${H(u.romanization)}

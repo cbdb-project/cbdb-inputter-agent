@@ -24,7 +24,10 @@ from typing import Any
 
 from .http_client import HttpClient
 from .models import FieldWhitelistError, get_resource_spec
-from .preflight import assert_office_create_is_not_a_duplicate
+from .preflight import (
+    assert_addr_create_is_not_a_duplicate,
+    assert_office_create_is_not_a_duplicate,
+)
 
 
 def _build_envelope(
@@ -154,15 +157,31 @@ class MutationApi:
         # target system, and an unreachable host should not turn a previewed office
         # create into a failed proposal. The real create cannot skip it.
         #
-        # Keyed on the resource for now because office is the only resource that needs
-        # it. If a second one appears, make this a spec-driven hook rather than growing
-        # the condition.
-        if spec.key == "office" and not self._client.dry_run:
-            assert_office_create_is_not_a_duplicate(
-                self._client,
-                name=merged_changes.get("name"),
-                dynasty_code=merged_changes.get("dynasty_code"),
-            )
+        # Spec-driven: each entry names the check and the field it reads. Two
+        # resources need one now - `office`, whose server allocates max+1 and
+        # inserts with no name lookup, and `addr_codes`, which has no unique key on
+        # `c_name_chn` and no delete path. Both are checked HERE, immediately before
+        # the request, and not only where the batch was generated: the review in
+        # between is the point of the delay, and anything entered by anyone else in
+        # that window would otherwise become a permanent duplicate.
+        #
+        # `ADMIN_CAT_CODES` cannot be checked here - it has no read endpoint at all
+        # (API.md 13.2), so the only answer available is the snapshot-plus-
+        # operations composition `tools/salt-admin/live_state.py` makes at
+        # generation time, and replaying it per create would be minutes of
+        # rate-limited requests inside the write loop. Two rows are also a far
+        # smaller surface than 55.
+        if not self._client.dry_run:
+            if spec.key == "office":
+                assert_office_create_is_not_a_duplicate(
+                    self._client,
+                    name=merged_changes.get("name"),
+                    dynasty_code=merged_changes.get("dynasty_code"),
+                )
+            elif spec.key == "addr_codes":
+                assert_addr_create_is_not_a_duplicate(
+                    self._client, name=merged_changes.get("c_name_chn")
+                )
 
         envelope = _build_envelope(
             resource_string=alias,

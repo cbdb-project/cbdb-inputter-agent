@@ -7,6 +7,7 @@ from cbdb_agent.config import Config, ConfigError
 from cbdb_agent.http_client import (
     AuthenticationError,
     AuthorizationError,
+    CbdbApiError,
     ConflictError,
     HttpClient,
     MutatingFlagMismatch,
@@ -276,7 +277,32 @@ def test_429_then_success_returns_body(tmp_path):
 
 
 @responses.activate
-def test_5xx_retries_then_raises_server_error(tmp_path):
+def test_5xx_retries_on_a_read(tmp_path):
+    client, _ = make_client(
+        tmp_path, dry_run=False, confirm_prod="http://localhost:8000", sleep=lambda s: None
+    )
+    for _ in range(HttpClient.MAX_RETRIES):
+        responses.add(
+            responses.GET,
+            "http://localhost:8000/api/v2/persons",
+            json={"message": "Internal Server Error"},
+            status=500,
+        )
+    with pytest.raises(ServerError):
+        client.get("/api/v2/persons")
+    assert len(responses.calls) == HttpClient.MAX_RETRIES
+
+
+@responses.activate
+def test_5xx_is_not_retried_on_a_write(tmp_path):
+    """A 5xx does not mean "not applied".
+
+    It can be raised after the row is written - a failure in a post-commit step, or
+    a proxy giving up on a response the app already sent. Re-sending then makes a
+    second row, and for a code table that is unrecoverable: no unique key on the
+    content (API.md 13.2) and no delete path (13.3). One failed proposal that a
+    human reconciles against GET /api/v2/operations is the cheaper outcome.
+    """
     client, _ = make_client(
         tmp_path, dry_run=False, confirm_prod="http://localhost:8000", sleep=lambda s: None
     )
@@ -287,9 +313,9 @@ def test_5xx_retries_then_raises_server_error(tmp_path):
             json={"message": "Internal Server Error"},
             status=500,
         )
-    with pytest.raises(ServerError):
+    with pytest.raises(ServerError, match="NOT retried"):
         client.post("/api/v2/create", json_body={}, mutating=True)
-    assert len(responses.calls) == HttpClient.MAX_RETRIES
+    assert len(responses.calls) == 1, "the write must be sent exactly once"
 
 
 @responses.activate
@@ -342,18 +368,18 @@ def test_read_only_endpoint_with_mutating_true_is_rejected(tmp_path):
 
 
 @responses.activate
-def test_network_error_retries_then_raises_network_error(tmp_path):
+def test_network_error_retries_then_raises_network_error_on_a_read(tmp_path):
     sleeps = []
     client, audit_log = make_client(
         tmp_path, dry_run=False, confirm_prod="http://localhost:8000", sleep=sleeps.append
     )
     responses.add(
-        responses.POST,
-        "http://localhost:8000/api/v2/create",
+        responses.GET,
+        "http://localhost:8000/api/v2/persons",
         body=requests.exceptions.ConnectionError("connection refused"),
     )
     with pytest.raises(NetworkError):
-        client.post("/api/v2/create", json_body={}, mutating=True)
+        client.get("/api/v2/persons")
     assert len(responses.calls) == HttpClient.MAX_RETRIES
     assert len(sleeps) == HttpClient.MAX_RETRIES - 1
 
@@ -364,14 +390,41 @@ def test_network_error_retries_then_raises_network_error(tmp_path):
 
 
 @responses.activate
-def test_network_error_then_success_returns_body(tmp_path):
+def test_network_error_then_success_returns_body_on_a_read(tmp_path):
+    client, _ = make_client(
+        tmp_path, dry_run=False, confirm_prod="http://localhost:8000", sleep=lambda s: None
+    )
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/persons",
+        body=requests.exceptions.ConnectionError("connection refused"),
+    )
+    responses.add(
+        responses.GET,
+        "http://localhost:8000/api/v2/persons",
+        json={"ok": True},
+        status=200,
+    )
+    body = client.get("/api/v2/persons")
+    assert body["ok"] is True
+
+
+@responses.activate
+def test_a_timed_out_write_is_never_re_sent(tmp_path):
+    """The case this rule exists for.
+
+    `timeout=30` is exactly the production max_execution_time API.md section 1
+    records, so a slow write is precisely the one that times out client-side while
+    the server commits. The second send would create a duplicate whose id
+    batch_runner would then hand to every child referencing this create.
+    """
     client, _ = make_client(
         tmp_path, dry_run=False, confirm_prod="http://localhost:8000", sleep=lambda s: None
     )
     responses.add(
         responses.POST,
         "http://localhost:8000/api/v2/create",
-        body=requests.exceptions.ConnectionError("connection refused"),
+        body=requests.exceptions.ReadTimeout("timed out"),
     )
     responses.add(
         responses.POST,
@@ -379,6 +432,26 @@ def test_network_error_then_success_returns_body(tmp_path):
         json={"ok": True},
         status=200,
     )
+    with pytest.raises(NetworkError, match="may already have been applied"):
+        client.post("/api/v2/create", json_body={}, mutating=True)
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_a_rate_limited_write_is_still_retried(tmp_path):
+    """429 is the one that IS safe to re-send.
+
+    The application layer does not throttle writes at all (rule 9), so a 429 here
+    comes from a proxy or WAF that rejected the request before it reached the app -
+    nothing was applied.
+    """
+    client, _ = make_client(
+        tmp_path, dry_run=False, confirm_prod="http://localhost:8000", sleep=lambda s: None
+    )
+    responses.add(responses.POST, "http://localhost:8000/api/v2/create",
+                  json={"message": "Too Many Requests"}, status=429)
+    responses.add(responses.POST, "http://localhost:8000/api/v2/create",
+                  json={"ok": True}, status=200)
     body = client.post("/api/v2/create", json_body={}, mutating=True)
     assert body["ok"] is True
     assert len(responses.calls) == 2
@@ -760,3 +833,82 @@ def test_the_unambiguous_spellings_are_not_refused(tmp_path):
     gated = dict(routine, resource="office")
     with pytest.raises(MissingApprovalError, match="without an approval signature"):
         client.post("/api/v2/create", json_body=gated, mutating=True)
+
+
+@responses.activate
+def test_a_write_never_follows_a_redirect(tmp_path):
+    """`requests` would re-POST the body transparently.
+
+    307 and 308 preserve the method and the body by definition, and the client only
+    ever sees the final response - so a redirect on a create is a second row and one
+    reported success, on tables with no delete path. Reads still follow.
+    """
+    client, _ = make_client(
+        tmp_path, dry_run=False, confirm_prod="http://localhost:8000",
+        sleep=lambda s: None,
+    )
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        status=307, headers={"Location": "https://localhost:8000/api/v2/create"},
+        json={},
+    )
+    responses.add(
+        responses.POST, "https://localhost:8000/api/v2/create",
+        json={"ok": True}, status=200,
+    )
+    with pytest.raises(ServerError, match="Redirect"):
+        client.post("/api/v2/create", json_body={}, mutating=True)
+    assert len(responses.calls) == 1, "the body must not be sent to the new location"
+
+
+@responses.activate
+def test_a_read_still_follows_a_redirect(tmp_path):
+    client, _ = make_client(
+        tmp_path, dry_run=False, confirm_prod="http://localhost:8000",
+        sleep=lambda s: None,
+    )
+    responses.add(
+        responses.GET, "http://localhost:8000/api/v2/persons",
+        status=302, headers={"Location": "http://localhost:8000/api/v2/people"},
+    )
+    responses.add(
+        responses.GET, "http://localhost:8000/api/v2/people",
+        json={"ok": True}, status=200,
+    )
+    assert client.get("/api/v2/persons")["ok"] is True
+
+
+@responses.activate
+def test_an_indeterminate_write_is_marked_as_such(tmp_path):
+    """The marker `batch_runner` reads to stop the batch: we do not know whether
+    this row exists, so nothing after it can be trusted to reference it and a
+    re-run would duplicate whatever landed."""
+    client, _ = make_client(
+        tmp_path, dry_run=False, confirm_prod="http://localhost:8000",
+        sleep=lambda s: None,
+    )
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        body=requests.exceptions.ReadTimeout("timed out"),
+    )
+    with pytest.raises(NetworkError) as caught:
+        client.post("/api/v2/create", json_body={}, mutating=True)
+    assert caught.value.indeterminate is True
+
+
+@responses.activate
+def test_a_422_is_not_indeterminate(tmp_path):
+    """A validation failure means the row was NOT written. Marking it would stop a
+    batch for a fault confined to one proposal."""
+    client, _ = make_client(
+        tmp_path, dry_run=False, confirm_prod="http://localhost:8000",
+        sleep=lambda s: None,
+    )
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        json={"ok": False, "errors": {"changes": ["disallowed_fields: c_x"]}},
+        status=422,
+    )
+    with pytest.raises(CbdbApiError) as caught:
+        client.post("/api/v2/create", json_body={}, mutating=True)
+    assert getattr(caught.value, "indeterminate", False) is False
