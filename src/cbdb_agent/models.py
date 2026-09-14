@@ -79,19 +79,21 @@ class ResourceSpec:
     pseudo_fields: frozenset[str] = field(default_factory=frozenset)
     # basicinformation-only: fields allowed on create but blocked (immutable) on update
     update_immutable_fields: frozenset[str] = field(default_factory=frozenset)
-    # AGENTS.md rule 12: this resource is GLOBAL reference data, not one person's
-    # record - referenced by potentially tens of thousands of rows and visible to
-    # every other user, so a mistake is not confined to one record. Both staging.py
-    # and mutation_api.py refuse to write such a resource without an explicit human
-    # `approved_by`. This is the code backing for rule 12, which was previously
-    # enforced only by accident (the resources simply weren't modelled).
+    # This resource is GLOBAL reference data, not one person's record - referenced
+    # by potentially tens of thousands of rows and visible to every other user, so a
+    # mistake is not confined to one record. The flag no longer gates anything at
+    # write time (see AGENTS.md rule 12: the token holder IS the writer, and the
+    # server records `user_id` on every operation, so a second client-side signature
+    # recorded nothing new). What it still does is mark the resources an agent must
+    # NOT create on its own initiative: a missing book title or office code is a
+    # finding to report, with the evidence, not a gap to close silently.
     #
     # NOTE the reason is "global blast radius", NOT "undeletable" - those coincide
     # for TEXT_CODES/char_variant_map (API.md 13.3: no delete path at all) but not
     # for the `office`/`social-institution` entity aggregates (API.md 13.4: delete IS
-    # supported, guarded by 409 reference checks). If you gate one of those, don't
+    # supported, guarded by 409 reference checks). If you mark one of those, don't
     # inherit the undeletable wording.
-    requires_explicit_approval: bool = False
+    is_global_reference_data: bool = False
     # Fields that MUST be present in `changes` on create. Distinct from PK
     # completeness (validate_target_pk_for_create) and from the whitelist (which only
     # says what is *allowed*): this says what a create is meaningless without. Added
@@ -713,7 +715,7 @@ RESOURCE_SPECS["text_codes"] = ResourceSpec(
     server_assigned_pk_fields=frozenset({"c_textid"}),
     create_fields=_TEXT_CODES_FIELDS,
     update_fields=frozenset(),
-    requires_explicit_approval=True,
+    is_global_reference_data=True,
     # A TEXT_CODES row with no Chinese title is useless AND unfixable: c_title_chn is
     # not in the server's update whitelist (only c_title is), and the row cannot be
     # deleted. See docs/04-field-whitelists.md section 14.
@@ -731,10 +733,9 @@ RESOURCE_SPECS["text_codes"] = ResourceSpec(
 #     other strings the SERVER accepts, and both are deliberately omitted:
 #     (a) server-side, `offices` is matched by the POSTINGS handler first, so it writes
 #         a person's appointment record instead of an office code;
-#     (b) client-side, approval_gated_aliases() is built from these alias sets, and
-#         http_client._check_approval() matches it against the raw `resource` string -
-#         so registering `offices` here would make EVERY ROUTINE POSTINGS WRITE demand
-#         an approved_by. Do not add it.
+#     (b) client-side, an alias registered here claims the resource string for THIS
+#         spec, so registering `offices` would route every routine postings write
+#         through the office aggregate's whitelist. Do not add it.
 #   - Input fields are the aggregate's SEMANTIC short names, not OFFICE_CODES column
 #     names. The server also accepts the column names (c_office_chn, c_dy, ...); we
 #     register only the semantic set so there is exactly one way to say each thing and
@@ -750,7 +751,7 @@ RESOURCE_SPECS["text_codes"] = ResourceSpec(
 #     office code, and a narrower surface is the point for a resource this global.
 #   - Unlike text_codes, an office row IS deletable while unreferenced, so a mistake
 #     here is recoverable - but only until something references it. See the note on
-#     requires_explicit_approval above: do not inherit text_codes' "permanent" wording.
+#     is_global_reference_data above: do not inherit text_codes' "permanent" wording.
 _OFFICE_AGGREGATE_FIELDS = frozenset(
     {
         "name", "name_alt", "translation", "translation_alt",
@@ -771,7 +772,7 @@ RESOURCE_SPECS["office"] = ResourceSpec(
     server_assigned_pk_fields=frozenset({"c_office_id"}),
     create_fields=_OFFICE_AGGREGATE_FIELDS,
     update_fields=_OFFICE_AGGREGATE_FIELDS,
-    requires_explicit_approval=True,
+    is_global_reference_data=True,
     required_create_fields=_OFFICE_REQUIRED_FIELDS,
     required_update_fields=_OFFICE_REQUIRED_FIELDS,
     # The aggregate update writes NULL over anything you omit.
@@ -817,7 +818,7 @@ RESOURCE_SPECS["addr_codes"] = ResourceSpec(
     server_assigned_pk_fields=frozenset({"c_addr_id"}),
     create_fields=_ADDR_CODES_FIELDS,
     update_fields=_ADDR_CODES_FIELDS,
-    requires_explicit_approval=True,
+    is_global_reference_data=True,
     # A place row with no Chinese name is unusable and, with delete disabled,
     # permanent. Same reasoning as text_codes' c_title_chn.
     required_create_fields=frozenset({"c_name_chn"}),
@@ -839,7 +840,7 @@ RESOURCE_SPECS["addr_belongs_data"] = ResourceSpec(
     pk_fields=("c_addr_id", "c_belongs_to", "c_firstyear", "c_lastyear"),
     create_fields=frozenset({"c_source", "c_pages", "c_notes"}),
     update_fields=frozenset({"c_source", "c_pages", "c_notes"}),
-    requires_explicit_approval=True,
+    is_global_reference_data=True,
 )
 
 
@@ -860,7 +861,7 @@ RESOURCE_SPECS["admin_cat_codes"] = ResourceSpec(
     update_fields=frozenset(
         {"c_admin_cat_py", "c_admin_cat_hz", "c_admin_cat_trans", "c_notes"}
     ),
-    requires_explicit_approval=True,
+    is_global_reference_data=True,
     # Both name columns: a category with neither is unusable, undeletable, and
     # referenced by an FK from every ADDR_CODES row that picks it.
     required_create_fields=frozenset({"c_admin_cat_py", "c_admin_cat_hz"}),
@@ -906,18 +907,21 @@ def pk_ref_target_resource(spec_key: str, field: str) -> str | None:
     return PK_REF_TARGETS.get(spec_key, {}).get(field)
 
 
-def approval_gated_aliases() -> frozenset[str]:
-    """Every resource string that must never be written without an `approved_by`.
+def global_reference_aliases() -> frozenset[str]:
+    """Every resource string that names global reference data rather than one
+    person's record.
 
-    Exposed as a flat alias set so http_client.py can fail closed on the raw
-    envelope, without needing to understand ResourceSpec (AGENTS.md rule 12 has to
-    hold at the layer that actually sends the request, not only at the layer a
-    caller can choose to skip). Computed rather than hardcoded so a future gated
-    resource is covered automatically.
+    Not a gate — nothing refuses a write on the strength of this, and nothing in
+    the client calls it today: the preview and the review-page export both go
+    through `find_spec_by_alias(...).is_global_reference_data` on a single proposal.
+    It earns its place as the flat view the tests assert against, which is where the
+    `addresses`-vs-`addr-codes` near-miss and the `offices` alias trap are pinned —
+    both are questions about the whole alias space, not about one spec. Computed
+    rather than hardcoded so a future such resource is covered automatically.
     """
     aliases: set[str] = set()
     for spec in RESOURCE_SPECS.values():
-        if spec.requires_explicit_approval:
+        if spec.is_global_reference_data:
             aliases |= spec.create_aliases | spec.update_aliases | spec.delete_aliases
             aliases.add(spec.key)
     return frozenset(aliases)

@@ -32,10 +32,10 @@ Four things make this batch different from an ordinary one:
   unique key on its name columns, so a second run makes a second set. BOTH are
   therefore checked live before anything is emitted, by two different routes
   (`tools/salt-admin/live_state.py`), and the result of each check is written into
-  the batch - so the human who signs the rows is signing the evidence for them.
+  the batch - so the reviewer reads the evidence next to the rows it is about.
   There is no flag to skip this.
 * **The generator will not overwrite its own output.** A `proposal.yaml` that
-  already exists may carry signatures; a batch id that already appears under
+  already exists may carry a reviewer's decisions; a batch id that already appears under
   `data/processed/` has already been submitted. Both refuse rather than silently
   producing a pristine, unsigned file that looks ready to send again.
 """
@@ -78,9 +78,9 @@ HEADER = """\
 # made of ids the server assigns to the address creates, carried here as
 # `{{ref: <proposal id>}}` and substituted at submit time.
 #
-# EVERY proposal is approval-gated (AGENTS.md rule 12) and `validate` refuses the
-# batch until a named human replaces each `approved_by: null`. The agent must not
-# fill those in.
+# EVERY proposal writes GLOBAL reference data (AGENTS.md rule 12): visible to every
+# CBDB user, referenced by any number of person records, and not confined to one
+# row. Read it before submitting.
 #
 # NOTHING HERE CAN BE DELETED. Code-table delete is 403 (API.md 13.3). ADDR_CODES
 # and ADMIN_CAT_CODES can at least be corrected by a later update; an
@@ -173,7 +173,6 @@ def build_batch(dataset: dict, batch_id: str, *, admin_cat_mode: str,
                     f"operations since, run {evidence['checked_at']}."
                 ),
                 "confidence": "high",
-                "approved_by": None,
             })
 
     # --- 2. the address rows -------------------------------------------------
@@ -208,7 +207,6 @@ def build_batch(dataset: dict, batch_id: str, *, admin_cat_mode: str,
                     f"(/api/select/search/addr, {evidence['checked_at']})."
                 ),
                 "confidence": "high",
-                "approved_by": None,
             })
 
     # --- 3. the hierarchy edges ---------------------------------------------
@@ -237,8 +235,7 @@ def build_batch(dataset: dict, batch_id: str, *, admin_cat_mode: str,
                     "source_quote": f"{u['name_short']} {b['first']}–{b['last']} "
                                     f"隸屬 {label}",
                     "confidence": "high",
-                    "approved_by": None,
-                })
+                    })
 
     ncat = sum(1 for p in proposals if p["resource"] == "admin-cat-codes")
     naddr = sum(1 for p in proposals if p["resource"] == "addr-codes")
@@ -268,10 +265,10 @@ def build_batch(dataset: dict, batch_id: str, *, admin_cat_mode: str,
 
 
 def evidence_lines(ev: dict) -> list[str]:
-    """How "is this already there?" was answered, for the batch a human signs.
+    """How "is this already there?" was answered, recorded in the batch itself.
 
     Both tables, both routes, and the operations actually replayed - not just the
-    counts. A signer who cannot see which operations were composed cannot check
+    counts. A reader who cannot see which operations were composed cannot check
     the composition.
     """
     cats = ev["categories"]
@@ -311,7 +308,7 @@ def _refuse_to_clobber(out_dir: Path, processed_root: Path, batch_id: str) -> st
     Two different accidents, both silent:
 
     * `proposal.yaml` already exists. It may be the file a human has just typed
-      114 signatures into; regenerating writes a pristine unsigned one over it.
+      a reviewer's decisions into; regenerating writes a pristine one over them.
     * `data/processed/<batch-id>/` exists, which means `submit` has already
       archived this batch. Re-emitting produces a file that looks ready to send
       and would re-create every row that already landed - in tables with no
@@ -327,8 +324,8 @@ def _refuse_to_clobber(out_dir: Path, processed_root: Path, batch_id: str) -> st
                 f"for whatever is genuinely left to do.")
     path = out_dir / "proposal.yaml"
     if path.exists():
-        return (f"{path.as_posix()} already exists. It may carry approvals a human "
-                f"has typed in; this script will not write over them. Move or "
+        return (f"{path.as_posix()} already exists. It may carry edits a human "
+                f"has made; this script will not write over them. Move or "
                 f"delete it deliberately, or pass a different --batch-id.")
     return None
 
@@ -486,7 +483,6 @@ def main(argv=None) -> int:
     print(f"{len(batch['proposals'])} proposals -> {path}")
     for k, v in counts.items():
         print(f"  {k:<20} {v}")
-    print("every one needs an approved_by before `validate` will pass it (rule 12)")
     print(f"next: python -m cbdb_agent validate --staging {path.as_posix()}")
     return 0
 

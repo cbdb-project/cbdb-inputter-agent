@@ -172,7 +172,7 @@ def test_export_distinguishes_not_fetched_from_fetch_failed():
     assert entry["current_status"] == "fetch_failed" and entry["current_error"] == "404"
 
 
-def test_export_flags_an_approval_gated_proposal_and_counts_it():
+def test_export_flags_a_global_reference_proposal():
     tc = Proposal(
         id="tc1",
         resource="text-codes",
@@ -184,10 +184,11 @@ def test_export_flags_an_approval_gated_proposal_and_counts_it():
     )
     b = batch(tc)
     data = json.loads(export_review_json(b, find_issues(b)))
-    assert data["proposals"][0]["needs_approval"] is True
-    assert data["summary"]["missing_approvals"] == 1
-    # The structural error is carried through, so the page can show it inline.
-    assert any("approved_by" in i["message"] for i in data["proposals"][0]["issues"])
+    assert data["proposals"][0]["global_reference_data"] is True
+    # A well-formed one has nothing else wrong with it. Until 2026-09-14 this row
+    # carried a structural error for the missing `approved_by`; the flag is a label
+    # for the reviewer now, not a blocker.
+    assert [i for i in data["proposals"][0]["issues"] if i["severity"] == "error"] == []
 
 
 def test_export_survives_an_unknown_resource():
@@ -204,7 +205,7 @@ def test_export_survives_an_unknown_resource():
     )
     data = json.loads(export_review_json(batch(bad), find_issues(batch(bad))))
     assert data["proposals"][0]["resource_key"] is None
-    assert data["proposals"][0]["needs_approval"] is False
+    assert data["proposals"][0]["global_reference_data"] is False
 
 
 # --- apply --------------------------------------------------------------------
@@ -265,63 +266,6 @@ def test_apply_can_drop_a_field():
     )
     assert "c_dy" not in b.proposals[0].changes
     assert applied[0].kind == "drop"
-
-
-def test_apply_sets_an_approval():
-    tc = Proposal(
-        id="tc1",
-        resource="text-codes",
-        operation="create",
-        person_id=0,
-        changes={"c_title_chn": "聽雪先生集"},
-        source_quote="q",
-        confidence="high",
-    )
-    b = batch(tc)
-    apply_decisions(
-        b,
-        _decisions({"proposal_id": "tc1", "approved_by": "Hongsu Wang",
-                    "content_hash": proposal_content_hash(tc)}),
-    )
-    assert b.proposals[0].approved_by == "Hongsu Wang"
-    assert [i for i in find_issues(b) if i.severity == "error"] == []
-
-
-def test_apply_refuses_a_signature_for_a_version_of_the_proposal_that_changed():
-    """The gate has to survive a regeneration.
-
-    Proposal ids and batch ids are both derived from stable inputs, so a
-    decisions.json from before an open question was settled applied cleanly to the
-    rows that answering it had just altered - signing values no human had seen.
-    """
-    tc = Proposal(
-        id="tc1", resource="text-codes", operation="create", person_id=0,
-        changes={"c_title_chn": "聽雪先生集"},
-        source_quote="q", confidence="high",
-    )
-    signed_hash = proposal_content_hash(tc)
-    tc.changes["c_title_chn"] = "勤齋集"      # the regeneration
-    b = batch(tc)
-    with pytest.raises(StagingError, match="not the one in this staging file"):
-        apply_decisions(b, _decisions({
-            "proposal_id": "tc1", "approved_by": "Hongsu Wang",
-            "content_hash": signed_hash}))
-    assert b.proposals[0].approved_by is None
-
-
-def test_apply_refuses_a_signature_with_no_content_hash_at_all():
-    """A decisions.json exported before the check existed cannot be trusted either,
-    and the message has to say so rather than printing `None` at the reader."""
-    tc = Proposal(
-        id="tc1", resource="text-codes", operation="create", person_id=0,
-        changes={"c_title_chn": "聽雪先生集"},
-        source_quote="q", confidence="high",
-    )
-    b = batch(tc)
-    with pytest.raises(StagingError, match="before this check existed"):
-        apply_decisions(
-            b, _decisions({"proposal_id": "tc1", "approved_by": "Hongsu Wang"},
-                          stamp=False))
 
 
 def test_a_content_hash_ignores_wording_and_tracks_what_gets_written():
@@ -423,7 +367,7 @@ def _code_table_batch():
         return Proposal(
             id=pid, resource=resource, operation="create", person_id=0,
             changes=changes, source_quote="q", confidence="high",
-            approved_by="Hongsu Wang", **kw,
+            **kw,
         )
 
     return StagingBatch(batch_id="b", proposals=[
@@ -483,33 +427,8 @@ def test_person_rows_are_still_grouped_by_person():
 # --- The content-hash guard, in the shapes a reviewer actually produces -------
 
 
-def test_editing_a_field_and_signing_the_same_proposal_both_apply():
-    """The ordinary use of the page: every field is editable, and the same pass
-    ends with a signature.
-
-    The page exports field edits before the approval, both stamped with the hash as
-    exported. Recomputing the hash per decision compared the signature against a
-    proposal the same file had just edited and refused the whole thing - and the
-    advice it gave ("re-export and sign again") reproduced the failure, because the
-    loop was the reviewer's own edit.
-    """
-    tc = Proposal(
-        id="tc1", resource="text-codes", operation="create", person_id=0,
-        changes={"c_title_chn": "\u807d\u96ea\u5148\u751f\u96c6", "c_title": "old"},
-        source_quote="q", confidence="high",
-    )
-    b = batch(tc)
-    applied = apply_decisions(b, _decisions(
-        {"proposal_id": "tc1", "field": "c_title", "value": "Tingxue xiansheng ji"},
-        {"proposal_id": "tc1", "approved_by": "Hongsu Wang"},
-    ))
-    assert len(applied) == 2
-    assert b.proposals[0].changes["c_title"] == "Tingxue xiansheng ji"
-    assert b.proposals[0].approved_by == "Hongsu Wang"
-
-
 def test_a_stale_field_decision_is_refused_even_with_nothing_signed():
-    """The guard cannot ride on `approved_by`.
+    """Nothing else notices.
 
     An ordinary person-data batch has no gated proposal at all, so a decisions.json
     from before a regeneration would rewrite values on rows whose payload had
@@ -575,3 +494,45 @@ def test_rewording_a_rationale_does_not_invalidate_a_decision():
 
     assert proposal_content_hash(prop("first wording")) \
         == proposal_content_hash(prop("second wording"))
+
+
+# --- The hash guard's two remaining properties --------------------------------
+#
+# Both lost their only test when `approved_by` went, and neither is about it: one
+# is "several decisions about one proposal in a single pass", the other is "a
+# decisions file that predates the hash".
+
+
+def test_two_decisions_about_one_proposal_in_one_pass_both_apply():
+    """The ordinary use of the page: every field is editable and every conflict is
+    settled there, so one proposal routinely collects more than one decision.
+
+    Recomputing the hash per decision compared the second against a proposal the
+    same file had just changed, and refused the whole file - advising a re-export,
+    which reproduces the failure, because the loop is the reviewer's own edit.
+    """
+    p = Proposal(
+        id="p1", resource="postings", operation="create", person_id=5000,
+        target_pk={}, changes={"c_office_id": 65759, "c_pages": "old"},
+        source_quote="q", confidence="high",
+        conflicts=[a_conflict("c1")],
+    )
+    b = batch(p)
+    applied = apply_decisions(b, _decisions(
+        {"proposal_id": "p1", "field": "c_pages", "value": "\u5377\u4e00"},
+        {"proposal_id": "p1", "conflict_id": "c1", "resolution": 65759},
+    ))
+    assert len(applied) == 2
+    assert b.proposals[0].changes["c_pages"] == "\u5377\u4e00"
+    assert b.proposals[0].conflicts[0].resolution == 65759
+
+
+def test_a_decisions_file_with_no_content_hash_is_refused():
+    """One exported before schema 3, or written by hand. It cannot show which
+    version of the row it was deciding about, and "probably the current one" is not
+    a safe reading for a file whose whole job is to change values."""
+    p = person()
+    b = batch(p)
+    with pytest.raises(StagingError, match="before this check existed"):
+        apply_decisions(b, _decisions(
+            {"proposal_id": "p1", "field": "c_dy", "value": 19}, stamp=False))

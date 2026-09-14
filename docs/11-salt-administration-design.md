@@ -42,7 +42,7 @@ so the belongs-to edges cannot name their own parents in advance. They carry
 at submit time (`staging.substitute_pk_refs`). That is why the whole thing is one
 batch rather than "load the parents, then generate the children": the edges are the
 irreversible half — no delete, and the four-column key is not updatable — so the
-reviewer has to be able to sign the real document, not a promise of one.
+reviewer has to be able to read the real document, not a promise of one.
 
 The request: record the seven Ming and six Qing 都轉運鹽使司 and their 分司 in CBDB
 **twice** — once as office names (`OFFICE_CODES`) and once as place names
@@ -269,7 +269,7 @@ doing it is not in this task's scope and nothing here depends on it.
 
 | target | write path | verdict |
 |---|---|---|
-| `OFFICE_CODES` (+ `OFFICE_CODE_TYPE_REL`) | `office` entity aggregate, `create` | **available** — `API.md` §13.4, modelled in `models.py`, approval-gated |
+| `OFFICE_CODES` (+ `OFFICE_CODE_TYPE_REL`) | `office` entity aggregate, `create` | **available** — `API.md` §13.4, modelled in `models.py` |
 | `ADDR_CODES` | `addr_codes` code table, **`update` only, `c_name` only** | **no create path** |
 | `ADDR_BELONGS_DATA` | — | **no write path at all** |
 | `ADMIN_CAT_CODES` | `admin_cat_codes`, **`update` only, `c_admin_cat_py` only** | **no create path** |
@@ -347,8 +347,10 @@ decision stands, but on precedent rather than on nobody having noticed.
         出處：明清方志、兩淮鹽法志、福建運司志、增修河東鹽法備覽。
     source_quote: 兩淮都轉運鹽使司｜泰州分司｜治所 泰州 1368–1644
     confidence: high
-    approved_by: null           # ⛔ REQUIRED. The agent must never fill this in.
 ```
+
+> Superseded 2026-09-14: this example used to end with
+> `approved_by: null  # REQUIRED`. That field is gone — see `AGENTS.md` rule 12.
 
 That is the **staging-file** shape (`staging.Proposal`), not the `/api/v2/create` wire
 envelope — the client builds the envelope, including `"target": {"pk": {}}`, from it.
@@ -364,8 +366,7 @@ and is not checked:
   is the correct thing to do, but there is *no guardrail* enforcing it — do not write
   it and expect to be told.
 
-`id`, `source_quote` and `confidence` are required by the model; `approved_by` is the
-rule-12 gate.
+`id`, `source_quote` and `confidence` are required by the model.
 
 Field-by-field rationale:
 
@@ -472,16 +473,18 @@ Field-by-field rationale:
   `GET /api/select/search/office`, and `batch_runner.fetch_current_values()` reporting
   "couldn't fetch" for these proposals is expected, not a fault.
 
-Every one of these is approval-gated (`requires_explicit_approval` on the `office`
-spec). `staging.find_issues()` will refuse the batch as a **structural error** until a
-human puts their name in `approved_by`. **That field is not the agent's to fill.**
+Every one of these is global reference data (`is_global_reference_data` on the
+`office` spec), so `preview.md` and the review page say so on every row. Until
+2026-09-14 that flag was also a gate, and `staging.find_issues()` refused the batch
+until a human signed each proposal; see `AGENTS.md` rule 12 for why that went and what
+replaced it.
 
 ### Track B — addresses, through the API — **this is what ships**
 
 Same dataset, emitted as `ADDR_CODES` + `ADDR_BELONGS_DATA` rows — since 2026-09-11 as
 an ordinary staging batch, submitted by this client through `/api/v2/create` like
 anything else. `tools/salt-admin/emit_addresses.py` writes it; `validate --staging`
-previews it; `tools/review/index.html` is where it is signed.
+previews it; `tools/review/index.html` is where it is read.
 
 > Superseded wording, 2026-09-11. This section used to open "as a reviewed deliverable
 > (not submittable)" and to say the rows go to "somebody with database-side access".
@@ -495,13 +498,13 @@ Two things the API path adds that the export did not have:
   server-assigned, so a 分司's edge to its 運司 carries `{"ref": "<proposal id>"}` and
   `batch_runner` substitutes the parent create's `result.pk` at submit time. That is
   why it is one batch and not two phases: `ADDR_BELONGS_DATA` is the irreversible half,
-  so the reviewer has to sign the real document.
+  so the reviewer has to see the real document.
 * **A duplicate check runs before anything is emitted.** Neither table has a unique key
   on its names and neither can be deleted, so `tools/salt-admin/live_state.py` asks
   `/api/select/search/addr` for every place name and composes snapshot-plus-operations
   for every category, and the generator refuses to emit if either answer is "already
-  there" or "cannot tell". The result is written into the batch, so the signature
-  covers the evidence as well as the rows.
+  there" or "cannot tell". The result is written into the batch, so the evidence is
+  read next to the rows it is about.
 
 Row shape, following the `Xunfu` precedent plus coordinates:
 
@@ -957,22 +960,27 @@ by side is what the original request was about.
 **`tools/review/index.html`** — the *batch* review, reading `review.json`. The 114
 proposals exactly as they will be sent, grouped by table (`person_id: 0` means a row
 belongs to no person, so grouping by person is meaningless here), each with its
-resolved code labels, its source quote, and the rule-12 approval box. This is where
-the batch is signed.
+resolved code labels, its source quote, and a notice on the rows that are global
+reference data saying what that table cannot take back. This is where
+the batch is reviewed.
 
-Three things the batch page had to gain for this dataset:
+Two things the batch page had to gain for this dataset:
 
-* **Per-table risk wording on the approval box.** What is irreversible differs
-  sharply: an `ADDR_CODES` row cannot be deleted but every column stays editable; an
+* **Per-table reversibility wording.** What is irreversible differs sharply: an
+  `ADDR_CODES` row cannot be deleted but every column stays editable; an
   `ADDR_BELONGS_DATA` row cannot be deleted *or* have its four-column key changed.
-  Telling a reviewer the same worst case for both teaches them to ignore it.
-* **A bulk signature.** 114 separate boxes is fatigue, not scrutiny. One name, typed
-  once, confirmed against a dialog that lists each table in the selection and what it
-  cannot undo. Rows already signed individually are left alone.
+  Telling a reviewer the same worst case for both teaches them to ignore it, and the
+  difference is what decides how carefully a row is worth reading.
 * **A content hash per proposal.** Proposal ids and batch ids both survive a
-  regeneration, so a signature stored in the browser (or sitting in a `decisions.json`)
-  used to re-attach itself to rows whose values had since changed. Both the page and
-  `apply-review` now refuse a signature given for a different version of the row.
+  regeneration, so a decision stored in the browser (or sitting in a `decisions.json`)
+  used to re-attach itself to rows whose values had since changed — a field edit or a
+  conflict choice landing on values nobody had looked at. Both the page and
+  `apply-review` now refuse a decision made about a different version of the row.
+
+> Superseded 2026-09-14: a third item here described the per-proposal signature box
+> and a bulk "Sign all 114" control. `approved_by` is gone — see `AGENTS.md` rule 12.
+> §9's note about re-reviewing after a regeneration still holds, for the decisions
+> that remain.
 
 ## 8. What must not happen
 
@@ -986,9 +994,10 @@ unchanged, so here it is against the current shape:
   for a human with database access precisely so that this client would not be the one
   bypassing the audit log; now that the endpoints exist, nothing needs a second route
   at all. `track_b_load.sql` is a record, not a fallback.
-* **No `approved_by` filled in by the agent.** 114 proposals, every one gated,
-  every one `null` until a named human types their name. The generator is tested
-  by parsing its own AST for that, not by grepping it.
+* **No reference data invented to unblock a batch.** Rule 12's surviving half. If
+  this dataset needed a `TEXT_CODES` row for 福建運司志 or 增修河東鹽法備覽, that is a
+  finding reported to the user with the evidence — which is exactly what §9 item 8
+  does — not a row the generator adds so the batch can go out.
 * **No invented primary key.** `c_addr_id` and `c_admin_cat_code` come from the
   server's `result.pk`; the snapshot may never decide an allocation. An unresolvable
   `{"ref": ...}` raises instead of going out as a literal.
@@ -997,7 +1006,7 @@ unchanged, so here it is against the current shape:
   risk to accept. The check is mandatory, its result is recorded in the batch, and
   "cannot tell" stops the run exactly like "already there".
 * **No silent regeneration over a reviewed file.** An existing `proposal.yaml` may
-  carry signatures; a batch id already under `data/processed/` has already been
+  carry a reviewer's edits; a batch id already under `data/processed/` has already been
   submitted. Both refuse.
 * **No blocked unit smuggled through.** 清代 寧紹分司 and 嘉松分司 are absent from
   every output, not present-and-deferred, until Ning Hao answers §9.
@@ -1007,9 +1016,9 @@ unchanged, so here it is against the current shape:
 **Blocking — the generator refuses to emit these units until they are answered.**
 Answering one means re-running `build_dataset.py` and `emit_addresses.py`, which
 produces a new `proposal.yaml` — and every proposal id in it is derived from the
-source row, so the ids are the same while the values may not be. Signatures do not
-carry over: each proposal now ships a content hash, and both the review page and
-`apply-review` refuse a signature given for a different version of a row (§7). Expect
+source row, so the ids are the same while the values may not be. Decisions do not
+carry over: each proposal ships a content hash, and both the review page and
+`apply-review` refuse a decision made about a different version of a row (§7). Expect
 to re-review the rows that changed.
 
 1. §3.1 清代 寧紹分司. Two defects, not one: the reversed `1793 → 1685`, *and* the
@@ -1038,10 +1047,11 @@ to re-review the rows that changed.
    `build_dataset.py --admin-cat {new,zero}`, recorded in `dataset.json` and followed
    by `emit_addresses.py`, with the two creates ordered ahead of the addresses that
    reference them. The precedent argues for `new` (§5, Track B); the batch as generated takes
-   it, and the two category proposals are signed separately from the rest.
+   it, and the two category proposals are worth reading separately from the rest:
+   they are the ones with no live read endpoint behind their duplicate check.
 8. Whether to create `TEXT_CODES` rows for **福建運司志** and **增修河東鹽法備覽**,
    neither of which CBDB has (§5, Track A). Reported as a finding only — a code-table
-   create needs the user's named approval under rule 12, and nothing here depends on it
+   create is the user's call under rule 12, and nothing here depends on it
    while `source_id` stays `0`.
 9. ~~Whether to keep `source_id: 0`.~~ **Settled 2026-09-10 by the user:** the code
    stays `0` and the four source bodies go into `c_notes` verbatim (§5, Track A). Not

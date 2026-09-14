@@ -58,7 +58,7 @@ their own quirks noted below):
 | postings / offices | `postings`, `posting`, `posted_to_office_data` (⚠️ server also accepts `offices`, but our client deliberately doesn't — see §11) | 2 | none (same list, incl. `c_office_id`) | **Yes** — `c_posting_id` |
 | social_institutions | create/delete: + `socialinst`; **update: missing `socialinst`, see §12** | 4 | `c_personid` | No |
 | sources | create/update: `sources` only; **delete also accepts `source`, `biog_source_data`** | 3 (`c_pages` optional) | none (identical create/update list) | No, but `c_textid`/`c_pages` re-keyable |
-| office ⚠️ | **`office` only** — never `offices` (postings wins server-side, and it would poison the approval gate); see §15 | 1 | none (identical create/update list) | **Yes** on create — `c_office_id`; known value on update |
+| office ⚠️ | **`office` only** — never `offices` (postings wins server-side, and the alias would route a routine posting through this whitelist); see §15 | 1 | none (identical create/update list) | **Yes** on create — `c_office_id`; known value on update |
 
 **⚠️ Bug/gap in the target system to design around (§12):** the `social_institutions`
 update handler's alias list is `['social_institutions', 'social_institution',
@@ -404,8 +404,8 @@ Afterwards only `c_title` (the romanization) is editable; `c_title_chn` is froze
   Note the asymmetry in `API.md` §13.1 vs §13.2 — code-table *updates* always record
   `c_personid = 0` in `operations` regardless of what you send, but *creates* record what
   you sent.
-- `requires_explicit_approval = True`: `staging.find_issues()` errors until a named human
-  is in `approved_by`, and `batch_runner` forwards that into `meta.comment`.
+- `is_global_reference_data = True`: `preview.md` and the review page say so on every
+  such row. Not a gate — see `AGENTS.md` rule 12 for what it does and does not mean.
 - **Before proposing one, search for the title by pinyin as well as by Chinese
   characters.** Variant characters are the norm in CBDB's titles — 《俟庵集》 is stored as
   《俟菴集》 (菴 U+83F4), and a Chinese-title search for 俟庵 returns zero hits while the
@@ -422,12 +422,12 @@ and the worked batch: **`docs/10-office-aggregate-design.md`**. What `models.py`
   `office-load`; both are deliberately unregistered, for two independent reasons.
   Server-side, `offices` is matched by the **postings** handler first
   (`PostingCreateHandler::supports()`), so a payload saying `offices` writes a person's
-  appointment record instead of an office code. Client-side,
-  `models.approval_gated_aliases()` is built from the gated specs' alias sets and
-  `http_client._check_approval()` matches it against the raw `resource` string — so
-  registering `offices` here would make **every routine postings write** demand an
-  `approved_by`. `tests/test_models.py::test_gating_office_did_not_gate_the_postings_aliases`
-  is the regression guard. See also §11.
+  appointment record instead of an office code. Client-side, an alias registered here
+  claims the resource string for this spec, so registering `offices` would route every
+  routine postings write through the office aggregate's whitelist.
+  `tests/test_models.py::test_the_office_aggregate_did_not_claim_the_postings_aliases`
+  is the regression guard, and `http_client` refuses the ambiguous spellings on the
+  wire regardless. See also §11.
 - **PK: `c_office_id`** — server-assigned (`max+1`) on create, a known pre-existing value
   on update. Registered in `server_assigned_pk_fields`, so staging requires it to be
   *absent* on create and *present* on update ("never invented").
@@ -457,11 +457,10 @@ and the worked batch: **`docs/10-office-aggregate-design.md`**. What `models.py`
 - **`delete` is not modelled.** Supported server-side and guarded by
   `409 c_office_id: referenced_by_postings`, but nothing here needs to remove an office
   code and a narrower surface is the point.
-- **`requires_explicit_approval = True`** (rule 12). ⚠️ But do **not** reuse
+- **`is_global_reference_data = True`** (rule 12). ⚠️ But do **not** reuse
   `text_codes`' rationale: an office row **is** deletable while unreferenced, so a
-  mistake is recoverable — until something references it. The refusal messages in
-  `staging.py` and `http_client.py` still assert the code-table wording ("no delete
-  path", "no way to undo it"), which is wrong for this resource; see
+  mistake is recoverable — until something references it. The review page's per-table
+  wording says exactly that; keep the distinction if you touch it. See
   `docs/10-office-aggregate-design.md` §4.
 - **The server has NO duplicate-name guard on create** — `allocateNextId()` then
   `insert()`, no name lookup — so a re-run mints a second permanent row with the same
@@ -480,7 +479,7 @@ and the worked batch: **`docs/10-office-aggregate-design.md`**. What `models.py`
 
 Opened for creation by upstream commits dated 2026-09-10, pulled and modelled
 here 2026-09-11 (`API.md` §13.2; `config/code_table_writes.php`).
-Approval-gated: `requires_explicit_approval=True`. **Every field below is writable on
+Marked global reference data (`is_global_reference_data=True`). **Every field below is writable on
 both `create` and `update`** — upstream's `CodeTableWriteConfigDriftTest` keeps the
 two registries in step for the four tables added that day.
 

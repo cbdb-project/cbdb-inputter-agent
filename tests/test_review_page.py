@@ -346,154 +346,6 @@ def _load_gated(page, tmp_path, n=3):
     return payload
 
 
-def test_every_gated_proposal_starts_unsigned(page, tmp_path):
-    payload = _load_gated(page, tmp_path)
-    assert all(p["needs_approval"] for p in payload["proposals"])
-    assert all(not p["approved_by"] for p in payload["proposals"])
-    assert "3 missing approvals" in page.inner_text("#stats").replace("\n", " ")
-
-
-def test_the_bulk_control_appears_only_when_several_are_missing(page, tmp_path):
-    _load_gated(page, tmp_path, n=1)
-    assert page.locator(".bulkbtn").count() == 0, \
-        "one signature is not a bulk problem"
-    _load_gated(page, tmp_path, n=3)
-    assert page.locator(".bulkbtn").count() == 1
-
-
-def test_the_bulk_control_is_in_the_action_bar_not_the_header(page, tmp_path):
-    """Grouping, not a barrier - and the code must not claim otherwise.
-
-    Among the summary chips, "Sign all N" read as one more piece of status next to
-    "N missing approvals". In the action bar it sits with Export and Discard, the
-    other two batch-wide controls. The footer is `position:fixed`, so this buys no
-    scrolling and the comment in the page says so; what actually stands between a
-    reviewer and N signatures is the confirmation, tested above.
-    """
-    _load_gated(page, tmp_path, n=3)
-    assert page.locator("#footer .bulkbtn").count() == 1
-    assert page.locator("#stats .bulkbtn").count() == 0
-
-
-def test_signing_all_records_the_name_on_every_proposal(page, tmp_path):
-    """The whole point: one deliberate signature, recorded on each row.
-
-    The confirm() is accepted here; the next test pins that declining it writes
-    nothing.
-    """
-    _load_gated(page, tmp_path, n=3)
-    # Stub confirm() rather than adding a second dialog listener: the `page`
-    # fixture already registers one that dismisses, and both would fire.
-    page.evaluate("window.confirm = () => true")
-    page.fill(".bulksig", "Hongsu Wang")
-    page.click(".bulkbtn")
-    decisions = page.evaluate("buildDecisions()")["decisions"]
-    signed = [d for d in decisions if d.get("approved_by")]
-    assert len(signed) == 3
-    assert {d["approved_by"] for d in signed} == {"Hongsu Wang"}
-    assert "0 missing approvals" in page.inner_text("#stats").replace("\n", " ")
-
-
-def test_declining_the_confirmation_signs_nothing(page, tmp_path):
-    _load_gated(page, tmp_path, n=3)
-    page.evaluate("window.confirm = () => false")
-    page.fill(".bulksig", "Hongsu Wang")
-    page.click(".bulkbtn")
-    assert page.evaluate("buildDecisions()")["decisions"] == []
-
-
-def test_an_empty_name_signs_nothing(page, tmp_path):
-    _load_gated(page, tmp_path, n=3)
-    page.evaluate("window.confirm = () => true")
-    page.click(".bulkbtn")
-    assert page.evaluate("buildDecisions()")["decisions"] == []
-
-
-def test_the_confirmation_names_the_count_and_the_resources(page, tmp_path):
-    _load_gated(page, tmp_path, n=3)
-    page.evaluate("window.confirm = (m) => { window.__msg = m; return true; }")
-    page.fill(".bulksig", "Hongsu Wang")
-    page.click(".bulkbtn")
-    msg = page.evaluate("window.__msg")
-    assert msg and "3 proposals" in msg
-    assert "3 × addr-codes" in msg
-    assert "cannot be deleted" in msg
-
-
-def test_the_confirmation_gives_each_table_its_own_risk(page, tmp_path):
-    """The bulk dialog must not flatten what the per-row panel distinguishes.
-
-    Its first version said one thing for the whole selection - "no delete path for
-    a code table" - which understated ADDR_BELONGS_DATA (57 of the real batch's 114
-    rows, whose four-column key can never be edited or deleted) and would have been
-    simply false for an `office` proposal in the same batch.
-    """
-    _load_batch(page, tmp_path, _mixed_gated_batch())
-    page.evaluate("window.confirm = (m) => { window.__msg = m; return true; }")
-    page.fill(".bulksig", "Hongsu Wang")
-    page.click(".bulkbtn")
-    msg = page.evaluate("window.__msg")
-    assert "1 × addr-codes" in msg and "1 × addr-belongs-data" in msg
-    assert "every column is editable" in msg, "the correctable one"
-    assert "four-column key" in msg, "the permanent one"
-
-
-def test_an_unknown_resource_gets_no_invented_reassurance(page, tmp_path):
-    """The fallback branch used to assert "no delete path for a code table" for any
-    resource it did not recognise - the exact sentence AGENTS.md flags as false for
-    the entity aggregates, which ARE deletable while unreferenced."""
-    source = PAGE.read_text(encoding="utf-8")
-    assert "The server offers no delete path for a code table.\"" not in source
-    assert "depends " in source and "on the table" in source
-
-
-def test_the_risk_text_is_specific_to_the_table(page, tmp_path):
-    """A reviewer deciding whether to sign deserves the specific answer.
-
-    ADDR_CODES is correctable after the fact; ADDR_BELONGS_DATA is not. Telling
-    them the same worst case for both trains them to ignore it.
-    """
-    source = PAGE.read_text(encoding="utf-8")
-    assert "four-column key" in source, "the belongs-data wording must be present"
-    _load_gated(page, tmp_path, n=1)
-    text = page.inner_text(".approval")
-    assert "every column is editable" in text, text
-
-
-def test_bulk_sign_never_reaches_a_row_the_filters_have_hidden(page, tmp_path):
-    """The table honours the filters; "Sign all" has to as well.
-
-    A reviewer who narrows to one table and clicks the button is signing what they
-    are looking at. Signing the rows they filtered away would be the opposite of a
-    deliberate signature - and the count on the button would be a number about a
-    different set than the one it writes to.
-    """
-    _load_batch(page, tmp_path, _mixed_gated_batch())
-    assert page.locator("#footer .bulkbtn").count() == 1, "2 unsigned to start"
-
-    page.select_option("#fRes", "addr-codes")
-    page.wait_for_timeout(100)
-    # One visible row left, so the bulk control is gone - one signature is not a
-    # bulk problem, and the per-row box is right there.
-    assert page.locator("#footer .bulkbtn").count() == 0
-    assert "2 missing approvals" in page.inner_text("#stats").replace("\n", " "), \
-        "the header still counts the whole batch, which is what a header is for"
-
-    page.select_option("#fRes", "")
-    page.wait_for_timeout(100)
-    page.evaluate("window.confirm = (m) => { window.__msg = m; return true; }")
-    page.fill(".bulksig", "Hongsu Wang")
-    page.click(".bulkbtn")
-    signed = [d for d in page.evaluate("buildDecisions()")["decisions"]
-              if d.get("approved_by")]
-    assert len(signed) == 2
-
-
-# ===========================================================================
-# schema 3: a decision is only restored onto the proposal it was made about
-# ===========================================================================
-
-
 def _gated_payload(tmp_path, changes):
     batch = StagingBatch(
         batch_id="gated", source_excerpt="x",
@@ -512,63 +364,6 @@ def _load_file(page, review):
     page.wait_for_function(
         "() => document.querySelector('#stats')"
         "        && document.querySelector('#stats').innerText.trim().length > 0")
-
-
-def test_a_signature_is_restored_when_the_proposal_has_not_changed(page, tmp_path):
-    _, review = _gated_payload(tmp_path, {"c_name_chn": "\u6cf0\u5dde"})
-    page.goto(PAGE.as_uri())
-    _load_file(page, review)
-    page.fill(".approval input", "Hongsu Wang")
-    page.locator(".approval input").blur()
-    page.wait_for_timeout(100)
-
-    page.goto(PAGE.as_uri())          # same origin, so localStorage survives
-    _load_file(page, review)
-    assert "0 missing approvals" in page.inner_text("#stats").replace("\n", " ")
-    assert "restored your earlier decisions" in page.inner_text("#saveHint")
-
-
-def test_a_signature_is_dropped_when_the_proposal_has_changed(page, tmp_path):
-    """The batch id and the proposal id both survive a regeneration.
-
-    Without the content hash, re-running the generator after settling an open
-    question brought every stored signature back onto rows whose values had
-    changed: the header said "0 missing approvals" with nobody having typed
-    anything.
-    """
-    _, review = _gated_payload(tmp_path, {"c_name_chn": "\u6cf0\u5dde"})
-    page.goto(PAGE.as_uri())
-    _load_file(page, review)
-    page.fill(".approval input", "Hongsu Wang")
-    page.locator(".approval input").blur()
-    page.wait_for_timeout(100)
-
-    # The regeneration: same batch id, same proposal id, different value.
-    _, review2 = _gated_payload(tmp_path, {"c_name_chn": "\u901a\u5dde"})
-    page.goto(PAGE.as_uri())
-    _load_file(page, review2)
-    stats = page.inner_text("#stats").replace("\n", " ")
-    assert "1 missing approvals" in stats, stats
-    hint = page.inner_text("#saveHint")
-    assert "discarded 1" in hint and "signature" in hint, hint
-    assert page.evaluate("buildDecisions()")["decisions"] == []
-
-
-def test_every_exported_decision_carries_the_hash(page, tmp_path):
-    _, review = _gated_payload(tmp_path, {"c_name_chn": "\u6cf0\u5dde"})
-    page.goto(PAGE.as_uri())
-    _load_file(page, review)
-    page.fill(".approval input", "Hongsu Wang")
-    page.locator(".approval input").blur()
-    page.wait_for_timeout(100)
-    decisions = page.evaluate("buildDecisions()")["decisions"]
-    live = page.evaluate("DATA.proposals[0].content_hash")
-    assert decisions and all(d["content_hash"] == live for d in decisions)
-
-
-# ===========================================================================
-# The wrong file
-# ===========================================================================
 
 
 def test_dropping_the_staging_yaml_names_the_file_this_page_wants(page, tmp_path):
@@ -611,3 +406,130 @@ def test_a_genuinely_corrupt_json_file_still_says_so(page, tmp_path):
     message = page.dialogs[-1]
     assert "Not valid JSON" in message
     assert "proposal.yaml" not in message
+
+
+# ===========================================================================
+# schema 3: a decision is only restored onto the proposal it was made about
+#
+# These lost their only tests with the signature box, and none of them is about
+# signatures: a field edit rewrites a value and a conflict choice settles which
+# value is written, so applying either to a regenerated row is the thing to refuse.
+# ===========================================================================
+
+
+def _one_proposal_payload(tmp_path, changes, name="review.json"):
+    batch = StagingBatch(
+        batch_id="hashed", source_excerpt="x",
+        proposals=[Proposal(id="a1", resource="addr-codes", operation="create",
+                            person_id=0, changes=changes, source_quote="q",
+                            confidence="high")],
+    )
+    payload = json.loads(export_review_json(batch, find_issues(batch)))
+    path = tmp_path / name
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _load_path(page, path):
+    page.set_input_files("#file", str(path))
+    page.wait_for_function(
+        "() => document.querySelector('#stats')"
+        "        && document.querySelector('#stats').innerText.trim().length > 0")
+
+
+def _edit_first_field(page, value):
+    page.fill(".fedit", value)
+    page.locator(".fedit").first.blur()
+    page.wait_for_timeout(100)
+
+
+def test_a_decision_is_restored_when_the_proposal_has_not_changed(page, tmp_path):
+    review = _one_proposal_payload(tmp_path, {"c_name_chn": "\u6cf0\u5dde"})
+    page.goto(PAGE.as_uri())
+    _load_path(page, review)
+    _edit_first_field(page, "\u901a\u5dde")
+
+    page.goto(PAGE.as_uri())          # same origin, so localStorage survives
+    _load_path(page, review)
+    assert page.evaluate("buildDecisions()")["decisions"], "the edit must come back"
+    assert "restored your earlier decisions" in page.inner_text("#saveHint")
+
+
+def test_a_decision_is_dropped_when_the_proposal_has_changed(page, tmp_path):
+    """The batch id and the proposal id both survive a regeneration, so without the
+    content hash a stored edit re-attached itself to a row whose values had changed
+    underneath it."""
+    review = _one_proposal_payload(tmp_path, {"c_name_chn": "\u6cf0\u5dde"})
+    page.goto(PAGE.as_uri())
+    _load_path(page, review)
+    _edit_first_field(page, "\u901a\u5dde")
+
+    # The regeneration: same batch id, same proposal id, different value.
+    review2 = _one_proposal_payload(tmp_path, {"c_name_chn": "\u6dee\u5b89"},
+                                    name="review2.json")
+    page.goto(PAGE.as_uri())
+    _load_path(page, review2)
+    assert page.evaluate("buildDecisions()")["decisions"] == []
+    assert "discarded 1" in page.inner_text("#saveHint")
+
+
+def test_a_field_decision_is_exported_with_the_hash(page, tmp_path):
+    """The conflict branch is covered elsewhere; this is the other one."""
+    review = _one_proposal_payload(tmp_path, {"c_name_chn": "\u6cf0\u5dde"})
+    page.goto(PAGE.as_uri())
+    _load_path(page, review)
+    _edit_first_field(page, "\u901a\u5dde")
+    decisions = page.evaluate("buildDecisions()")["decisions"]
+    live = page.evaluate("DATA.proposals[0].content_hash")
+    assert decisions and all(d["content_hash"] == live for d in decisions)
+
+
+# --- the per-table reversibility wording --------------------------------------
+
+
+def test_the_notice_says_what_this_table_cannot_take_back(page, tmp_path):
+    """ADDR_CODES is correctable after the fact; ADDR_BELONGS_DATA is not. Telling a
+    reviewer the same worst case for both teaches them to ignore it."""
+    batch = StagingBatch(
+        batch_id="g", source_excerpt="x",
+        proposals=[
+            Proposal(id="a1", resource="addr-codes", operation="create",
+                     person_id=0, changes={"c_name_chn": "\u6cf0\u5dde"},
+                     source_quote="q", confidence="high"),
+            Proposal(id="e1", resource="addr-belongs-data", operation="create",
+                     person_id=0,
+                     target_pk={"c_addr_id": 1, "c_belongs_to": 2,
+                                "c_firstyear": 1368, "c_lastyear": 1643},
+                     changes={"c_source": 0}, source_quote="q", confidence="high"),
+        ],
+    )
+    payload = json.loads(export_review_json(batch, find_issues(batch)))
+    path = tmp_path / "review.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    page.goto(PAGE.as_uri())
+    _load_path(page, path)
+
+    text = page.locator("#groups").inner_text()
+    assert "every column is editable" in text, "the correctable one"
+    assert "four-column key" in text, "the permanent one"
+    assert page.locator(".approval").count() == 2
+    assert page.errors == []
+
+
+def test_an_unrecognised_resource_gets_no_invented_reassurance(page, tmp_path):
+    """The fallback branch must not assert an irreversibility it cannot know.
+
+    "No delete path for a code table" is the sentence AGENTS.md flags as false for
+    the entity aggregates, which ARE deletable while unreferenced - so the fallback
+    has to send the reader to the source rather than guess for them. Called
+    directly: an unrecognised resource never renders a panel (an unknown alias is
+    already a structural error), so grepping the file was the only thing the old
+    version of this test did - and it passed with the function rewritten, because
+    the words it looked for also appear in the comment above it.
+    """
+    _load(page, tmp_path)
+    for unknown in ("char-variant-map", "social-institution", "", "something-new"):
+        note = page.evaluate("r => reversibilityNote(r)", unknown)
+        assert "cannot be undone" not in note, (unknown, note)
+        assert "no delete path" not in note, (unknown, note)
+        assert "API.md" in note, (unknown, note)

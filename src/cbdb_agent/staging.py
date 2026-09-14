@@ -86,13 +86,12 @@ class Proposal(BaseModel):
     source_quote: str
     confidence: Literal["high", "medium", "low"]
     conflicts: list[Conflict] = Field(default_factory=list)
-    # AGENTS.md rule 12 gate. Only consulted for resources whose ResourceSpec sets
-    # requires_explicit_approval (today: `text-codes`) - global reference data with
-    # no server-side delete path. A named human must own the decision, in writing,
-    # in the file; the agent must never fill this in on its own initiative. It is
-    # also forwarded into the request's meta.comment so the approval is visible in
-    # the server's own `operations` row, not just in this repo.
-    approved_by: str | None = None
+
+    # NOTE: `approved_by` was removed on 2026-09-14. It asked a human to sign a row
+    # the same human was about to write with their own token, and the server already
+    # records `user_id` on every operation - so it recorded nothing the operations
+    # log did not. Pydantic ignores unknown keys, so an older staging file that
+    # still carries one loads fine and the value is simply dropped.
 
     @field_validator("target_pk")
     @classmethod
@@ -189,10 +188,6 @@ def load_input_batch(path: str, *, batch_id: str | None = None) -> StagingBatch:
                 source_quote="(structured input, no extraction)",
                 confidence="high",
                 conflicts=[],
-                # Forward it rather than dropping it: without this, a JSON record
-                # that DOES carry an approval fails validation with "it needs an
-                # explicit approved_by" - an error that contradicts the input.
-                approved_by=record.get("approved_by"),
             )
         )
     return StagingBatch(batch_id=batch_id or path, proposals=proposals)
@@ -206,15 +201,9 @@ def save_staging_file(batch: StagingBatch, path: str) -> None:
     # exact (verified in tests/test_staging.py); this only affects how pleasant
     # the regenerated file is to read by hand. Worth a custom YAML representer if
     # this becomes a real friction point during Milestone 6/7 usage.
+    # exclude_none=False is deliberate: `resolution: null` MUST stay visible, since
+    # it is the submission blocker a human is meant to see and fill in.
     data = batch.model_dump(exclude_none=False)
-    # exclude_none=False is deliberate overall - `resolution: null` MUST stay visible,
-    # since it is the submission blocker a human is meant to see and fill in. But
-    # `approved_by: null` is different: it applies to almost no proposal, and leaving
-    # it on every row is both noise and an invitation for an agent to fill it in,
-    # which rule 12 forbids. Drop it only where it is unset.
-    for proposal in data.get("proposals", []):
-        if proposal.get("approved_by") is None:
-            proposal.pop("approved_by", None)
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
 
@@ -317,48 +306,14 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
         except FieldWhitelistError as exc:
             issues.append(Issue(proposal_id=p.id, severity="error", message=str(exc)))
 
-        # AGENTS.md rule 12: global reference data (code tables, entity aggregates)
-        # is a different risk class from one person's record - it is referenced by
-        # potentially tens of thousands of rows and the server offers NO delete path,
-        # so a wrong row is permanent. Require a named human to have signed off, in
-        # the file. This is an `error`, not a `conflict`: an unresolved conflict is a
-        # normal mid-review state that `validate` reports and exits 0 on, whereas a
-        # missing approval must make the batch structurally invalid.
-        if spec.requires_explicit_approval and not (p.approved_by or "").strip():
-            issues.append(
-                Issue(
-                    proposal_id=p.id,
-                    severity="error",
-                    message=(
-                        f"resource {p.resource!r} is global reference data, not one "
-                        "person's record (AGENTS.md rule 12) - it needs an explicit "
-                        "`approved_by: <name of the human who decided>` on this "
-                        "proposal before it can be submitted. Never fill that in on "
-                        "the agent's own initiative."
-                    ),
-                )
-            )
-        elif spec.requires_explicit_approval:
-            # Length is a submit-time rule in mutation_api; front-run it here, or a
-            # batch signed with a pasted paragraph validates clean and then fails
-            # per-proposal mid-run - the same class of gap as the key check above.
-            from .mutation_api import MAX_APPROVED_BY_LEN
-
-            signature = str(p.approved_by)
-            if len(signature) > MAX_APPROVED_BY_LEN:
-                issues.append(
-                    Issue(
-                        proposal_id=p.id,
-                        severity="error",
-                        message=(
-                            f"approved_by is {len(signature)} characters; the "
-                            f"server accepts at most {MAX_APPROVED_BY_LEN}. It "
-                            f"records who decided, not why - the reasoning belongs "
-                            f"in the batch's `source_excerpt` or the proposal's "
-                            f"`source_quote`"
-                        ),
-                    )
-                )
+        # NOTE: until 2026-09-14 this is where a missing `approved_by` made a
+        # global-reference-data batch structurally invalid. That gate is gone — it
+        # asked the person holding the token to countersign a row they were about to
+        # write with that same token, and the server stamps `user_id` on every
+        # operation regardless. What survives is a judgement rule, not a field
+        # (AGENTS.md rule 12): an agent does not invent reference data to unblock
+        # itself. A missing book title or office code is reported to the user, with
+        # the evidence, and they decide.
 
         # Some creates are meaningless without specific content - and for a resource
         # with no delete path (the code tables; API.md 13.3) permanently so - even
@@ -523,8 +478,8 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
 # belongs-to rows are the *irreversible* half of this data. Code-table `delete` is
 # 403 (API.md 13.3) and the update whitelist covers only c_source/c_pages/c_notes,
 # so a wrong parent or a wrong year on an edge can never be corrected or removed.
-# Generating that file only after the parents exist would mean the reviewer signs
-# `approved_by` on a document that did not exist when they reviewed the data.
+# Generating that file only after the parents exist would mean the reviewer approves
+# a document that did not exist when they reviewed the data.
 #
 # Deliberately narrow:
 #   * the target must be a `create` in the same batch;
@@ -993,26 +948,19 @@ def render_preview_markdown(
             pk_str = ", ".join(f"{k}={v}" for k, v in proposal.target_pk.items())
             meta_bits.append(f"target_pk: {pk_str}")
         lines.append("- " + " · ".join(meta_bits))
-        # Surface the rule-12 signature in the artifact humans actually review. A
-        # sign-off recorded only in raw YAML is not much of a sign-off - and the
-        # MISSING case matters even more, since it is what blocks the batch.
+        # Say which rows are global reference data. Not a gate - just the fact a
+        # reviewer cannot read off the resource string, and the one that decides how
+        # carefully the row is worth reading: this is not one person's record.
         try:
-            needs_approval = find_spec_by_alias(proposal.resource).requires_explicit_approval
+            global_reference = find_spec_by_alias(
+                proposal.resource).is_global_reference_data
         except FieldWhitelistError:
-            needs_approval = False  # unknown resource is already an `error` issue
-        if needs_approval or proposal.approved_by:
-            signature = (proposal.approved_by or "").strip()
-            if signature:
-                lines.append(
-                    f"- 🔓 **approved_by: {_preview_inline(signature)}** "
-                    "(global reference data — AGENTS.md rule 12)"
-                )
-            else:
-                lines.append(
-                    "- 🔒 **approved_by: _(not set)_** — global reference data; this "
-                    "proposal cannot be submitted until a named human signs off "
-                    "(AGENTS.md rule 12)"
-                )
+            global_reference = False  # unknown resource is already an `error` issue
+        if global_reference:
+            lines.append(
+                "- ⚠️ **global reference data** — visible to every CBDB user and "
+                "referenced by any number of person records, not confined to one"
+            )
 
         state = current_values.get(proposal.id)
         for field, proposed_value in proposal.changes.items():

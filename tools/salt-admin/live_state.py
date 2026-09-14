@@ -101,34 +101,68 @@ def _page(client, page: int) -> dict:
     return body
 
 
-def _newest_marker(body: dict) -> Any:
-    data = body.get("data") or []
-    first = data[0] if data else None
-    return (first or {}).get("id") if isinstance(first, dict) else None
+def operations_since(client, iso_date: str, *, tables: set[str],
+                     max_pages: int = 200, attempts: int = 3) -> list[dict]:
+    """Every operation on `tables` with `updated_at >= iso_date`.
+
+    Paging is by OFFSET over a list the endpoint sorts `updated_at DESC` and cannot
+    filter by resource (API.md ch.3: `per_page` caps at 100, and the only filters
+    are proposals/editor/op_type/status). With a month-old baseline that is ~100
+    sequential rate-limited requests - minutes - against a live production log. So
+    the question is what can go wrong underneath an offset walk, and the three cases
+    are not equally dangerous:
+
+    * **A row is inserted at the head** (someone writes something). Everything
+      shifts DOWN by one, so a page boundary RE-READS a row. Nothing is skipped.
+      Harmless here, because rows are collected by id.
+    * **An existing row is updated**, so its `updated_at` jumps and it moves to the
+      head. Every row it passes shifts DOWN. Again nothing is skipped.
+    * **A row leaves the list** - deleted, or its `crowdsourcing_status` changes so
+      the endpoint's filter stops returning it. Now everything below shifts UP, and
+      a row at a page boundary IS skipped. This is the only case that can hide the
+      very create being checked for.
+
+    So the walk watches `pagination.total`. It may grow freely; if it ever DROPS,
+    something left the list while we were reading and the window is not trustworthy
+    - start again. That converges on a busy log, where insisting the log hold still
+    does not: an earlier version restarted whenever the newest id had moved, and on
+    production it never finished, burning hundreds of requests before refusing to
+    answer.
+
+    Two passes, then, per attempt: walk to the baseline, then re-read from the head
+    until a page holds nothing new, which picks up whatever arrived during the walk
+    (those rows are real operations in the window and belong in the answer). The
+    second pass stops on ids ALREADY SEEN ANYWHERE, not on "no new matching row" -
+    a page can easily hold new writes to other tables while the row we are missing
+    sits a page further down.
+    """
+    for _ in range(attempts):
+        seen: dict[Any, dict] = {}
+        seen_ids: set = set()
+        lost = _walk(client, iso_date, tables, max_pages, seen, seen_ids,
+                     to_baseline=True)
+        if not lost:
+            lost = _walk(client, iso_date, tables, max_pages, seen, seen_ids,
+                         to_baseline=False)
+        if not lost:
+            return _newest_first(seen)
+    raise LiveStateError(
+        f"rows kept leaving /api/v2/operations while it was being read ({attempts} "
+        f"attempts): `pagination.total` dropped mid-walk, so an offset page may "
+        f"have skipped a row. 'Nothing changed since' cannot be asserted from that")
 
 
-def _walk_operations(client, iso_date: str, tables: set[str],
-                     max_pages: int) -> tuple[list[dict], Any]:
-    rows, page = [], 1
-    marker = None
+def _walk(client, iso_date: str, tables: set[str], max_pages: int,
+          seen: dict, seen_ids: set, *, to_baseline: bool) -> bool:
+    """One pass from the head. Returns True if the list SHRANK underneath it.
+
+    `to_baseline=True` reads until the baseline date; `False` stops at the first
+    page holding no id we have not already seen, which is all a follow-up needs -
+    arrivals are at the head.
+    """
+    page, total_seen = 1, None
     while page <= max_pages:
         body = _page(client, page)
-        if page == 1:
-            marker = _newest_marker(body)
-        data = body.get("data")
-        if not data:
-            return rows, marker
-        for op in data:
-            # `updated_at` is the filter, not position in the page: the last page
-            # that crosses the baseline date carries rows on both sides of it, and
-            # an operation from before the snapshot was built is already reflected
-            # in the baseline.
-            if (str(op.get("resource", "")).upper() in tables
-                    and str(op.get("updated_at", ""))[:10] >= iso_date):
-                rows.append(op)
-        oldest = str(data[-1].get("updated_at", ""))[:10]
-        if oldest and oldest < iso_date:
-            return rows, marker
         pagination = body.get("pagination")
         if not isinstance(pagination, dict) or "last_page" not in pagination:
             # Without it there is no way to know whether more pages exist, and
@@ -137,8 +171,37 @@ def _walk_operations(client, iso_date: str, tables: set[str],
             raise LiveStateError(
                 "/api/v2/operations returned no `pagination.last_page`; the window "
                 "cannot be bounded, so 'nothing changed since' cannot be asserted")
+        total = pagination.get("total")
+        if isinstance(total, int):
+            if total_seen is not None and total < total_seen:
+                return True          # something left the list; offsets shifted up
+            total_seen = total if total_seen is None else max(total_seen, total)
+
+        data = body.get("data")
+        if not data:
+            return False
+        page_had_new = False
+        for op in data:
+            key = _op_key(op)
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            page_had_new = True
+            # `updated_at` is the filter, not position in the page: the last page
+            # that crosses the baseline date carries rows on both sides of it, and
+            # an operation from before the snapshot was built is already reflected
+            # in the baseline.
+            if (str(op.get("resource", "")).upper() in tables
+                    and str(op.get("updated_at", ""))[:10] >= iso_date):
+                seen[key] = op
+
+        if not to_baseline and not page_had_new:
+            return False
+        oldest = str(data[-1].get("updated_at", ""))[:10]
+        if to_baseline and oldest and oldest < iso_date:
+            return False
         if page >= (pagination.get("last_page") or page):
-            return rows, marker
+            return False
         page += 1
     raise LiveStateError(
         f"walked {max_pages} pages of /api/v2/operations without reaching "
@@ -146,32 +209,41 @@ def _walk_operations(client, iso_date: str, tables: set[str],
         f"be asserted")
 
 
-def operations_since(client, iso_date: str, *, tables: set[str],
-                     max_pages: int = 200, attempts: int = 3) -> list[dict]:
-    """Every operation on `tables` with `updated_at >= iso_date`.
+def _op_key(op: dict) -> tuple:
+    """What makes two operation rows the same row across sweeps.
 
-    Pages newest-first, which is the endpoint's fixed order and the reason this
-    needs a consistency check rather than a single pass. Pagination is by OFFSET
-    over a list sorted `updated_at DESC`, so every row written while the walk is
-    in progress pushes the tail down one slot and one already-passed row is never
-    read. With a month-old baseline the walk is ~90 sequential rate-limited
-    requests - minutes - so this is not a theoretical window, and the row that
-    goes missing could be exactly the create we are checking for.
-
-    So: remember the newest operation id before the walk, re-read page 1 after it,
-    and redo the walk if anything arrived meanwhile. `person_id.py` guards the
-    same hazard on `/api/v2/persons` the same way.
+    `id` normally, but never `id` ALONE: a response that omits it would give every
+    row the same key `None`, and the whole window would collapse to one operation -
+    silently, and in the direction that answers "nothing changed since". Falling
+    back to the resource identity keeps distinct rows distinct.
     """
-    for attempt in range(1, attempts + 1):
-        rows, marker_before = _walk_operations(client, iso_date, tables, max_pages)
-        marker_after = _newest_marker(_page(client, 1))
-        if marker_after == marker_before:
-            return rows
-    raise LiveStateError(
-        f"the operations log kept changing under the walk ({attempts} attempts); "
-        f"paging is by offset over a newest-first list, so a concurrent write can "
-        f"hide a row from it. Retry when the site is quieter rather than accepting "
-        f"an answer that may have missed the very row being checked for")
+    ident = op.get("id")
+    if ident is not None:
+        return ("id", ident)
+    return ("row", str(op.get("resource") or ""), str(op.get("resource_id") or ""),
+            str(op.get("updated_at") or ""), str(op.get("op_type") or ""))
+
+
+def _newest_first(seen: dict) -> list[dict]:
+    """The endpoint's own order, restored.
+
+    Sweeps collect out of order - a later sweep appends rows that belong at the
+    head - and `resolve_admin_categories` replays the result oldest-first by
+    reversing it, so the order is load-bearing, not cosmetic.
+    """
+    return sorted(seen.values(),
+                  key=lambda op: (str(op.get("updated_at") or ""),
+                                  _sort_key(op.get("id"))),
+                  reverse=True)
+
+
+def _sort_key(value: Any) -> tuple[int, Any]:
+    """Sort ids numerically where they are numeric, without crashing where they are
+    not - the endpoint's `id` is an int today, and a mixed list would raise."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return (0, value)
+    text = str(value or "")
+    return (0, int(text)) if text.lstrip("-").isdigit() else (1, text)
 
 
 def resolve_admin_categories(client, snapshot: Path,

@@ -1967,3 +1967,129 @@ validated and reviewed, with **114 errors, all of them the missing `approved_by`
 and a dry run through `batch_runner` returns 114 successes with every `{"ref": ...}`
 resolved in dependency order. Nothing has been submitted; the signature is the
 user's to give.
+
+
+---
+
+## Milestone: the `approved_by` gate is removed — 2026-09-14
+
+Decided by the user: **"当前项目我们都不需要进行 approved by 设置，因为使用这个 token 的
+人就是 approver. 信息在 create 或者 update 里面自然有。"**
+
+The reasoning holds. `approved_by` asked the person holding the token to countersign a
+row they were about to write with that same token, and the server stamps `user_id` on
+every `operations` row regardless — so the field recorded nothing the operations log
+did not already have, in a place only this client could read. It also cost something
+real: every generated batch arrived reporting one structural error per proposal (114
+of them for the salt addresses), which is a poor signal, because it meant a batch with
+a *genuine* error looked exactly like a batch with none.
+
+### What went
+
+`ResourceSpec.requires_explicit_approval` → `is_global_reference_data`, and it is now a
+label rather than a gate. `staging.find_issues()` no longer errors on a missing
+signature, `mutation_api._require_approval()` and `MAX_APPROVED_BY_LEN` are gone,
+`http_client._check_approval()` is gone, `batch_runner` no longer synthesises an
+`approved_by: <name>` `meta.comment`, and `Proposal.approved_by` itself is gone
+(pydantic ignores unknown keys, so an older staging file still loads). On the review
+page: the signature box, the bulk "Sign all N" control, `missingApproval`, the
+"missing approvals" chip, and the `approved_by` branch of `apply_decisions`.
+
+### What stayed, deliberately
+
+**Rule 12's other half**, confirmed by the user in the same exchange — *"第二条没问题，
+需要新建 text codes 的时候，我要知道"*. An agent does not invent global reference data to
+unblock itself: if a batch needs a book title CBDB does not have, that is a finding
+reported with the evidence, not a row added quietly. That was never redundant with the
+token's identity, and it is the part of the rule that was actually doing work.
+
+**The `is_global_reference_data` flag**, because a reviewer cannot tell from a resource
+string that a row is visible to every CBDB user and referenced by any number of person
+records. The preview marks those rows, and the review page keeps the per-table
+reversibility wording that the signature box used to carry — an `ADDR_CODES` row cannot
+be deleted but every column stays editable; an `ADDR_BELONGS_DATA` key is neither. That
+difference is what decides how carefully a row is worth reading.
+
+**The content hash.** It was introduced to stop a stored signature re-attaching itself
+to a regenerated row, but it covers field edits and conflict resolutions too, and those
+are the decisions that remain. `_check_reviewed_version` is unchanged.
+
+**`http_client`'s refusal of `offices`/`office-load`.** It was reachable through the
+approval check and is now its own `AmbiguousResourceError`: which table those strings
+hit is registry order this client cannot see, so a write that says either may land on a
+person's appointment record or on a global office code, and the caller cannot tell
+which. That has nothing to do with approval and should not have been living inside it.
+
+### Effect on the salt-address batch
+
+`data/staging/2026-09-11-salt-addresses/proposal.yaml` was regenerated without the
+field. `validate --staging` now reports **"no issues found (114 proposals)"** where it
+used to report 114 errors, which is the point: an error in that batch now means
+something is wrong with it.
+
+### One thing found while regenerating, unrelated to the gate
+
+The regeneration would not complete, and fixing it took two attempts and a `codex`
+pass to get right — worth recording, because the first two answers were both
+plausible and both wrong.
+
+`live_state.operations_since` walks `GET /api/v2/operations` by OFFSET over a list
+the endpoint sorts `updated_at DESC` and cannot filter by resource (`per_page` caps
+at 100). With a month-old baseline that is ~100 sequential rate-limited requests —
+minutes — against a live log.
+
+**First version:** remember the newest operation id, redo the whole walk if it moved.
+On production that never converges: any write anywhere, a kinship row, an altname,
+invalidates a two-minute walk. Two real runs burned several hundred requests each and
+then refused to answer.
+
+**Second version:** stop retrying; sweep the head again afterwards, stopping at the
+first page that contributes nothing new. Faster, and it completed — but `codex` found
+two holes. "Contributes nothing new" counted only rows for the table being checked, so
+a page of fresh person-data writes ended the sweep while the category row sat a page
+further down. And "the newest id has not moved" is not a proof that nothing shifted.
+
+**What it took to get right was asking which changes can actually skip a row**, rather
+than trying to make the log hold still:
+
+* a row **inserted at the head** shifts everything DOWN, so a page boundary re-reads
+  a row — never skips, and the duplicate is free because rows are collected by id;
+* a row **updated** so its `updated_at` jumps to the head does the same;
+* a row **leaving the list** — deleted, or filtered out by a `crowdsourcing_status`
+  change — shifts everything below it UP, and the row at a page boundary is never
+  read. **That is the only case that can hide the very create being checked for.**
+
+So the walk watches `pagination.total`: it may grow freely, and if it ever drops, the
+window is not trustworthy and the walk restarts. That converges on a busy log, because
+the common case — arrivals — is now correctly treated as harmless. The follow-up pass
+over the head remains, to collect rows that arrived mid-walk, and it now stops on ids
+already seen *anywhere* rather than on matching rows. Keying is no longer `id` alone: a
+response omitting it would have given every row the key `None` and collapsed the whole
+window to one operation, silently, in the direction that answers "nothing changed
+since".
+
+### Review findings
+
+A review pass on the removal found five properties that lost their only test because
+`approved_by` happened to be the vehicle, and none of them was about `approved_by`:
+the read exemption on the transport guard (pinned with a resource that is never
+refused either way, so it passed with the exemption deleted); `reviewed_hash` being
+taken once before the loop rather than per decision; the refusal of a decisions file
+carrying no hash at all; `restore()` dropping and keeping decisions by hash in the
+page; and the per-table reversibility wording. All five are pinned again, and all
+five mutations are caught.
+
+It also caught rule 12 having narrowed from "writes" to "creates" in the rewrite —
+leaving nothing, in code or prose, against an agent deciding on its own to *change* a
+global row. For `office` that is the more destructive direction: its update is a
+full-row overwrite. Restored.
+
+`codex` then found the two `live_state` holes above, plus a test that greps the page's
+source instead of calling the function it names (it passed with the function rewritten,
+because the words it looked for also appear in the comment above it) and a paragraph
+in `skills/cbdb-data-entry/SKILL.md` still instructing an agent never to fill in
+`approved_by`.
+
+**634 tests** (656 before the removal; 35 tested the gate, and some of what they
+covered came back as tests of the thing itself).
+

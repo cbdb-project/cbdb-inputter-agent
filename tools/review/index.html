@@ -150,14 +150,10 @@
   .freetext{margin-top:6px;display:flex;gap:6px;align-items:center}
   .freetext input{flex:1;min-width:120px}
 
-  .stat.bulk{display:inline-flex;gap:6px;align-items:center}
-.bulksig{font:inherit;font-size:12px;padding:3px 7px;border:1px solid var(--line);
-  border-radius:3px;background:var(--bg);color:var(--fg);min-width:170px}
-.bulkbtn{font:inherit;font-size:12px;padding:3px 10px;border:1px solid var(--bad);
-  border-radius:3px;background:var(--bad);color:#fff;cursor:pointer}
-.approval{border-left:3px solid var(--bad);background:var(--bad-soft);
+  /* The "this is global reference data" notice on a proposal. Amber, not red:
+     it is context for reading the row, not a problem to fix. */
+  .approval{border-left:3px solid var(--warn);background:var(--warn-soft);
     padding:8px 10px;margin:7px 0;border-radius:0 6px 6px 0}
-  .approval.done{border-left-color:var(--good);background:var(--good-soft)}
   .issue{font-size:12px;color:var(--bad);margin-top:4px}
   .issue.conflictish{color:var(--warn)}
 
@@ -235,7 +231,7 @@ const SCHEMA = 3;   // must match review.REVIEW_JSON_SCHEMA_VERSION
                     //   3: + content_hash per proposal, carried on every stored and
                     //      exported decision
 let DATA = null;
-// decisions[proposalId] = {conflicts:{cid:value}, fields:{name:value}, approved_by:str}
+// decisions[proposalId] = {conflicts:{cid:value}, fields:{name:value}, h:contentHash}
 let D = {};
 const NL = String.fromCharCode(10);   // newline for title= tooltips
 const $ = (s) => document.querySelector(s);
@@ -248,9 +244,9 @@ const el = (t, cls, txt) => { const n = document.createElement(t);
    only trustworthy while the proposal it was made about still says the same thing.
    Each one records that proposal's content_hash and is dropped if it moved.
    Without this, re-running the generator after settling an open question brought
-   every earlier signature back onto rows whose parent, years or category had
-   changed, and the page reported "0 missing approvals" with nobody having typed
-   anything. */
+   every earlier decision back onto rows whose parent, years or category had
+   changed - a field edit or a conflict choice landing on values nobody had looked
+   at. */
 const key = () => "cbdb-review:" + (DATA ? DATA.batch_id : "?");
 function save(){ try{ localStorage.setItem(key(), JSON.stringify(D));
   $("#saveHint").textContent = "saved locally"; }catch(e){ $("#saveHint").textContent = ""; } }
@@ -262,18 +258,16 @@ function restore(){
   try{ stored = JSON.parse(raw); }catch(e){ D = {}; return; }
 
   const live = new Map(DATA.proposals.map(p => [p.id, p.content_hash]));
-  const kept = {}; let dropped = 0, droppedSigs = 0;
+  const kept = {}; let dropped = 0;
   for (const pid in stored){
     const d = stored[pid] || {};
     if (live.get(pid) === d.h){ kept[pid] = d; continue; }
     dropped++;
-    if (String(d.approved_by || "").trim()) droppedSigs++;
   }
   D = kept;
   let msg = "restored your earlier decisions from this browser";
   if (dropped){
-    msg += " \u2014 discarded " + dropped + " for proposal(s) that have changed since"
-         + (droppedSigs ? ", including " + droppedSigs + " signature(s)" : "");
+    msg += " \u2014 discarded " + dropped + " for proposal(s) that have changed since";
     try{ localStorage.setItem(key(), JSON.stringify(D)); }catch(e){}
   }
   $("#saveHint").textContent = msg;
@@ -401,8 +395,6 @@ function clearConflict(pid, cid){
 function setField(pid, name, value){
   const d = dec(pid); d.fields = d.fields || {}; d.fields[name] = value; save();
 }
-function setApproval(pid, sig){ dec(pid).approved_by = sig; save(); render(); }
-
 function conflictValue(p, c){
   const d = D[p.id];
   if (d && d.conflicts && Object.prototype.hasOwnProperty.call(d.conflicts, c.id))
@@ -416,19 +408,12 @@ function fieldValue(p, f){
     return {value: d.fields[f.field], mine: true};
   return {value: f.proposed, mine: false};
 }
-function approvalValue(p){
-  const d = D[p.id];
-  if (d && d.approved_by !== undefined) return {value: d.approved_by, mine: true};
-  return {value: p.approved_by, mine: false};
-}
 const isUnresolved = (p) => p.conflicts.some(c => !conflictValue(p, c));
-const missingApproval = (p) => p.needs_approval && !(approvalValue(p).value || "").trim();
 function pendingCount(){
   let n = 0;
   for (const pid in D){ const d = D[pid];
     n += d.conflicts ? Object.keys(d.conflicts).length : 0;
-    n += d.fields ? Object.keys(d.fields).length : 0;
-    if (d.approved_by !== undefined) n += 1; }
+    n += d.fields ? Object.keys(d.fields).length : 0; }
   return n;
 }
 
@@ -438,7 +423,7 @@ function visible(p){
   if ($("#fRes").value && p.resource !== $("#fRes").value) return false;
   if ($("#fOp").value && p.operation !== $("#fOp").value) return false;
   if ($("#fConf").value && p.confidence !== $("#fConf").value) return false;
-  if ($("#fUnres").checked && !isUnresolved(p) && !missingApproval(p)) return false;
+  if ($("#fUnres").checked && !isUnresolved(p)) return false;
   if ($("#fTouched").checked && !D[p.id]) return false;
   if (!q) return true;
   const hay = [p.id, p.resource, p.operation, String(p.person_id), p.source_quote,
@@ -559,9 +544,10 @@ function conflictNode(p, c){
   return box;
 }
 
-/* What is actually irreversible differs per table, and a reviewer deciding
-   whether to sign deserves the specific answer rather than the worst case. */
-function approvalRisk(resource){
+/* What is actually irreversible differs per table, and a reviewer deciding whether
+   a row is right deserves the specific answer rather than the worst case: how
+   carefully to read it depends on whether a mistake is correctable later. */
+function reversibilityNote(resource){
   const r = String(resource || "");
   // Matched on the ALIASES models.py actually accepts, not on a guessed prefix:
   // `addrcodes` and `textcodes` are both valid and both used to fall through to
@@ -594,33 +580,28 @@ function approvalRisk(resource){
   // deletable while unreferenced (API.md 13.4). Saying "check" is weaker advice
   // and true; saying "permanent" is stronger advice and sometimes a lie.
   return "This writes global reference data. What can be undone afterwards depends "
-       + "on the table — check API.md 13.3/13.4 before signing.";
+       + "on the table — check API.md 13.3/13.4 before relying on it.";
 }
 
-function approvalNode(p){
-  const cur = approvalValue(p);
-  const has = !!(cur.value || "").trim();
-  const box = el("div", "approval" + (has ? " done" : ""));
-  box.appendChild(el("div", "cid", (has ? "🔓 " : "🔒 ") + "approved_by — global reference data"));
+/* Not a control — a label. There used to be a signature box here, which asked the
+   person about to write the row with their own token to countersign it; the
+   server records `user_id` on every operation, so it recorded nothing new. What is
+   worth keeping is the sentence a reviewer cannot read off the resource string:
+   this row is not one person's record, and here is exactly how far it can be taken
+   back. */
+function globalReferenceNode(p){
+  const box = el("div", "approval");
+  box.appendChild(el("div", "cid", "⚠️ global reference data"));
   box.appendChild(el("div", "cdesc",
-    "This proposal writes GLOBAL reference data, not one person's record: it is " +
-    "referenced by potentially tens of thousands of rows and visible to every " +
-    "other user. " + approvalRisk(p.resource) + " It cannot be submitted until a " +
-    "named human signs off. Type YOUR name — the agent is not allowed to fill " +
-    "this in."));
-  const ft = el("div", "freetext");
-  const inp = el("input"); inp.type = "text"; inp.placeholder = "your name";
-  inp.value = cur.value || "";
-  inp.onchange = () => setApproval(p.id, inp.value.trim());
-  ft.appendChild(inp);
-  box.appendChild(ft);
+    "This proposal does not belong to one person: it is visible to every other " +
+    "user and can be referenced by any number of person records. " +
+    reversibilityNote(p.resource)));
   return box;
 }
 
 function proposalRow(p){
   const tr = el("tr");
-  const err = p.issues.some(i => i.severity === "error"
-      && !(i.message.includes("approved_by") && !missingApproval(p)));
+  const err = p.issues.some(i => i.severity === "error");
   if (err) tr.className = "errored";
   else if (isUnresolved(p)) tr.className = "flagged";
 
@@ -665,7 +646,6 @@ function proposalRow(p){
   c3.appendChild(fields);
   if (p.source_quote) c3.appendChild(el("div", "quote", "「" + p.source_quote + "」"));
   for (const i of p.issues){
-    if (i.message.includes("approved_by") && !missingApproval(p)) continue;
     // A conflict already settled here would otherwise still show its
     // "unresolved_conflict" line from the export, contradicting the green panel.
     if (i.severity === "unresolved_conflict"){
@@ -678,7 +658,7 @@ function proposalRow(p){
     c3.appendChild(el("div", "issue" + (i.severity === "error" ? "" : " conflictish"),
       i.severity + ": " + i.message));
   }
-  if (p.needs_approval) c3.appendChild(approvalNode(p));
+  if (p.global_reference_data) c3.appendChild(globalReferenceNode(p));
   for (const c of p.conflicts) c3.appendChild(conflictNode(p, c));
   tr.appendChild(c3);
   return tr;
@@ -705,10 +685,10 @@ function render(){
     meta.appendChild(el("span", null, ps.length + " row" + (ps.length > 1 ? "s" : "")));
     const unres = ps.filter(isUnresolved).length;
     if (unres) meta.appendChild(el("span", "stat warn", unres + " unresolved"));
-    const errs = ps.filter(p => p.issues.some(i => i.severity === "error"
-        && !(i.message.includes("approved_by") && !missingApproval(p)))).length;
+    const errs = ps.filter(p => p.issues.some(i => i.severity === "error")).length;
     if (errs) meta.appendChild(el("span", "stat bad", errs + " error"));
-    if (ps.some(missingApproval)) meta.appendChild(el("span", "stat bad", "needs approval"));
+    if (ps.some(p => p.global_reference_data))
+      meta.appendChild(el("span", "stat warn", "global reference data"));
     s.appendChild(meta);
     d.appendChild(s);
     const t = el("table");
@@ -725,33 +705,17 @@ function render(){
   }
   renderBulk();
   renderStats();
-  renderBulkApproval();
   $("#pending").innerHTML = "<b>" + pendingCount() + "</b> decision(s) staged in this browser";
-}
-
-/* A structural error that the reviewer has since fixed here must stop being counted,
-   or the header keeps saying "1 structural error" after they typed their name into
-   the approval box. Only the approval error is satisfiable from this page; every
-   other error needs a YAML edit and a re-validate, so it stays counted. */
-function liveErrorCount(){
-  let n = 0;
-  for (const p of DATA.proposals){
-    for (const i of p.issues){
-      if (i.severity !== "error") continue;
-      const isApprovalError = i.message.includes("approved_by");
-      if (isApprovalError && !missingApproval(p)) continue;
-      n++;
-    }
-  }
-  return n;
 }
 
 function renderStats(){
   const s = $("#stats"); s.innerHTML = "";
   const unres = DATA.proposals.reduce((n, p) =>
     n + p.conflicts.filter(c => !conflictValue(p, c)).length, 0);
-  const errs = liveErrorCount();
-  const appr = DATA.proposals.filter(missingApproval).length;
+  // Every structural error needs a YAML edit and a re-validate; none of them is
+  // satisfiable from this page, so the count is just the count.
+  const errs = DATA.proposals.reduce((n, p) =>
+    n + p.issues.filter(i => i.severity === "error").length, 0);
   const add = (cls, label, n) => {
     const x = el("span", "stat " + cls);
     x.innerHTML = "<b>" + n + "</b> " + label; s.appendChild(x); };
@@ -766,74 +730,8 @@ function renderStats(){
   add("", "persons/groups", DATA.summary.groups);
   add(unres ? "warn" : "good", "unresolved", unres);
   add(errs ? "bad" : "good", "structural errors", errs);
-  if (DATA.proposals.some(p => p.needs_approval))
-    add(appr ? "bad" : "good", "missing approvals", appr);
-}
-
-/* The header counts; the footer acts.
-   "Sign all 114" used to sit among the summary chips, between "114 proposals" and
-   "114 missing approvals" - reading as one more piece of status. It now sits in the
-   action bar with Export and Discard, the other two batch-wide controls.
-   This is a grouping, NOT a barrier: the footer is `position:fixed` and on screen
-   from the moment a file loads, so it is exactly as reachable as the chip was. The
-   thing that actually stands between a reviewer and 114 signatures is the
-   confirmation below, which names every table in the selection and what each one
-   cannot undo. */
-function renderBulkApproval(){
-  const foot = $("#footer");
-  const old = foot.querySelector(".stat.bulk");
-  if (old) old.remove();
-  // Counted over the VISIBLE rows, the same set the button will sign, so the
-  // number on the button is the number of signatures it writes.
-  const appr = DATA.proposals.filter(p => missingApproval(p) && visible(p)).length;
-  if (appr > 1) foot.insertBefore(bulkApprovalNode(appr), $("#export"));
-}
-
-/* Sign every still-unsigned gated proposal at once.
-   Not a weakening of the gate: a human still types their own name, deliberately,
-   and confirms a message that says how many rows and which tables they are
-   signing for. Typing it 114 times separately would add fatigue, not scrutiny -
-   and the whole point of the gate is that someone actually reads the batch. Rows
-   already signed individually are left alone. */
-function bulkApprovalNode(n){
-  const wrap = el("span", "stat bulk");
-  wrap.appendChild(el("b", "", ""));
-  const inp = el("input");
-  inp.type = "text";
-  inp.placeholder = "your name, to sign all " + n;
-  inp.className = "bulksig";
-  const btn = el("button", "bulkbtn");
-  btn.textContent = "Sign all " + n;
-  btn.onclick = () => {
-    const sig = inp.value.trim();
-    if (!sig){ inp.focus(); return; }
-    // Only what is on screen. The table honours the filters; a "Sign all" that
-    // did not would sign rows the reviewer had deliberately filtered away.
-    const targets = DATA.proposals.filter(p => missingApproval(p) && visible(p));
-    if (!targets.length){ return; }
-    // Per table, not one worst case: `approvalRisk` exists because what is
-    // irreversible differs sharply between them, and the summary that flattened it
-    // both understated ADDR_BELONGS_DATA (its four-column key can never be edited
-    // or deleted - 57 of the 114 rows here) and overstated `office` (deletable
-    // while unreferenced). A reviewer signing in bulk should see the same answer
-    // the per-row panel gives.
-    const counts = new Map();
-    for (const p of targets)
-      counts.set(p.resource, (counts.get(p.resource) || 0) + 1);
-    const lines = [...counts.entries()].sort()
-      .map(([res, n]) => "  " + n + " × " + res + " — " + approvalRisk(res));
-    const ok = window.confirm(
-      "Sign " + targets.length + " proposals as \"" + sig + "\".\n\n" +
-      lines.join("\n\n") + "\n\n" +
-      "You are recording that you, named, reviewed these rows. They are global " +
-      "reference data, visible to every CBDB user.");
-    if (!ok) return;
-    for (const p of targets) dec(p.id).approved_by = sig;
-    save(); render();
-  };
-  wrap.appendChild(inp);
-  wrap.appendChild(btn);
-  return wrap;
+  const globals = DATA.proposals.filter(p => p.global_reference_data).length;
+  if (globals) add("warn", "global reference data", globals);
 }
 
 /* ---------- export ---------- */
@@ -841,9 +739,9 @@ function buildDecisions(){
   const out = [];
   for (const p of DATA.proposals){
     const d = D[p.id]; if (!d) continue;
-    /* Every decision carries the hash, not just the signature: a field edit
-       rewrites a value and a conflict choice settles which value is written, and
-       an ungated batch has no approved_by for the check to ride on. */
+    /* Every decision carries the hash of the proposal it was made about: a field
+       edit rewrites a value and a conflict choice settles which value is written,
+       so applying either to a regenerated row is the thing to refuse. */
     const h = p.content_hash;
     if (d.conflicts) for (const cid in d.conflicts)
       out.push({proposal_id: p.id, conflict_id: cid, resolution: d.conflicts[cid],
@@ -851,8 +749,6 @@ function buildDecisions(){
     if (d.fields) for (const name in d.fields)
       out.push({proposal_id: p.id, field: name, value: d.fields[name],
                 content_hash: h});
-    if (d.approved_by !== undefined)
-      out.push({proposal_id: p.id, approved_by: d.approved_by, content_hash: h});
   }
   return {schema_version: SCHEMA, batch_id: DATA.batch_id, decisions: out};
 }

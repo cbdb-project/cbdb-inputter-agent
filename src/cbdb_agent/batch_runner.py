@@ -325,17 +325,13 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
             continue
 
         full_target_pk = resolve_target_pk(proposal, resolved_person_id=resolved_pid, spec_key=spec.key)
-        # Carry an approval-gated proposal's signer into meta.comment, so the
-        # sign-off lands in the SERVER's own `operations` row and is not only
-        # recorded in this repo's staging file (AGENTS.md rule 12; the comment is
-        # what `direct` mode writes to that row's `__note`, per API.md 4.3).
-        approved_by = (proposal.approved_by or "").strip() or None
+        # No `meta.comment`. It used to carry "approved_by: <name>" into the
+        # server's `operations` row, which was redundant twice over: the row already
+        # records `user_id`, and the signer was by definition the person whose token
+        # sent the request. Nothing in a staging batch has anything else to say
+        # there, so the envelope omits `meta` entirely -
+        # `mutation_api._build_envelope` adds the key only when a comment is passed.
         comment = None
-        if approved_by:
-            comment = (
-                f"approved_by: {approved_by} "
-                f"(batch {batch.batch_id}, proposal {proposal.id})"
-            )
 
         # NOTE the office duplicate pre-flight is NOT called here. It lives inside
         # MutationApi.create(), at the layer that actually sends the request, so a
@@ -352,7 +348,6 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                     changes=proposal.changes,
                     resource_string=proposal.resource,
                     comment=comment,
-                    approved_by=approved_by,
                 )
             elif proposal.operation == "update":
                 response = api.update(
@@ -362,7 +357,6 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                     changes=proposal.changes,
                     resource_string=proposal.resource,
                     comment=comment,
-                    approved_by=approved_by,
                 )
             else:  # delete
                 response = api.delete(
@@ -371,7 +365,6 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
                     target_pk=full_target_pk,
                     resource_string=proposal.resource,
                     comment=comment,
-                    approved_by=approved_by,
                 )
         except (CbdbApiError, FieldWhitelistError) as exc:
             # Per-record isolation (AGENTS.md rule 5) is the default: never retry

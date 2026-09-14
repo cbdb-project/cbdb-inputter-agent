@@ -199,7 +199,7 @@ def test_get_sends_full_envelope_as_json_body(tmp_path):
     assert sent["target"]["pk"] == {"c_personid": 900001}
 
 
-# --- text-codes: the wire envelope, and the second approval gate ---------------
+# --- text-codes: the wire envelope, and the whitelist and pre-create checks ---------------
 # AGENTS.md rule 12 / API.md 13.2. The envelope details below are load-bearing:
 # omitting `target` entirely is a controller-level 422, and mode=proposal is a 501.
 
@@ -223,8 +223,6 @@ def test_text_codes_create_envelope(tmp_path):
         target_pk={},
         changes={"c_title_chn": "聽雪先生集", "c_title": "Tingxue xiansheng ji"},
         resource_string="text-codes",
-        approved_by="Hongsu Wang",
-        comment="approved_by: Hongsu Wang (batch b, proposal tc1)",
     )
     sent = json.loads(responses.calls[0].request.body)
     assert sent["resource"] == "text-codes"
@@ -236,57 +234,6 @@ def test_text_codes_create_envelope(tmp_path):
     assert "target" in sent and sent["target"] == {"pk": {}}
     assert sent["changes"]["c_title_chn"] == "聽雪先生集"
     assert "c_textid" not in sent["changes"]  # server assigns it
-    assert sent["meta"]["comment"].startswith("approved_by: Hongsu Wang")
-
-
-@responses.activate
-def test_text_codes_create_refuses_without_approval(tmp_path):
-    """The gate must not live only in staging.py - mutation_api is the layer that
-    actually sends the request, and this write has no server-side undo."""
-    api = make_api(tmp_path)
-    _ok_create()
-    with pytest.raises(FieldWhitelistError, match="approved_by"):
-        api.create(
-            "text_codes",
-            person_id=0,
-            target_pk={},
-            changes={"c_title_chn": "聽雪先生集"},
-            resource_string="text-codes",
-        )
-    assert len(responses.calls) == 0  # nothing reached the wire
-
-
-@responses.activate
-def test_text_codes_create_refuses_blank_approval(tmp_path):
-    api = make_api(tmp_path)
-    with pytest.raises(FieldWhitelistError, match="approved_by"):
-        api.create(
-            "text_codes",
-            person_id=0,
-            target_pk={},
-            changes={"c_title_chn": "x"},
-            resource_string="text-codes",
-            approved_by="   ",
-        )
-    assert len(responses.calls) == 0
-
-
-@responses.activate
-def test_text_codes_create_refuses_an_over_long_approval(tmp_path):
-    """approved_by is a person's name, not prose - it lands in operations.__note."""
-    from cbdb_agent.mutation_api import MAX_APPROVED_BY_LEN
-
-    api = make_api(tmp_path)
-    with pytest.raises(FieldWhitelistError, match="over the"):
-        api.create(
-            "text_codes",
-            person_id=0,
-            target_pk={},
-            changes={"c_title_chn": "x"},
-            resource_string="text-codes",
-            approved_by="a" * (MAX_APPROVED_BY_LEN + 1),
-        )
-    assert len(responses.calls) == 0
 
 
 @responses.activate
@@ -300,7 +247,6 @@ def test_text_codes_create_refuses_an_empty_changes(tmp_path):
             target_pk={},
             changes={},
             resource_string="text-codes",
-            approved_by="Hongsu Wang",
         )
     assert len(responses.calls) == 0
 
@@ -316,27 +262,11 @@ def test_text_codes_create_works_through_the_generic_api_without_resource_string
         person_id=0,
         target_pk={},
         changes={"c_title_chn": "聽雪先生集"},
-        approved_by="Hongsu Wang",
     )
     assert json.loads(responses.calls[0].request.body)["resource"] == "text_codes"
 
 
-@responses.activate
-def test_approval_is_not_demanded_for_ordinary_person_resources(tmp_path):
-    """The gate must not leak: an altnames create needs no approval."""
-    api = make_api(tmp_path)
-    _ok_create()
-    api.create(
-        "altnames",
-        person_id=5000,
-        target_pk={"c_personid": 5000, "c_alt_name_chn": "季理", "c_alt_name_type_code": 4},
-        changes={"c_alt_name_chn": "季理", "c_alt_name_type_code": 4},
-    )
-    sent = json.loads(responses.calls[0].request.body)
-    assert "meta" not in sent  # no comment, no approval bookkeeping
-
-
-# --- office entity aggregate: the wire envelope, and the approval gate ---------
+# --- office entity aggregate: the wire envelope, and the whitelist ---------
 
 
 def _office_changes():
@@ -392,7 +322,6 @@ def test_office_update_envelope(tmp_path):
         target_pk={"c_office_id": 12304},
         changes=_office_changes(),
         resource_string="office",
-        approved_by="Hongsu Wang",
     )
 
     body = captured["body"]
@@ -415,20 +344,6 @@ def test_office_update_envelope(tmp_path):
 
 
 @responses.activate
-def test_office_update_refuses_without_approval(tmp_path):
-    api = make_api(tmp_path)
-    with pytest.raises(FieldWhitelistError, match="approved_by"):
-        api.update(
-            "office",
-            person_id=0,
-            target_pk={"c_office_id": 12304},
-            changes=_office_changes(),
-            resource_string="office",
-        )
-    assert not responses.calls
-
-
-@responses.activate
 def test_office_update_refuses_a_partial_payload(tmp_path):
     """The full-overwrite guard has to hold at the mutation layer too, not only in
     staging validation - an omitted field would be written as NULL."""
@@ -442,7 +357,6 @@ def test_office_update_refuses_a_partial_payload(tmp_path):
             target_pk={"c_office_id": 12304},
             changes=partial,
             resource_string="office",
-            approved_by="Hongsu Wang",
         )
     assert not responses.calls
 
@@ -460,7 +374,6 @@ def test_office_refuses_the_plural_alias_on_both_operations(tmp_path):
             target_pk={"c_office_id": 12304},
             changes=_office_changes(),
             resource_string="offices",
-            approved_by="Hongsu Wang",
         )
     with pytest.raises(FieldWhitelistError, match="not a valid resource alias"):
         api.create(
@@ -469,7 +382,6 @@ def test_office_refuses_the_plural_alias_on_both_operations(tmp_path):
             target_pk={},
             changes=_office_create_changes(),
             resource_string="offices",
-            approved_by="Hongsu Wang",
         )
     # Neither reached the network - not the write, and not even the duplicate check.
     assert not responses.calls
@@ -511,7 +423,6 @@ def test_office_create_runs_the_duplicate_check_before_writing(tmp_path):
         target_pk={},
         changes=_office_create_changes(),
         resource_string="office",
-        approved_by="Hongsu Wang",
     )
 
     # The search happened FIRST, and carried no credentials (AGENTS.md rule 10).
@@ -542,7 +453,6 @@ def test_office_create_refuses_when_the_name_already_exists(tmp_path):
             target_pk={},
             changes=_office_create_changes(),
             resource_string="office",
-            approved_by="Hongsu Wang",
         )
 
     assert [c.request.method for c in responses.calls] == ["GET"]
@@ -562,7 +472,6 @@ def test_office_update_does_not_run_the_duplicate_check(tmp_path):
         target_pk={"c_office_id": 12304},
         changes=_office_changes(),
         resource_string="office",
-        approved_by="Hongsu Wang",
     )
     assert [c.request.method for c in responses.calls] == ["POST"]
 
@@ -583,7 +492,6 @@ def test_a_failed_duplicate_check_blocks_the_office_create(tmp_path):
             target_pk={},
             changes=_office_create_changes(),
             resource_string="office",
-            approved_by="Hongsu Wang",
         )
     assert not any(c.request.method == "POST" for c in responses.calls)
 
@@ -598,3 +506,27 @@ def test_a_non_office_create_does_not_touch_the_search_endpoint(tmp_path):
     )
     api.create_person(900002, {"c_name_chn": "柳宗元"})
     assert [c.request.method for c in responses.calls] == ["POST"]
+
+
+@responses.activate
+def test_an_envelope_carries_no_meta_when_there_is_no_comment(tmp_path):
+    """`meta` is added only when a caller has something to say there.
+
+    It used to carry a synthesised "approved_by: <name>" on every gated write; with
+    that gone, nothing in a staging batch fills it, and an empty `meta: {}` on every
+    request would be noise in the server's operations row. This was asserted only as
+    a side-check of a deleted approval test.
+    """
+    api = make_api(tmp_path)
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        json={"ok": True, "result": {"pk": {"c_textid": 1}}}, status=200)
+    api.create(
+        "text_codes",
+        person_id=0,
+        target_pk={},
+        changes={"c_title_chn": "聽雪先生集"},
+        resource_string="text-codes",
+    )
+    sent = json.loads(responses.calls[0].request.body)
+    assert "meta" not in sent

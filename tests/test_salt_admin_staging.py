@@ -4,7 +4,7 @@ Separate from `test_salt_admin.py` because what matters here is different: not
 whether the arithmetic is right, but whether the batch this produces is the shape
 `staging.py` validates and whether the rule-12 approval gate survives contact with a
 generator. A review pass found four mutations of this module that the suite did not
-notice, including `approved_by: None -> "auto"` and `resource: office -> offices` -
+notice, including `resource: office -> offices` -
 the second being the exact alias trap `AGENTS.md` rule 12 warns about, since
 `offices` resolves to the *postings* sub-resource and wins the server's dispatch.
 """
@@ -60,29 +60,12 @@ def batch():
     return ES.build_batch(_dataset([_unit("salt:ming:兩淮:泰州分司")]), "b1")
 
 
-class TestApprovalGate:
-    def test_approved_by_is_null_on_every_proposal(self, batch):
-        """The rule-12 gate. Kills `approved_by: None -> "auto"`.
-
-        `approved_by` records that a named human decided to write global reference
-        data. Anything this script could put there would be a forgery.
-        """
-        assert batch["proposals"]
-        for p in batch["proposals"]:
-            assert p["approved_by"] is None
-
-    def test_the_emitter_never_writes_a_name(self):
-        src = (REPO / "tools" / "salt-admin" / "emit_staging.py").read_text(
-            encoding="utf-8")
-        assert '"approved_by": None' in src
-        assert "approved_by\": \"" not in src
-
-    def test_validate_refuses_the_batch_and_says_why(self, batch):
+class TestGlobalReferenceData:
+    def test_validate_reports_no_errors_at_all(self, batch):
+        """The office aggregate is global reference data, but that is a label now,
+        not a gate: a structurally sound batch validates clean."""
         issues = find_issues(StagingBatch.model_validate(batch))
-        errors = [i for i in issues if i.severity == "error"]
-        assert len(errors) == len(batch["proposals"])
-        assert all("approved_by" in e.message for e in errors)
-
+        assert [i for i in issues if i.severity == "error"] == []
 
 class TestEnvelopeShape:
     def test_the_resource_is_office_not_offices(self, batch):

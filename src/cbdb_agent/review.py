@@ -46,7 +46,7 @@ from .staging import Issue, ProposalCurrentState, StagingBatch, StagingError
 #      actually means rather than re-reading the agent's arithmetic)
 #   3: + content_hash on every proposal, and on every decision the page exports.
 #      Proposal ids and batch ids are both stable across a regeneration, so without
-#      it a stored or exported signature re-attached itself to a row whose values
+#      it a stored or exported decision re-attached itself to a row whose values
 #      had since changed - see proposal_content_hash()
 REVIEW_JSON_SCHEMA_VERSION = 3
 
@@ -55,23 +55,22 @@ def proposal_content_hash(proposal: Any) -> str:
     """A fingerprint of everything about a proposal that decides what gets written.
 
     The review page keeps a reviewer's in-progress decisions in `localStorage`,
-    keyed by batch id, so an accidental reload does not lose them - and
-    `approved_by` is one of those decisions. But a batch id is chosen by the
-    operator and is stable across regenerations, and a generated proposal id
-    (`addr-ming-...-1368`) is derived from the source row and is stable too. So
-    re-running the generator after settling an open question produced proposals
-    with the SAME ids and DIFFERENT payloads, and the page silently re-attached the
-    old signatures: the header went back to "0 missing approvals" and
-    `decisions.json` carried sign-offs for rows no human had ever seen. The same
-    hole existed on the command line, where a decisions.json from before the
-    regeneration still applied cleanly.
+    keyed by batch id, so an accidental reload does not lose them. But a batch id is
+    chosen by the operator and is stable across regenerations, and a generated
+    proposal id (`addr-ming-...-1368`) is derived from the source row and is stable
+    too. So re-running the generator after settling an open question produced
+    proposals with the SAME ids and DIFFERENT payloads, and the page silently
+    re-attached the old decisions - a field edit or a conflict resolution landing on
+    a row whose values had changed underneath it. The same hole existed on the
+    command line, where a decisions.json from before the regeneration still applied
+    cleanly.
 
     So each proposal carries a hash of its own content; the page stores it with the
-    decision and exports it, and both the page and `apply_review` refuse a decision
-    whose hash no longer matches. Deliberately NOT covered: `source_quote`,
-    `confidence`, `notes` and the issue list - none of them changes what is
-    written, and re-signing because a comment was reworded would be friction with
-    no safety in it.
+    decision and exports it, and both the page and `apply_decisions` refuse a
+    decision whose hash no longer matches. Deliberately NOT covered: `source_quote`,
+    `confidence` and the issue list - none of them changes what is written, and
+    re-deciding because a comment was reworded would be friction with no safety in
+    it.
     """
     payload = {
         "resource": proposal.resource,
@@ -183,10 +182,10 @@ def export_review_json(
         content_hash = proposal_content_hash(proposal)
         try:
             spec = find_spec_by_alias(proposal.resource)
-            needs_approval = spec.requires_explicit_approval
+            global_reference = spec.is_global_reference_data
             resource_key = spec.key
         except FieldWhitelistError:
-            needs_approval = False
+            global_reference = False
             resource_key = None
 
         state = current_values.get(proposal.id)
@@ -218,8 +217,7 @@ def export_review_json(
                 "fields": fields,
                 "source_quote": proposal.source_quote,
                 "confidence": proposal.confidence,
-                "approved_by": proposal.approved_by,
-                "needs_approval": needs_approval,
+                "global_reference_data": global_reference,
                 "group": group_key(proposal),
                 "conflicts": [
                     {
@@ -269,11 +267,6 @@ def export_review_json(
             "unresolved_conflicts": sum(
                 1 for p in proposals_out for c in p["conflicts"] if not c["resolved"]
             ),
-            "missing_approvals": sum(
-                1
-                for p in proposals_out
-                if p["needs_approval"] and not (p["approved_by"] or "").strip()
-            ),
         },
     }
     return json.dumps(payload, ensure_ascii=False, indent=1)
@@ -281,7 +274,7 @@ def export_review_json(
 
 @dataclass
 class AppliedChange:
-    kind: str  # "resolution" | "field" | "approval" | "drop"
+    kind: str  # "resolution" | "field" | "drop"
     proposal_id: str
     detail: str
 
@@ -291,19 +284,15 @@ def _check_reviewed_version(
 ) -> None:
     """Refuse a decision made about a different version of this proposal.
 
-    Applies to EVERY decision, not only `approved_by`. The first version of this
-    guard covered signatures alone, on the reasoning that a signature is the thing
-    rule 12 protects - but a `field` decision rewrites a value, and a `conflict`
-    decision settles which value is written. A `decisions.json` produced before the
-    staging file was regenerated applies both of those to rows whose payload has
-    since changed, and for an ungated batch (no `approved_by` anywhere) nothing
-    else would notice.
+    A `field` decision rewrites a value and a `conflict` decision settles which
+    value is written, so a `decisions.json` produced before the staging file was
+    regenerated applies both of those to rows whose payload has since changed.
 
     Two things keep the guard from firing on legitimate work. The comparison is
     against the hash of the proposal **as it entered apply_decisions**, not as it
-    stands mid-loop - a reviewer may edit a field and sign the same proposal in one
-    pass, and their own edit must not invalidate their own signature. And it is
-    only consulted when a decision would actually CHANGE something: re-applying a
+    stands mid-loop - a reviewer may make several decisions about one proposal in a
+    single pass, and their own earlier edit must not invalidate their later one. And
+    it is only consulted when a decision would actually CHANGE something: re-applying a
     decisions file to a staging file it has already been applied to is a no-op, not
     a stale decision, and refusing it would break re-running `apply-review`.
     """
@@ -361,13 +350,13 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
     by_id = {p.id: p for p in batch.proposals}
     # The hash of each proposal AS REVIEWED, taken before anything is applied.
     #
-    # A reviewer may edit a field and sign the same proposal in one pass - that is
-    # the ordinary use of the page, since every field is editable. Their decisions
-    # arrive in one file, field edits first. Recomputing the hash per decision
-    # compared the signature against a proposal this very file had just changed,
-    # and refused the whole file with "re-export and sign again" - which reproduces
-    # the same failure, because the loop is the reviewer's own edit. What the
-    # signature has to be checked against is the version they were shown.
+    # A reviewer may make several decisions about one proposal in a single pass -
+    # that is the ordinary use of the page, since every field is editable and every
+    # conflict is settled there. They arrive in one file. Recomputing the hash per
+    # decision compared each one against a proposal that same file had just changed,
+    # and refused the whole file with "re-export and decide again" - which reproduces
+    # the failure, because the loop is the reviewer's own edit. What every decision
+    # has to be checked against is the version they were shown.
     reviewed_hash = {p.id: proposal_content_hash(p) for p in batch.proposals}
     applied: list[AppliedChange] = []
 
@@ -423,21 +412,9 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
                 )
             continue
 
-        if "approved_by" in raw:
-            signature = raw["approved_by"]
-            if proposal.approved_by != signature:
-                _check_reviewed_version(raw, proposal_id, reviewed_hash)
-                proposal.approved_by = signature
-                applied.append(
-                    AppliedChange(
-                        "approval", proposal_id, f"approved_by set to {signature!r}"
-                    )
-                )
-            continue
-
         raise StagingError(
-            f"decision for {proposal_id!r} has none of conflict_id / field / "
-            "approved_by - don't know what it is asking for"
+            f"decision for {proposal_id!r} has neither conflict_id nor field - "
+            "don't know what it is asking for"
         )
 
     return applied

@@ -176,48 +176,27 @@ class TestTheDuplicateCheckIsSigned:
             EA.main(["--batch-id", "b", "--skip-live-check"])
 
 
-# --- the approval gate ---------------------------------------------------------
+# --- global reference data -----------------------------------------------------
 
 
-class TestApprovalGate:
-    def test_approved_by_is_null_on_every_proposal(self):
+class TestGlobalReferenceData:
+    """Every row here is global reference data, and `validate` must have nothing else
+    to say about the batch."""
+
+    def test_validate_reports_no_errors_at_all(self):
+        """Until 2026-09-14 this batch validated with 114 errors, all of them the
+        missing `approved_by`. With that gate gone, a clean batch is clean - and any
+        error that does appear is a real one, not the gate."""
         batch = _build([_unit("a")])
-        assert batch["proposals"]
-        assert all(p["approved_by"] is None for p in batch["proposals"])
+        issues = find_issues(StagingBatch.model_validate(batch))
+        assert [i for i in issues if i.severity == "error"] == []
 
-    def test_the_emitter_never_writes_a_name(self):
-        """Parsed, not grepped. A regex for `"approved_by": "` would miss
-        `os.environ.get("CBDB_APPROVER")`, a single-quoted key, or an f-string."""
-        import ast
+    def test_the_preview_says_these_rows_belong_to_no_one(self):
+        from cbdb_agent.staging import render_preview_markdown
 
-        src = (REPO / "tools" / "salt-admin" / "emit_addresses.py").read_text(
-            encoding="utf-8")
-        tree = ast.parse(src)
-        seen = 0
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Dict):
-                continue
-            for key, value in zip(node.keys, node.values):
-                if isinstance(key, ast.Constant) and key.value == "approved_by":
-                    seen += 1
-                    assert isinstance(value, ast.Constant) \
-                        and value.value is None, \
-                        f"approved_by is assigned {ast.dump(value)}"
-        assert seen >= 3, "every proposal kind must set it explicitly"
-
-    def test_validate_refuses_the_batch_for_that_reason_and_no_other(self):
-        """Every error must be the missing signature.
-
-        If a structural error hid among them, the operator would sign the batch,
-        watch `validate` still fail, and have to re-derive why - after the
-        signatures were already collected.
-        """
-        batch = _build([_unit("a")])
-        errors = [i for i in find_issues(StagingBatch.model_validate(batch))
-                  if i.severity == "error"]
-        assert len(errors) == len(batch["proposals"])
-        assert all("approved_by" in e.message for e in errors)
-
+        batch = StagingBatch.model_validate(_build([_unit("a")]))
+        md = render_preview_markdown(batch, find_issues(batch))
+        assert "global reference data" in md
 
 # --- the references ------------------------------------------------------------
 
@@ -384,12 +363,17 @@ class _Client:
         assert path == "/api/v2/operations", path
         page = int(params.get("page", 1))
         self.pages_served += 1
-        if self.on_page:
-            self.on_page(self, page)
         start = (page - 1) * self.per_page
         chunk = self.ops[start:start + self.per_page]
         last = max(1, -(-len(self.ops) // self.per_page))
-        return {"data": chunk, "pagination": {"last_page": last}}
+        body = {"data": chunk,
+                "pagination": {"last_page": last, "total": len(self.ops)}}
+        # AFTER the response is built, like a real write landing once the server
+        # has already answered this page. Firing before would let the same request
+        # see its own concurrent write, which is not the race being modelled.
+        if self.on_page:
+            self.on_page(self, page)
+        return body
 
 
 def _op(code, py, *, op_type=1, at="2026-09-10T00:00:00Z", resource="ADMIN_CAT_CODES"):
@@ -522,7 +506,33 @@ class TestOperationsWindow:
                                            tables={"ADMIN_CAT_CODES"})
         assert 99 in [r["id"] for r in rows], "the redo must pick up the new row"
 
-    def test_a_log_that_never_settles_raises_rather_than_answering(self):
+    def test_a_row_leaving_the_list_mid_walk_is_refused(self):
+        """The one case that can actually skip a row.
+
+        Inserts and updates both shift rows DOWN, so a page boundary re-reads -
+        harmless, because rows are collected by id. A row LEAVING the list (deleted,
+        or filtered out by a crowdsourcing_status change) shifts everything below it
+        UP, and the row at a page boundary is never read. `pagination.total` is what
+        makes that visible, and an answer built on it cannot be trusted.
+        """
+        ops = [_op(i, "Fensi", at="2026-09-10T00:00:00Z") for i in range(30)]
+
+        def on_page(client, page):
+            if client.ops:
+                client.ops.pop()          # something leaves the list, every page
+
+        with pytest.raises(live_state.LiveStateError, match="kept leaving"):
+            live_state.operations_since(_Client(ops, per_page=5, on_page=on_page),
+                                        "2026-08-15", tables={"ADMIN_CAT_CODES"})
+
+    def test_a_head_that_never_settles_is_not_an_error(self):
+        """Arrivals are harmless and must not stop the run.
+
+        An earlier version restarted the whole walk whenever the newest id had
+        moved. On production - where something is always being written - that never
+        converged: two real runs burned several hundred requests each and then
+        refused to answer.
+        """
         ops = [_op(1, "Fensi", at="2026-09-10T00:00:00Z")]
         counter = {"n": 0}
 
@@ -531,9 +541,97 @@ class TestOperationsWindow:
             client.ops.insert(0, _op(1000 + counter["n"], "Fensi",
                                      at="2026-09-11T00:00:00Z"))
 
-        with pytest.raises(live_state.LiveStateError, match="kept changing"):
-            live_state.operations_since(_Client(ops, per_page=100, on_page=on_page),
-                                        "2026-08-15", tables={"ADMIN_CAT_CODES"})
+        client = _Client(ops, per_page=100, on_page=on_page)
+        rows = live_state.operations_since(client, "2026-08-15",
+                                           tables={"ADMIN_CAT_CODES"})
+        assert rows, "it must answer, not refuse"
+        assert client.pages_served < 10, client.pages_served
+
+    def test_a_busy_log_settles_without_re_walking_the_whole_window(self):
+        """The case the first version got wrong.
+
+        Production gets writes throughout a two-minute walk, and redoing the walk
+        whenever the head had moved essentially never converged - it burned hundreds
+        of requests and then refused to answer. New rows arrive at the HEAD, so a
+        short second pass over the head is enough, and it stops at the first page
+        holding nothing new.
+        """
+        ops = [_op(i, "Fensi", at="2026-09-10T00:00:00Z") for i in range(200)]
+        fired = {"n": 0}
+
+        def on_page(client, page):
+            # One arrival, early in the first pass - exactly the shift that used to
+            # hide a row.
+            fired["n"] += 1
+            if fired["n"] == 2:
+                client.ops.insert(0, _op(999, "Fensi", at="2026-09-11T00:00:00Z"))
+
+        client = _Client(ops, per_page=10, on_page=on_page)
+        rows = live_state.operations_since(client, "2026-08-15",
+                                           tables={"ADMIN_CAT_CODES"})
+        ids = {r["id"] for r in rows}
+        assert 999 in ids, "the row that displaced the walk must be picked up"
+        assert len(ids) == 201, "and nothing may be lost to the shift"
+        # It was collected LAST (a later sweep found it) and belongs FIRST. The
+        # replay in resolve_admin_categories reverses this list to go oldest-first,
+        # so collection order reaching the caller would apply it out of sequence.
+        assert rows[0]["id"] == 999, [r["id"] for r in rows[:3]]
+        # 21 pages for the first pass over 201 rows, then a couple to cover the
+        # head. A whole second walk would be another 21.
+        assert client.pages_served < 30, client.pages_served
+
+    def test_rows_without_an_id_stay_distinct(self):
+        """Keying on `id` alone was a silent single point of failure: a response that
+        omitted it gave every row the key `None`, the whole window collapsed to one
+        operation, and the collapse pointed the answer at "nothing changed since"."""
+        ops = [dict(_op(i, "Fensi", at=f"2026-09-{10 - i:02d}T00:00:00Z"),
+                    resource_id=f"c_admin_cat_code={i}")
+               for i in range(3)]
+        for op in ops:
+            del op["id"]
+        rows = live_state.operations_since(_Client(ops, per_page=10), "2026-08-15",
+                                           tables={"ADMIN_CAT_CODES"})
+        assert len(rows) == 3, rows
+
+    def test_the_follow_up_pass_is_not_stopped_by_another_table(self):
+        """`page_had_new` counts ids, not matching rows.
+
+        Counting only matching rows let the follow-up pass stop on a page full of
+        fresh kinship and altname writes while the ADMIN_CAT_CODES row it was
+        looking for sat one page further down - which is the ordinary shape of a
+        busy log, where most writes are person data.
+        """
+        ops = [_op(i, "Fensi", at="2026-09-10T00:00:00Z") for i in range(9)]
+        arrived = {"done": False}
+
+        def on_page(client, page):
+            # Arrives after the first pass has already read page 1, so only the
+            # FOLLOW-UP sees it: three other-table writes at the very head, then the
+            # category row behind them. With per_page=3 that is exactly one full
+            # page of rows this check does not care about, ahead of the one it does.
+            if page == 2 and not arrived["done"]:
+                arrived["done"] = True
+                client.ops.insert(0, _op(500, "Fensi", at="2026-09-11T00:00:00Z"))
+                for i in range(3):
+                    client.ops.insert(0, _op(400 + i, "x",
+                                             at="2026-09-11T00:00:01Z",
+                                             resource="ALTNAME_DATA"))
+
+        client = _Client(ops, per_page=3, on_page=on_page)
+        rows = live_state.operations_since(client, "2026-08-15",
+                                           tables={"ADMIN_CAT_CODES"})
+        assert 500 in {r["id"] for r in rows}, [r["id"] for r in rows]
+        assert len(rows) == 10
+
+    def test_the_result_comes_back_newest_first(self):
+        """`resolve_admin_categories` replays it oldest-first by reversing it, so the
+        order is load-bearing. Sweeps collect out of order."""
+        ops = [_op(3, "A", at="2026-09-03T00:00:00Z"),
+               _op(2, "B", at="2026-09-02T00:00:00Z"),
+               _op(1, "C", at="2026-09-01T00:00:00Z")]
+        rows = live_state.operations_since(_Client(ops, per_page=10), "2026-08-15",
+                                           tables={"ADMIN_CAT_CODES"})
+        assert [r["id"] for r in rows] == [3, 2, 1]
 
     def test_a_response_without_pagination_is_an_error_not_a_short_answer(self):
         """Stopping there would silently degrade the composition to snapshot-only -
@@ -697,7 +795,7 @@ class TestCliRefusals:
         assert "could not be completed" in capsys.readouterr().err
         assert not (tmp_path / "staging" / "b" / "proposal.yaml").exists()
 
-    def test_a_clean_run_writes_a_loadable_unsigned_batch(
+    def test_a_clean_run_writes_a_loadable_batch(
             self, dataset_file, tmp_path, monkeypatch):
         monkeypatch.setattr(live_state, "find_existing_addresses", lambda c, n: {})
         monkeypatch.setattr(
@@ -713,10 +811,9 @@ class TestCliRefusals:
         path = tmp_path / "staging" / "b" / "proposal.yaml"
         batch = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert batch["batch_id"] == "b"
-        assert all(p["approved_by"] is None for p in batch["proposals"])
+        assert all("approved_by" not in p for p in batch["proposals"])
         model = StagingBatch.model_validate(batch)
-        errors = [i for i in find_issues(model) if i.severity == "error"]
-        assert len(errors) == len(batch["proposals"])
+        assert [i for i in find_issues(model) if i.severity == "error"] == []
 
 
 def _stub_client_and_snapshot(monkeypatch, tmp_path):
