@@ -237,7 +237,7 @@ user how old the build is instead of quietly trusting it.
     so take `result.pk` **and** `result.row` (§13.2) at the time, and afterwards
     `GET /api/v2/operations` is the only record.
 12. **Code-table and entity-aggregate writes are a different, higher risk class than
-    person data — never do one without explicit, specific user approval.** This covers
+    person data — never create, change or remove one on your own initiative.** This covers
     every code table that can be written — `text-codes` (new `TEXT_CODES` rows),
     `char-variant-map`, and, since 2026-09-11, **`addr-codes`, `addr-belongs-data`,
     `admin-cat-codes` and `office-type-tree`** — plus the `office`,
@@ -252,16 +252,26 @@ user how old the build is instead of quietly trusting it.
     (§13.4), guarded by `409` reference checks, so a mistake there is recoverable if
     nothing has referenced it yet. Either way: a missing book title or office code is
     something you **report to the user as a finding**, with the evidence; you create it
-    only if they say to. It is never a gap you close on your own initiative to unblock
-    a batch.
+    only if they say to. **This is the part of rule 12 that matters, and it is a
+    judgement rule, not a field**: if a batch needs a book title CBDB does not have,
+    you say so and show the evidence. You do not add the row to get the batch moving.
+    **The same applies to changing or removing one**, and for `office` more so than
+    for a create: its `update` is a full-row overwrite, so an omitted field is
+    written as `NULL` over whatever was there. Correcting a global row on your own
+    judgement is the same act as inventing one, with a live row's worth of extra
+    reach.
     Mechanics and traps: `docs/07-api-md-digest.md` §2.2–2.4.
-    **How the gate is enforced.** `ResourceSpec.requires_explicit_approval` marks such a
-    resource; `staging.find_issues()` then raises a **structural error** (not a
-    "conflict", which is a normal mid-review state) unless that proposal carries an
-    explicit `approved_by: <name of the human who decided>`. `batch_runner` forwards it
-    into `meta.comment`, so the sign-off lands in the **server's** `operations` row too,
-    not only in this repo. **Never fill in `approved_by` yourself** — it exists precisely
-    to record that a human, named, made the call.
+    **What marks such a resource.** `ResourceSpec.is_global_reference_data`. It is a
+    label, not a gate: the preview and the review page use it to say "this row is not
+    one person's record — visible to every CBDB user, referenced by any number of
+    them", which is the fact a reviewer cannot read off a resource string, and which
+    decides how carefully the row is worth reading.
+    **There is no `approved_by` field, and there was one until 2026-09-14.** It asked
+    the person holding the token to countersign a row they were about to write with
+    that same token, and the server stamps `user_id` on every `operations` row
+    regardless — so it recorded nothing the operations log did not already have, in a
+    place only this client could read. Do not reintroduce it; if you find a mention in
+    an older document, it is stale.
     Five such resources are modelled today:
     **`text-codes`** (create only; `update` is not modelled since the server only allows
     `c_title`, and `delete` is disabled server-side), the three place-name tables opened
@@ -334,23 +344,22 @@ user how old the build is instead of quietly trusting it.
       `php artisan cbdb:regenerate-addresses-table`. Places created through the API
       stay invisible to posting autofill and dynasty homonym disambiguation until
       someone runs it.
-    If you model one, set `requires_explicit_approval=True` on it. The refusal
-    messages in `staging.py` and `http_client.py` already distinguish the two cases —
-    code tables have no delete path at all, the entity aggregates do while nothing
-    references the row (`API.md` §13.4) — so keep that distinction if you touch them.
-    See `models.py`'s comment on `requires_explicit_approval`.
+    If you model one, set `is_global_reference_data=True` on it, and keep the
+    distinction the existing wording makes: code tables have no delete path at all,
+    the entity aggregates do while nothing references the row (`API.md` §13.4). See
+    `models.py`'s comment on the flag.
     **One more trap: near-identical strings mean entirely different resources.**
-    `office` is the entity aggregate (needs approval) while `offices` resolves to the
-    **postings sub-resource** (routine — and postings wins the server-side dispatch);
-    likewise `social-institution` (hyphen, entity, needs approval) vs
-    `social_institution` (underscore, the person sub-resource `BIOG_INST_DATA`, routine);
-    and `text-entity` (the document aggregate, needs approval) vs `text`/`texts` (the
-    person's `BIOG_TEXT_DATA` sub-resource, routine) vs `text-codes` (the bare code-table
-    create, needs approval). Read the separator, and prefer the unambiguous spelling.
-    A client-side consequence of the same collision: `approval_gated_aliases()` is built
-    from the gated specs' alias sets, and `http_client` matches it against the raw
-    `resource` string — so registering `offices` as an alias of a gated `office` spec
-    would make **every routine postings write** demand an `approved_by`.
+    `office` is the entity aggregate (global reference data) while `offices` resolves
+    to the **postings sub-resource** (one person's appointment record — and postings
+    wins the server-side dispatch); likewise `social-institution` (hyphen, entity) vs
+    `social_institution` (underscore, the person sub-resource `BIOG_INST_DATA`); and
+    `text-entity` (the document aggregate) vs `text`/`texts` (the person's
+    `BIOG_TEXT_DATA` sub-resource) vs `text-codes` (the bare code-table create). Read
+    the separator, and prefer the unambiguous spelling. Two client-side consequences:
+    registering `offices` as an alias of the `office` spec would route every routine
+    postings write through the aggregate's whitelist and label it global reference
+    data; and `http_client` refuses `offices`/`office-load` on the wire outright,
+    because which table they hit is registry order it cannot see.
 
 ## Review workflow for changes in this repo
 

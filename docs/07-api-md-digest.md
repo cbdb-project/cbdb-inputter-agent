@@ -572,13 +572,13 @@ rename is *not* blocked**). Text-entity `delete` while referenced →
 citing it via `TEXT_CODES.c_source`; text-entity `update` pointing `source_id` at itself or
 a descendant → **`422` `source_id: source_cycle`**.
 
-**A client-side trap the `offices` collision creates, worth writing down here because it
-is not upstream's problem:** `models.approval_gated_aliases()` builds its set from the
-alias fields of every spec with `requires_explicit_approval` (plus each spec's own
-`key`), and `http_client._check_approval()` matches it against the raw, lower-cased
-`resource` string. So
-registering `offices` or `office-load` as an alias of a gated `office` spec would make
-**every routine postings write** demand an `approved_by`. Register the singular only.
+**A client-side trap the `offices` collision creates, worth writing down here because
+it is not upstream's problem:** an alias registered on a spec claims that resource
+string for it, so registering `offices` or `office-load` on the `office` spec would
+route every routine postings write through the aggregate's whitelist and label it
+global reference data in the review surface. Register the singular only — and note
+that `http_client` refuses both ambiguous spellings on the wire regardless, because
+which table they actually hit is registry order this client cannot see.
 
 Authoritative definitions upstream: `config/entity_aggregates.php` and
 `app/Services/Mutations/EntityAggregate/*AggregateDefinition.php`.

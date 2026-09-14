@@ -51,7 +51,7 @@ def addr(pid, name="兩淮都轉運鹽使司", **kw):
     return Proposal(
         id=pid, resource="addr-codes", operation="create", person_id=0,
         changes=dict({"c_name_chn": name}, **kw),
-        source_quote="q", confidence="high", approved_by="Tester",
+        source_quote="q", confidence="high",
     )
 
 
@@ -61,7 +61,7 @@ def edge(pid, child, parent, first=1368, last=1643):
         target_pk={"c_addr_id": child, "c_belongs_to": parent,
                    "c_firstyear": first, "c_lastyear": last},
         changes={"c_source": 0},
-        source_quote="q", confidence="high", approved_by="Tester",
+        source_quote="q", confidence="high",
     )
 
 
@@ -115,7 +115,7 @@ class TestValidation:
     def test_referencing_an_update_is_an_error(self):
         upd = Proposal(id="u1", resource="addr-codes", operation="update",
                        person_id=0, target_pk={"c_addr_id": 5}, changes={"c_name": "x"},
-                       source_quote="q", confidence="high", approved_by="T")
+                       source_quote="q", confidence="high")
         msgs = issues_for(upd, edge("e1", {"ref": "u1"}, 4329))
         assert any("only a create is assigned a new primary key" in m for m in msgs)
 
@@ -140,7 +140,7 @@ class TestValidation:
         cat = Proposal(
             id="cat1", resource="admin-cat-codes", operation="create", person_id=0,
             changes={"c_admin_cat_py": "Fensi", "c_admin_cat_hz": "分司"},
-            source_quote="q", confidence="high", approved_by="Tester",
+            source_quote="q", confidence="high",
         )
         msgs = issues_for(cat, edge("e1", {"ref": "a1"}, {"ref": "cat1"}),
                           addr("a1"))
@@ -159,7 +159,6 @@ class TestValidation:
             target_pk={"c_addr_id": {"ref": "a1"}, "c_belongs_to": 4329,
                        "c_firstyear": {"ref": "a1"}, "c_lastyear": 1643},
             changes={"c_source": 0}, source_quote="q", confidence="high",
-            approved_by="Tester",
         )
         msgs = issues_for(e, addr("a1"))
         assert any("not a field that may carry a reference" in m for m in msgs), msgs
@@ -189,7 +188,7 @@ class TestOrdering:
             Proposal(id="cat", resource="admin-cat-codes", operation="create",
                      person_id=0,
                      changes={"c_admin_cat_py": "Fensi", "c_admin_cat_hz": "分司"},
-                     source_quote="q", confidence="high", approved_by="T"),
+                     source_quote="q", confidence="high"),
         ])
         order = [p.id for p in topological_submission_order(batch)]
         assert order.index("cat") < order.index("a2") < order.index("e1")
@@ -264,7 +263,7 @@ class TestSubmission:
         cat = Proposal(id="cat", resource="admin-cat-codes", operation="create",
                        person_id=0,
                        changes={"c_admin_cat_py": "Fensi", "c_admin_cat_hz": "分司"},
-                       source_quote="q", confidence="high", approved_by="T")
+                       source_quote="q", confidence="high")
         batch = StagingBatch(batch_id="b", source_excerpt="x", proposals=[
             addr("a1", c_admin_cat_code={"ref": "cat"}), cat])
         results = run_batch(batch, make_api(tmp_path))
@@ -483,7 +482,7 @@ class TestTheWholeCompositeKeyIsRequiredAtValidateTime:
         return Proposal(
             id="e1", resource="addr-belongs-data", operation="create", person_id=0,
             target_pk=target_pk, changes={"c_source": 0},
-            source_quote="q", confidence="high", approved_by="Tester",
+            source_quote="q", confidence="high",
         )
 
     def test_a_missing_key_column_is_an_error(self):

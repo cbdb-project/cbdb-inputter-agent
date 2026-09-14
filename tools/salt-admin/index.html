@@ -337,8 +337,8 @@ function render() {
         ${H(s.belongs_edges)} <code>ADDR_BELONGS_DATA</code> edges.</span>
         <code>/api/v2</code> gained create paths for both tables on 2026-09-11, so
         these go through the normal staged, previewed, audit-logged path.
-        Approval-gated: the batch stays refused until a named human signs
-        <code>approved_by</code>. Emitted by
+        Every row is global reference data — visible to every CBDB user and
+        referenced by any number of person records. Emitted by
         <code>tools/salt-admin/emit_addresses.py</code>; the SQL script this page
         used to point at is superseded.</p>
       </div>

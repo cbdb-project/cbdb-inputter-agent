@@ -757,7 +757,7 @@ def test_proposal_current_state_requires_exactly_one_of_row_or_error():
     ProposalCurrentState(row={})  # ok - a genuinely empty (but fetched) row
 
 
-# --- AGENTS.md rule 12 approval gate ------------------------------------------
+# --- AGENTS.md rule 12 global reference data ------------------------------------------
 
 
 def _text_codes_proposal(**overrides):
@@ -777,67 +777,13 @@ def _text_codes_proposal(**overrides):
     return Proposal(**base)
 
 
-def test_code_table_proposal_without_approved_by_is_a_structural_error():
-    from cbdb_agent.staging import StagingBatch, find_issues
-
-    batch = StagingBatch(batch_id="b", proposals=[_text_codes_proposal()])
-    issues = find_issues(batch)
-    errors = [i for i in issues if i.severity == "error"]
-    assert any("approved_by" in i.message for i in errors), issues
-
-
-def test_code_table_proposal_with_approved_by_passes():
-    from cbdb_agent.staging import StagingBatch, find_issues
-
-    batch = StagingBatch(
-        batch_id="b", proposals=[_text_codes_proposal(approved_by="Hongsu Wang")]
-    )
-    errors = [i for i in find_issues(batch) if i.severity == "error"]
-    assert errors == []
-
-
-def test_whitespace_only_approved_by_does_not_count():
-    from cbdb_agent.staging import StagingBatch, find_issues
-
-    batch = StagingBatch(batch_id="b", proposals=[_text_codes_proposal(approved_by="   ")])
-    errors = [i for i in find_issues(batch) if i.severity == "error"]
-    assert any("approved_by" in i.message for i in errors)
-
-
-def test_approved_by_is_not_required_for_ordinary_person_resources():
-    """The gate must not leak onto normal person data."""
-    from cbdb_agent.staging import Proposal, StagingBatch, find_issues
-
-    p = Proposal(
-        id="a1",
-        resource="altnames",
-        operation="create",
-        person_id=5000,
-        changes={"c_alt_name_chn": "季理", "c_alt_name_type_code": 4},
-        source_quote="字季理",
-        confidence="high",
-    )
-    errors = [i for i in find_issues(StagingBatch(batch_id="b", proposals=[p])) if i.severity == "error"]
-    assert errors == []
-
-
 def test_text_codes_create_resolves_to_an_empty_target_pk():
     """c_textid is server-assigned and c_personid is not in this resource's PK, so
     resolve_target_pk must produce {} - not inject a person id."""
     from cbdb_agent.staging import resolve_target_pk
 
-    p = _text_codes_proposal(approved_by="Hongsu Wang")
+    p = _text_codes_proposal()
     assert resolve_target_pk(p, resolved_person_id=0, spec_key="text_codes") == {}
-
-
-def test_validate_for_submit_blocks_a_missing_approval():
-    """find_issues() reporting it is not enough - the submit gate must refuse."""
-    from cbdb_agent.staging import StagingBatch, validate_for_submit
-
-    batch = StagingBatch(batch_id="b", proposals=[_text_codes_proposal()])
-    with pytest.raises(Exception) as excinfo:
-        validate_for_submit(batch)
-    assert "approved_by" in str(excinfo.value)
 
 
 def test_text_codes_create_without_a_chinese_title_is_an_error():
@@ -847,15 +793,15 @@ def test_text_codes_create_without_a_chinese_title_is_an_error():
 
     batch = StagingBatch(
         batch_id="b",
-        proposals=[_text_codes_proposal(approved_by="Hongsu Wang", changes={})],
+        proposals=[_text_codes_proposal(changes={})],
     )
     errors = [i for i in find_issues(batch) if i.severity == "error"]
     assert any("c_title_chn" in i.message for i in errors), errors
 
 
-def test_save_staging_file_omits_unset_approved_by_but_keeps_null_resolution(tmp_path):
+def test_save_staging_file_keeps_a_null_resolution(tmp_path):
     """`resolution: null` is the submission blocker a human must see, so a blanket
-    exclude_none would be wrong. `approved_by: null` on every row is pure noise."""
+    exclude_none would be wrong."""
     import yaml
 
     from cbdb_agent.staging import (
@@ -884,58 +830,26 @@ def test_save_staging_file_omits_unset_approved_by_but_keeps_null_resolution(tmp
         ],
     )
     out = tmp_path / "proposal.yaml"
-    save_staging_file(
-        StagingBatch(
-            batch_id="b",
-            proposals=[plain, _text_codes_proposal(approved_by="Hongsu Wang")],
-        ),
-        str(out),
-    )
-    data = yaml.safe_load(out.read_text(encoding="utf-8"))
-    assert "approved_by" not in data["proposals"][0]
-    assert data["proposals"][1]["approved_by"] == "Hongsu Wang"
-    # The blocker must survive the round trip, visibly.
-    assert data["proposals"][0]["conflicts"][0]["resolution"] is None
+    save_staging_file(StagingBatch(batch_id="b", proposals=[plain]), str(out))
+    written = yaml.safe_load(out.read_text(encoding="utf-8"))
+    assert written["proposals"][0]["conflicts"][0]["resolution"] is None
 
 
-def test_load_input_batch_forwards_approved_by(tmp_path):
-    """Without this, a JSON record that DOES carry an approval fails validation with
-    an error that contradicts the input."""
-    import json
-
-    from cbdb_agent.staging import load_input_batch
-
-    path = tmp_path / "input.json"
-    path.write_text(
-        json.dumps(
-            [
-                {
-                    "id": "tc1",
-                    "resource": "text-codes",
-                    "operation": "create",
-                    "person_id": 0,
-                    "changes": {"c_title_chn": "聽雪先生集"},
-                    "approved_by": "Hongsu Wang",
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-    batch = load_input_batch(str(path))
-    assert batch.proposals[0].approved_by == "Hongsu Wang"
-
-
-def test_preview_shows_the_approval_signature_and_its_absence():
-    """preview.md is the designated review surface (docs/06) - a sign-off recorded
-    only in raw YAML is not much of a sign-off, and its absence is the blocker."""
+def test_preview_marks_global_reference_data():
+    """preview.md is the designated review surface (docs/06). Which rows are NOT one
+    person's record is the thing a reader cannot infer from the resource string, and
+    it is what decides how carefully the row is worth reading."""
     from cbdb_agent.staging import StagingBatch, find_issues, render_preview_markdown
 
-    unsigned = StagingBatch(batch_id="b", proposals=[_text_codes_proposal()])
-    md = render_preview_markdown(unsigned, find_issues(unsigned))
-    assert "approved_by" in md and "not set" in md
+    batch = StagingBatch(batch_id="b", proposals=[_text_codes_proposal()])
+    md = render_preview_markdown(batch, find_issues(batch))
+    assert "global reference data" in md
 
-    signed = StagingBatch(
-        batch_id="b", proposals=[_text_codes_proposal(approved_by="Hongsu Wang")]
-    )
-    md2 = render_preview_markdown(signed, find_issues(signed))
-    assert "approved_by: Hongsu Wang" in md2
+    from cbdb_agent.staging import Proposal
+
+    ordinary = StagingBatch(batch_id="b", proposals=[Proposal(
+        id="a1", resource="altnames", operation="create", person_id=5000,
+        changes={"c_alt_name_chn": "季理"},
+        source_quote="q", confidence="high")])
+    md2 = render_preview_markdown(ordinary, find_issues(ordinary))
+    assert "global reference data" not in md2

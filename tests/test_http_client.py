@@ -694,10 +694,10 @@ def test_request_path_uses_slot_so_retries_are_also_spaced(tmp_path):
     assert len(responses.calls) == 3
 
 
-# --- the transport-layer approval gate ----------------------------------------
-# AGENTS.md rule 12. MutationApi already refuses an unsigned write, but a defense
-# that only works when the caller used the intended wrapper is not a defense for a
-# write the server cannot undo.
+# --- the transport-layer resource-string guard --------------------------------
+# A defence that only works when the caller used the intended wrapper is not a
+# defence for a write the server cannot undo, so the ambiguous-resource refusal
+# lives at the layer that puts bytes on the wire.
 
 
 def _text_codes_envelope(changes=None):
@@ -712,93 +712,29 @@ def _text_codes_envelope(changes=None):
 
 
 @responses.activate
-def test_direct_post_of_a_gated_resource_is_refused_without_a_signature(tmp_path):
-    from cbdb_agent.http_client import MissingApprovalError
+def test_the_guard_does_not_block_reads(tmp_path):
+    """A READ naming an ambiguous resource is harmless: nothing is written, so which
+    table the string would have hit does not matter.
 
-    client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
-    responses.add(
-        responses.POST, "http://localhost:8000/api/v2/create", json={"ok": True}, status=200
-    )
-    with pytest.raises(MissingApprovalError, match="rule 12"):
-        client.post("/api/v2/create", json_body=_text_codes_envelope(), mutating=True)
-    assert len(responses.calls) == 0
-
-
-@responses.activate
-def test_direct_post_of_a_gated_resource_is_allowed_with_a_signature(tmp_path):
-    client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
-    responses.add(
-        responses.POST, "http://localhost:8000/api/v2/create", json={"ok": True}, status=200
-    )
-    client.post(
-        "/api/v2/create",
-        json_body=_text_codes_envelope(),
-        mutating=True,
-        approval_signature="Hongsu Wang",
-    )
-    assert len(responses.calls) == 1
-
-
-@responses.activate
-def test_the_gate_matches_every_alias_and_is_case_insensitive(tmp_path):
-    """The server lowercases `resource`, so the gate must too - otherwise
-    'Text-Codes' would sail past it."""
-    from cbdb_agent.http_client import MissingApprovalError
-
-    client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
-    for alias in ("text-codes", "text_codes", "Text-Codes", "  TEXT_CODES  "):
-        body = _text_codes_envelope()
-        body["resource"] = alias
-        with pytest.raises(MissingApprovalError):
-            client.post("/api/v2/create", json_body=body, mutating=True)
-
-
-@responses.activate
-def test_the_gate_does_not_touch_ordinary_person_resources(tmp_path):
-    client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
-    responses.add(
-        responses.POST, "http://localhost:8000/api/v2/create", json={"ok": True}, status=200
-    )
-    client.post(
-        "/api/v2/create",
-        json_body={"resource": "altnames", "mode": "direct", "operation": "create",
-                   "person_id": 5000, "target": {"pk": {}}, "changes": {}},
-        mutating=True,
-    )
-    assert len(responses.calls) == 1
-
-
-@responses.activate
-def test_the_gate_does_not_block_reads(tmp_path):
-    """A GET of a gated resource is harmless and must stay possible."""
+    Pinned with `offices` on purpose. The earlier version of this test sent a
+    `text-codes` envelope, which the guard never refuses in either direction - so it
+    passed whether or not reads were exempt, and deleting `not mutating or` from the
+    check left it green."""
     client, _ = make_client(tmp_path)
     responses.add(
         responses.GET, "http://localhost:8000/api/v2/get", json={"ok": True}, status=200
     )
-    client.get("/api/v2/get", json_body=_text_codes_envelope())
+    client.get("/api/v2/get", json_body=dict(_text_codes_envelope(),
+                                             resource="offices"))
     assert len(responses.calls) == 1
 
 
-def test_approval_gated_aliases_covers_the_key_and_every_alias():
-    from cbdb_agent.models import RESOURCE_SPECS, approval_gated_aliases
-
-    gated = approval_gated_aliases()
-    for key, spec in RESOURCE_SPECS.items():
-        if spec.requires_explicit_approval:
-            assert key in gated
-            for alias in spec.create_aliases | spec.update_aliases | spec.delete_aliases:
-                assert alias in gated
-        else:
-            assert key not in gated
-
-
 def test_the_ambiguous_offices_resource_string_is_refused(tmp_path):
-    """`offices` is a server-side alias for BOTH the approval-gated `office` aggregate
-    and the routine `postings` sub-resource, and which one wins is registry order this
-    client cannot see. It is deliberately absent from approval_gated_aliases() - adding
-    it would make every routine postings write demand an approved_by - so without this
-    guard a raw post could reach the gated aggregate ungated."""
-    from cbdb_agent.http_client import MissingApprovalError
+    """`offices` is a server-side alias for BOTH the `office` aggregate and the
+    routine `postings` sub-resource, and which one wins is registry order this client
+    cannot see. So a write that says `offices` may land on a person's appointment
+    record or on a global office code, and the caller cannot tell which."""
+    from cbdb_agent.http_client import AmbiguousResourceError
 
     client, _ = make_client(tmp_path, dry_run=False, confirm_prod="http://localhost:8000")
     for ambiguous in ("offices", "office-load", "  OFFICES  "):
@@ -810,29 +746,20 @@ def test_the_ambiguous_offices_resource_string_is_refused(tmp_path):
             "target": {"pk": {}},
             "changes": {"name": "知某州事"},
         }
-        # Refused even WITH a signature: the point is that the string is ambiguous,
-        # not that it is unsigned.
-        with pytest.raises(MissingApprovalError, match="refusing to send resource"):
-            client.post(
-                "/api/v2/create", json_body=body, mutating=True,
-                approval_signature="Hongsu Wang",
-            )
+        with pytest.raises(AmbiguousResourceError, match="refusing to send resource"):
+            client.post("/api/v2/create", json_body=body, mutating=True)
 
 
 def test_the_unambiguous_spellings_are_not_refused(tmp_path):
-    """`postings` must stay routine and `office` must stay gated-but-permitted."""
-    from cbdb_agent.http_client import MissingApprovalError
-
+    """Both spellings say exactly one thing, so both go through."""
     client, _ = make_client(tmp_path, dry_run=True, confirm_prod="")
     routine = {
         "resource": "postings", "mode": "direct", "operation": "create",
         "person_id": 1, "target": {"pk": {"c_office_id": 1}}, "changes": {},
     }
     client.post("/api/v2/create", json_body=routine, mutating=True)  # must not raise
-
-    gated = dict(routine, resource="office")
-    with pytest.raises(MissingApprovalError, match="without an approval signature"):
-        client.post("/api/v2/create", json_body=gated, mutating=True)
+    client.post("/api/v2/create", json_body=dict(routine, resource="office"),
+                mutating=True)  # must not raise
 
 
 @responses.activate

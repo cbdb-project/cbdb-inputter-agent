@@ -174,10 +174,12 @@ does when invoked this way:
     《俟菴集》, and searching 俟庵 returns zero hits while `Sian ji` finds it. Reporting
     a false "missing" is how a duplicate gets created for a row that can never be
     deleted.
-  - If the user *does* approve one, two are modelled and go through the normal staging
-    pipeline: `text-codes` (create only) and `office` (create + update; see
-    `docs/04-field-whitelists.md` §15). Either way the proposal needs an explicit
-    `approved_by: <the human's name>` or validation fails with a structural error.
+  - If the user *does* ask for one, five are modelled and go through the normal
+    staging pipeline: `text-codes` (create only), `office` (create + update; see
+    `docs/04-field-whitelists.md` §15), and the three place-name tables `addr-codes`,
+    `addr-belongs-data` and `admin-cat-codes` (§16–18). Nothing extra is needed in the
+    proposal — there is no `approved_by` field; what rule 12 asks of you is that you
+    do not add such a row unless the user said to.
   - **An `office` update rewrites the WHOLE row** (`API.md` §13.4) — an omitted field is
     written as `NULL`, not left alone. Read the current row first
     (`GET /api/select/search/office?q=<id>`, since `/api/v2/get` cannot read this
@@ -196,9 +198,6 @@ does when invoked this way:
   (Real case: office 12304's note read "Temporarily added to office codes. Need to be
   checked."; the edict being added was that check, the agent preserved the sentence
   anyway, and the user had to remove it by hand.)
-    **You must never fill that field in yourself**; it records that a named human
-    made the call, and `batch_runner` forwards it into `meta.comment` so the
-    sign-off is visible in the server's own `operations` row too.
   - `c_textid` is server-assigned, so a `BIOG_TEXT_DATA` (`texts`) row that cites a
     newly-created book **cannot be in the same batch** — the staging schema can
     carry a sibling reference for `person_id` only, not for a `c_textid`. Submit the

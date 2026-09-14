@@ -279,19 +279,24 @@ def test_text_codes_supports_neither_update_nor_delete():
             spec.resolve_alias("text-codes", operation)
 
 
-def test_only_global_reference_data_requires_explicit_approval():
-    """The rule-12 inventory. Adding to it is a decision, not a detail.
+def test_the_global_reference_data_inventory():
+    """Which resources are NOT one person's record. Adding to it is a decision.
 
-    The three place-name tables joined on 2026-09-11, when upstream opened them
-    for writing. Each is global reference data with `delete` still 403, and
-    `addr_belongs_data` is the sharpest of the set: its update whitelist covers
-    only c_source/c_pages/c_notes, so a wrong parent or a wrong year in its
+    It no longer gates a write (the token holder is the writer, and the server
+    records `user_id`), but it still decides two things: what the preview and the
+    review page warn about, and which resources an agent must not create on its own
+    initiative - a missing book title is a finding to report, not a gap to close
+    silently.
+
+    The three place-name tables joined on 2026-09-11, when upstream opened them for
+    writing. `addr_belongs_data` is the sharpest of the set: its update whitelist
+    covers only c_source/c_pages/c_notes, so a wrong parent or a wrong year in its
     four-column key can never be corrected OR removed.
     """
-    approval_required = {
-        key for key, spec in RESOURCE_SPECS.items() if spec.requires_explicit_approval
+    marked = {
+        key for key, spec in RESOURCE_SPECS.items() if spec.is_global_reference_data
     }
-    assert approval_required == {
+    assert marked == {
         "text_codes", "office",
         "addr_codes", "addr_belongs_data", "admin_cat_codes",
     }
@@ -304,16 +309,17 @@ def test_the_new_place_tables_model_no_delete():
 
 
 def test_addr_aliases_do_not_collide_with_the_person_subresource():
-    """`addresses` is BIOG_ADDR_DATA - a person's recorded places - and must never
-    be dragged into the approval gate by a near-miss spelling."""
-    from cbdb_agent.models import approval_gated_aliases
+    """`addresses` is BIOG_ADDR_DATA - a person's recorded places - and must never be
+    labelled global reference data by a near-miss spelling. The two read almost
+    identically in a staging file, which is the whole reason to pin it."""
+    from cbdb_agent.models import global_reference_aliases
 
-    gated = approval_gated_aliases()
+    marked = global_reference_aliases()
     for person_alias in ("addresses", "address", "biog_addr_data"):
-        assert person_alias not in gated, person_alias
+        assert person_alias not in marked, person_alias
     for code_alias in ("addr-codes", "addr_codes", "addrcodes",
                        "addr-belongs-data", "admin-cat-codes"):
-        assert code_alias in gated, code_alias
+        assert code_alias in marked, code_alias
 
 
 def test_addr_belongs_data_has_no_server_assigned_key():
@@ -324,19 +330,19 @@ def test_addr_belongs_data_has_no_server_assigned_key():
     assert spec.pk_fields == ("c_addr_id", "c_belongs_to", "c_firstyear", "c_lastyear")
 
 
-def test_gating_office_did_not_gate_the_postings_aliases():
-    """The regression guard for the trap in docs/07 section 2.3: the SERVER also accepts
-    `offices` and `office-load` for the office aggregate, but `offices` is a postings
-    alias too, and http_client._check_approval() matches approval_gated_aliases()
-    against the raw `resource` string. Registering it on the gated office spec would
-    make every routine posting write demand an approved_by."""
-    from cbdb_agent.models import approval_gated_aliases
+def test_the_office_aggregate_did_not_claim_the_postings_aliases():
+    """The regression guard for the trap in docs/07 section 2.3: the SERVER also
+    accepts `offices` and `office-load` for the office aggregate, but `offices` is a
+    postings alias too. Registering either on the office spec would route a routine
+    appointment record through the office aggregate's whitelist, and would label it
+    global reference data in the review surface."""
+    from cbdb_agent.models import global_reference_aliases
 
-    gated = approval_gated_aliases()
-    assert "office" in gated
+    marked = global_reference_aliases()
+    assert "office" in marked
     for postings_alias in ("postings", "posting", "posted_to_office_data", "offices"):
-        assert postings_alias not in gated, postings_alias
-    assert "office-load" not in gated
+        assert postings_alias not in marked, postings_alias
+    assert "office-load" not in marked
 
 
 def test_text_codes_create_accepts_an_empty_target_pk():
@@ -707,11 +713,11 @@ def test_no_code_table_offers_a_delete():
         assert RESOURCE_SPECS[key].delete_aliases == frozenset(), key
 
 
-def test_every_code_table_write_is_approval_gated():
-    """AGENTS.md rule 12. These are global reference data with no delete path, so the
-    gate is the only thing between a generated batch and a permanent public row."""
+def test_every_code_table_is_marked_as_global_reference_data():
+    """So the preview and the review page say so on every one of those rows: not one
+    person's record, no delete path, and permanent."""
     for key in CODE_TABLE_SPECS:
-        assert RESOURCE_SPECS[key].requires_explicit_approval is True, key
+        assert RESOURCE_SPECS[key].is_global_reference_data is True, key
 
 
 def test_the_code_tables_opened_in_2026_09_have_symmetric_create_and_update_sets():

@@ -16,7 +16,6 @@ import requests
 
 from .audit_log import AuditLog, new_correlation_id
 from .config import Config
-from .models import approval_gated_aliases
 
 
 class CbdbApiError(Exception):
@@ -74,15 +73,12 @@ class NotFoundError(CbdbApiError):
     """404 - e.g. GET /api/v2/get for a row that doesn't exist. Not retried."""
 
 
-class MissingApprovalError(CbdbApiError):
-    """A write to an approval-gated resource carried no human approval signature.
+class AmbiguousResourceError(CbdbApiError):
+    """A write named a resource string that means two different tables.
 
-    AGENTS.md rule 12: code-table and entity-aggregate writes are global reference
-    data, not one person's record. mutation_api.py already refuses these without an
-    `approved_by`, and staging.py refuses to even validate such a batch - this is the
-    last, unskippable gate, at the layer that actually puts bytes on the wire. Same
-    fail-closed reasoning as MutatingFlagMismatch: a defense that only works when the
-    caller went through the intended wrapper is not a defense for a write with no
+    Same fail-closed reasoning as MutatingFlagMismatch, and checked at the layer
+    that actually puts bytes on the wire: a defence that only works when the caller
+    went through the intended wrapper is not a defence for a write with no
     server-side undo.
     """
 
@@ -149,21 +145,17 @@ PUBLIC_RESPONSE_LOG_MAX_ROWS = 5
 
 # Resource strings this client must never put on the wire, whatever the caller says.
 #
-# `offices` is a documented server-side alias for the OFFICE entity aggregate - which is
-# approval-gated - AND for the postings sub-resource, which is routine. Which one it hits
-# is decided by MutationHandlerRegistry's registration order, something this client
-# cannot see and upstream can change. So the string is ambiguous in the worst possible
-# direction: `models.approval_gated_aliases()` deliberately does not contain it (adding
-# it would make every routine postings write demand an approved_by), which means a raw
-# `HttpClient.post({"resource": "offices", ...})` would reach the server UNGATED and
-# could land on the gated aggregate. Every legitimate caller here says `office` or
-# `postings`; nothing needs the ambiguous spelling, so refuse it outright.
+# `offices` is a documented server-side alias for the OFFICE entity aggregate AND for
+# the postings sub-resource. Which one it hits is decided by MutationHandlerRegistry's
+# registration order, something this client cannot see and upstream can change - so a
+# write that says `offices` may land on a person's appointment record or on a global
+# office code, and the caller cannot tell which. Every legitimate caller here says
+# `office` or `postings`; nothing needs the ambiguous spelling, so refuse it outright.
 _AMBIGUOUS_RESOURCE_STRINGS = frozenset({"offices", "office-load"})
 
 
-def _check_approval(json_body: Any, mutating: bool, approval_signature: str | None) -> None:
-    """Fail closed if the envelope targets an approval-gated resource unsigned, or
-    names a resource whose meaning is ambiguous between a gated and an ungated one.
+def _check_resource_is_unambiguous(json_body: Any, mutating: bool) -> None:
+    """Fail closed on a resource string whose meaning we cannot pin down.
 
     Reads the resource straight out of the request body rather than trusting a
     caller-supplied label, so it applies equally to MutationApi and to any direct
@@ -174,29 +166,13 @@ def _check_approval(json_body: Any, mutating: bool, approval_signature: str | No
     resource = json_body.get("resource")
     if not isinstance(resource, str):
         return
-    normalized = resource.strip().lower()
-
-    if normalized in _AMBIGUOUS_RESOURCE_STRINGS:
-        raise MissingApprovalError(
+    if resource.strip().lower() in _AMBIGUOUS_RESOURCE_STRINGS:
+        raise AmbiguousResourceError(
             f"refusing to send resource {resource!r}: the server accepts it for BOTH "
-            "the approval-gated `office` entity aggregate and the routine `postings` "
-            "sub-resource, and which one wins is registration order we cannot see. Say "
-            "which you mean - `office` for the office code, `postings` for a person's "
+            "the `office` entity aggregate and the routine `postings` sub-resource, "
+            "and which one wins is registration order we cannot see. Say which you "
+            "mean - `office` for the office code, `postings` for a person's "
             "appointment record."
-        )
-
-    if normalized not in approval_gated_aliases():
-        return
-    if not (approval_signature or "").strip():
-        raise MissingApprovalError(
-            f"refusing to write resource {resource!r} without an approval signature: "
-            "this is global reference data, not one person's record, and it is visible "
-            "to every other user (AGENTS.md rule 12). Removing it afterwards ranges "
-            "from impossible (the code tables have no delete path, API.md 13.3) to "
-            "conditional (the entity aggregates delete only while nothing references "
-            "the row, API.md 13.4). Pass approved_by= through MutationApi, or "
-            "approval_signature= if calling HttpClient directly. Never supply this on "
-            "the agent's own initiative."
         )
 
 
@@ -429,14 +405,8 @@ class HttpClient:
         operation: str | None = None,
         mode: str | None = None,
         public: bool = False,
-        approval_signature: str | None = None,
     ) -> dict[str, Any]:
         """mutating=True for create/mutate/delete; False for the POST form of GET.
-
-        approval_signature is the human `approved_by` value, required for writes to
-        approval-gated resources (AGENTS.md rule 12) and ignored otherwise. It is
-        checked against the resource named in `json_body`, so it cannot be skipped by
-        going around MutationApi.
 
         public=True (credential-less) is accepted for symmetry with get(), but is
         rejected for mutating calls: an unauthenticated write is never something
@@ -456,7 +426,6 @@ class HttpClient:
             operation=operation,
             mode=mode,
             public=public,
-            approval_signature=approval_signature,
         )
 
     def _request(
@@ -471,10 +440,9 @@ class HttpClient:
         operation: str | None,
         mode: str | None,
         public: bool = False,
-        approval_signature: str | None = None,
     ) -> dict[str, Any]:
         _check_mutating_flag(path, mutating)
-        _check_approval(json_body, mutating, approval_signature)
+        _check_resource_is_unambiguous(json_body, mutating)
         if public and mutating:
             raise ValueError("public=True is not allowed for a mutating request")
         correlation_id = new_correlation_id()

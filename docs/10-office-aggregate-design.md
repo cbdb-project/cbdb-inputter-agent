@@ -1,5 +1,11 @@
 # Adding a Tang office code `知某州事` — design
 
+> **One thing below is superseded (2026-09-14): every mention of `approved_by`.**
+> That field and its gate were removed — the token holder is the writer, and the
+> server records `user_id` on every operation. `AGENTS.md` rule 12 keeps the half
+> that was never redundant: an agent does not create reference data on its own
+> initiative. Read the `approved_by` passages as a record of how it worked then.
+
 **Status: implemented and submitted.** The `office` spec, `preflight.py` and this
 design's §5.4 batch all landed together; the write went to production on 2026-09-04
 (`operation_id 360887`) and is recorded in §8 and `docs/02-review-log.md`. The
@@ -18,13 +24,13 @@ and what it costs. The rest of this document specifies B.
 Two layers, separable:
 
 1. **§1–§4 — the write path.** `office` is an *entity aggregate* (`API.md` §13.4) and
-   this client does not model it. `AGENTS.md` rule 12 already names it approval-gated
-   and unmodelled, so today a staging file saying `resource: office` is rejected as an
-   unknown alias — a safe outcome by absence, not by design. B needs the aggregate's
+   this client does not model it. `AGENTS.md` rule 12 already names it global
+   reference data and unmodelled, so today a staging file saying `resource: office` is
+   rejected as an unknown alias — a safe outcome by absence, not by design. B needs the aggregate's
    **`update`** modelled, which is the harder half (full-overwrite semantics; trap 4).
 2. **§5 — the data.** All ten writable `OFFICE_CODES` columns have to be specified,
    because the aggregate `update` overwrites the whole row. Every data decision is now
-   settled (§7); the batch is blocked only on `approved_by`.
+   settled (§7).
 
 Cited throughout: upstream `API.md` at `origin/develop` **`b2df35f5`**, read directly
 rather than through the digest — which was stamped `fd747aba` when this design was
@@ -91,7 +97,8 @@ here; rule 1 pins us to `direct`.
    Server-side, `offices` is matched by the *postings* handler first
    (`PostingCreateHandler::supports()`), so a payload saying `offices` writes a person's
    appointment record, not an office code. There is a second, client-side hazard that is
-   easy to miss: `models.approval_gated_aliases()` is computed from the gated spec's
+   easy to miss (as written in 2026-09; the approval machinery named here is gone,
+   the alias trap is not): `models.approval_gated_aliases()` was computed from the gated spec's
    alias sets *and each spec's own `key`*, and consumed by
    `http_client._check_approval()` against the **raw, lower-cased `resource` string**. Putting `offices` (or `office-load`) in the office spec's
    aliases would make *every routine postings write* demand an `approved_by`. Register

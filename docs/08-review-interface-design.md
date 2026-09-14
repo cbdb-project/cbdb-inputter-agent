@@ -80,7 +80,7 @@ proposal.yaml  ◀──apply-review──────────────�
 
 ### Validation semantics stay in Python, exactly once
 
-`review.json` ships pre-computed `resolved` flags, `needs_approval`, person grouping
+`review.json` ships pre-computed `resolved` flags, `global_reference_data`, person grouping
 and the current/proposed pairing. The page never re-derives them. Two
 implementations of "is this conflict resolved" would drift, and the Python one is the
 one that actually gates submission.
@@ -103,9 +103,13 @@ understand, rather than mis-rendering a newer shape.
   hidden in a tooltip only.
 - **Inline field editing**, with the original value struck through when the row is an
   update and a live value was fetched.
-- **The approval gate is visible.** An approval-gated proposal (`AGENTS.md` rule 12)
-  renders a locked panel that says what the risk is and takes the reviewer's name.
-  The agent is not permitted to fill this in, and the page is where the human does.
+- **Global reference data is called out.** A proposal that is not one person's
+  record (`AGENTS.md` rule 12) renders a panel saying so, and saying exactly how far
+  that particular table can be taken back — an `ADDR_CODES` row cannot be deleted but
+  every column stays editable; an `ADDR_BELONGS_DATA` key is neither. That difference
+  decides how carefully the row is worth reading, and it is not something a reviewer
+  can read off the resource string. It used to be a signature box; see rule 12 for
+  why that went.
 - **Typed values survive.** `18` stays an int, `[18354]` stays a list, `null` and
   `""` are rendered *differently* — they mean different things to this API
   (`API.md` §1.4), and a reviewer must be able to tell them apart.
@@ -119,7 +123,7 @@ understand, rather than mis-rendering a newer shape.
   actually gets written (`resource`, `operation`, `person_id`, `target_pk`,
   `changes` — deliberately not `source_quote`, `confidence` or the issue list, which
   do not change what is sent). The page stores it with each decision and drops the
-  ones whose hash has moved, saying how many and how many were signatures; every
+  ones whose hash has moved, saying how many; every
   exported decision carries it; and `apply_decisions` refuses one whose hash does
   not match — but only when the decision would actually change something, so
   re-running `apply-review` on a file it has already applied is still a no-op.
@@ -136,12 +140,13 @@ understand, rather than mis-rendering a newer shape.
   submit this row".
 - **Replacing `preview.md`.** It still stands alone with no browser, and is what a
   terminal-only or CI context reads. Tier 1 must keep working (`docs/06` §2).
-- **Deciding *for* a reviewer.** The bulk-approval control writes one name, typed
-  once, onto the rows currently visible — it is a remedy for typing the same name
-  114 times, not a shortcut past reading. It confirms against a dialog naming each
-  table in the selection and what that table cannot undo, it honours the active
-  filters so it never signs a row that is off screen, and it leaves rows already
-  signed individually alone.
+- **Collecting a signature.** There was a per-proposal `approved_by` box here, and a
+  bulk "Sign all N" beside it, until 2026-09-14. Both are gone: the person reviewing
+  is the person whose token writes the batch, and the server records `user_id` on
+  every operation, so the signature restated what the operations log already said.
+  What the box carried that was worth keeping — *this row is global reference data,
+  and here is exactly how far it can be taken back* — is now a plain notice on the
+  same rows. See `AGENTS.md` rule 12.
 
 ## 4a. One coupling to keep in mind
 
