@@ -208,7 +208,9 @@
     <h2>Load a batch</h2>
     <p>Drop <code>review.json</code> here, or <input type="file" id="file" accept=".json,application/json"></p>
     <p class="hint">Produced by <code>python -m cbdb_agent validate --staging &lt;path&gt;</code>,
-       next to the staging YAML.</p>
+       next to the staging YAML. <strong>Not <code>proposal.yaml</code></strong> —
+       that one is what <code>apply-review</code> and <code>submit</code> take,
+       later.</p>
     <p class="hint">Nothing you do here touches the database or the YAML. You export
        <code>decisions.json</code>, then run
        <code>python -m cbdb_agent apply-review --staging &lt;yaml&gt; --decisions decisions.json</code>.</p>
@@ -863,11 +865,34 @@ function download(){
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 
+/* A parse failure is almost always the wrong file, not a corrupt one.
+   `proposal.yaml` sits in the same directory, is the file every other command in
+   the workflow takes, and is the one whose name a person remembers - so it gets
+   dropped here regularly, and "Unexpected token '#'" tells them nothing about
+   which of the two files this page wants. Name it. */
+function loadFailureMessage(text, err){
+  const head = String(text || "").slice(0, 400);
+  const looksLikeStagingYaml =
+    /^\s*#/.test(head) || /^\s*batch_id\s*:/m.test(head) ||
+    /^\s*proposals\s*:/m.test(head);
+  if (looksLikeStagingYaml){
+    return "That looks like the staging YAML (proposal.yaml), not review.json."
+      + "\n\nThis page reads review.json, which sits in the same directory, "
+      + "written by:\n    python -m cbdb_agent validate --staging <path to "
+      + "proposal.yaml>"
+      + "\n\nproposal.yaml is what apply-review and submit take, later."
+      + "\n\n(" + err.message + ")";
+  }
+  return "Not valid JSON: " + err.message
+    + "\n\nThis page reads review.json, written next to the staging YAML by "
+    + "`python -m cbdb_agent validate --staging <path>`.";
+}
+
 /* ---------- load ---------- */
 function load(text){
   let d;
   try { d = JSON.parse(text); }
-  catch(e){ alert("Not valid JSON: " + e.message); return; }
+  catch(e){ alert(loadFailureMessage(text, e)); return; }
   if (d.schema_version !== SCHEMA){
     alert("This review.json declares schema_version " + d.schema_version +
       " but this page speaks " + SCHEMA + ".\n\nRe-export with a matching version " +

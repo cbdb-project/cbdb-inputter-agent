@@ -564,3 +564,50 @@ def test_every_exported_decision_carries_the_hash(page, tmp_path):
     decisions = page.evaluate("buildDecisions()")["decisions"]
     live = page.evaluate("DATA.proposals[0].content_hash")
     assert decisions and all(d["content_hash"] == live for d in decisions)
+
+
+# ===========================================================================
+# The wrong file
+# ===========================================================================
+
+
+def test_dropping_the_staging_yaml_names_the_file_this_page_wants(page, tmp_path):
+    """`proposal.yaml` is in the same directory, is what every other command in the
+    workflow takes, and is the name a person remembers - so it gets dropped here.
+
+    "Not valid JSON: Unexpected token '#'" is true and useless: it says nothing
+    about which of the two files this page reads.
+    """
+    yaml_file = tmp_path / "proposal.yaml"
+    yaml_file.write_text(
+        "# Ming/Qing salt administration - Track B: the place names.\n"
+        "batch_id: 2026-09-11-salt-addresses\n"
+        "proposals:\n"
+        "- id: cat-yunsi\n",
+        encoding="utf-8",
+    )
+    page.goto(PAGE.as_uri())
+    page.set_input_files("#file", str(yaml_file))
+    page.wait_for_timeout(300)
+
+    assert page.dialogs, "the page must say something"
+    message = page.dialogs[-1]
+    assert "proposal.yaml" in message
+    assert "review.json" in message
+    assert "validate --staging" in message
+    assert page.locator("details.group").count() == 0
+
+
+def test_a_genuinely_corrupt_json_file_still_says_so(page, tmp_path):
+    """The other half: not every parse failure is the wrong file, and claiming it
+    was would send someone looking for a file they already have."""
+    broken = tmp_path / "review.json"
+    broken.write_text('{"schema_version": 3, "proposals": [', encoding="utf-8")
+    page.goto(PAGE.as_uri())
+    page.set_input_files("#file", str(broken))
+    page.wait_for_timeout(300)
+
+    assert page.dialogs
+    message = page.dialogs[-1]
+    assert "Not valid JSON" in message
+    assert "proposal.yaml" not in message
