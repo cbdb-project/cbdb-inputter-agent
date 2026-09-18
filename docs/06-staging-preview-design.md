@@ -151,7 +151,7 @@ Not designing that now — YAGNI until it's actually asked for.
   the only write path), but "read-only review surface" turned out to be the wrong way
   to satisfy it once a batch reached 78 proposals and 41 conflicts. `docs/08` adds a
   *round trip* instead: `validate --staging` now also emits a `review.json` beside
-  `preview.md`; `tools/review/index.html` reads it and lets a human decide and edit in
+  `preview.md`; `review/batch.html` reads it and lets a human decide and edit in
   bulk; and `apply-review` writes those decisions back into the YAML, printing every
   change. The page itself still cannot write anything, and `submit` still reads only
   the YAML — so there is still exactly one write path, it just has a nicer front end.

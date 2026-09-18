@@ -3,13 +3,14 @@ pytest>=8.0,<9
 responses>=0.25,<1
 freezegun>=1.4,<2
 
-# Drives tools/review/index.html in a real browser (tests/test_review_page.py).
+# Drives review/batch.html in a real browser (tests/test_review_page.py).
 # OPTIONAL: those tests skip themselves when it, or its browser binary, is absent -
 # but they are the only thing that catches a page that parses fine and renders
 # nothing, which has already happened once. After installing, run:
 #     playwright install chromium
 playwright
 
-# Reads the salt-administration source spreadsheet (tools/salt-admin/build_dataset.py
-# and tests/test_salt_admin.py). A tools-only dependency, not needed to submit data.
+# Reads the salt-administration case's source spreadsheet
+# (cases/salt-administration/case.py, exercised by tests/test_places_and_offices*.py).
+# A case dependency, not needed to submit data - see AGENTS.md, "Where code goes".
 openpyxl>=3.1,<4

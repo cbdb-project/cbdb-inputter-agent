@@ -1,5 +1,10 @@
 # CBDB Inputter Agent — Implementation Plan
 
+> **The layout tree below is the Milestone-1 plan, not the current tree.** It predates
+> `code_lookup`, `preflight`, `review`, `snapshot`, `places_and_offices`, `review/` and
+> `cases/`. For where code goes today, and the rules about it, read AGENTS.md, **"Where
+> code goes — tools vs cases"**. The milestone list itself still stands.
+
 Status: **Milestones 1-8 implemented and reviewed** (see §10 and
 `docs/02-review-log.md`). This document is kept as the
 architectural record and

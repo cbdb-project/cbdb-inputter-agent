@@ -1,6 +1,6 @@
-"""`tools/salt-admin/emit_staging.py` - the Track A staging emitter.
+"""`cases/salt-administration/emit_offices.py` - the Track A staging emitter.
 
-Separate from `test_salt_admin.py` because what matters here is different: not
+Separate from `test_places_and_offices.py` because what matters here is different: not
 whether the arithmetic is right, but whether the batch this produces is the shape
 `staging.py` validates and whether the rule-12 approval gate survives contact with a
 generator. A review pass found four mutations of this module that the suite did not
@@ -9,15 +9,20 @@ the second being the exact alias trap `AGENTS.md` rule 12 warns about, since
 `offices` resolves to the *postings* sub-resource and wins the server's dispatch.
 """
 
-import sys
+import importlib.util
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "tools" / "salt-admin"))
 
-ES = pytest.importorskip("emit_staging", reason="PyYAML not installed")
+pytest.importorskip("yaml", reason="PyYAML not installed")
+# Loaded by path, not imported: it lives in a case, and cases are not a package
+# (AGENTS.md, "Where code goes", rule 3).
+_spec = importlib.util.spec_from_file_location(
+    "salt_emit_offices", REPO / "cases" / "salt-administration" / "emit_offices.py")
+ES = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ES)
 
 from cbdb_agent import models  # noqa: E402
 from cbdb_agent.staging import StagingBatch, find_issues  # noqa: E402
@@ -66,6 +71,7 @@ class TestGlobalReferenceData:
         not a gate: a structurally sound batch validates clean."""
         issues = find_issues(StagingBatch.model_validate(batch))
         assert [i for i in issues if i.severity == "error"] == []
+
 
 class TestEnvelopeShape:
     def test_the_resource_is_office_not_offices(self, batch):
@@ -152,7 +158,8 @@ class TestTrackAIsDropped:
         assert rc == 1
         err = capsys.readouterr().err
         assert "dropped on 2026-09-11" in err
-        assert "emit_addresses.py" in err
+        assert "places_and_offices.emit_addresses" in err
+        assert "--case salt-administration" in err
 
     def test_it_writes_nothing_at_all(self, tmp_path):
         import json
@@ -167,7 +174,7 @@ class TestTrackAIsDropped:
         """It used to say "the address rows have no API path at all", which is the
         claim docs/11's header supersedes and the claim that would send a reader
         back to the SQL script."""
-        src = (REPO / "tools" / "salt-admin" / "emit_staging.py").read_text(
+        src = (REPO / "cases" / "salt-administration" / "emit_offices.py").read_text(
             encoding="utf-8")
         assert "no API path at all" not in src
         assert "DROPPED on 2026-09-11" in src

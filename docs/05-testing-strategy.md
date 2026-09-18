@@ -135,7 +135,7 @@ fixture conventions.
 
 ## Browser tests for the review page (added 2026-08-19)
 
-`tools/review/index.html` is tested by actually loading it in headless Chromium
+`review/batch.html` is tested by actually loading it in headless Chromium
 (`tests/test_review_page.py`, Playwright). This is not gold-plating — it was added
 after a bug that every cheaper check waved through:
 

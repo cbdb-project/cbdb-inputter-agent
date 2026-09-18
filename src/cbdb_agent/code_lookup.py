@@ -154,7 +154,7 @@ _TABLES: dict[str, tuple[str, str, str, str, str, bool]] = {
     "addr": ("ADDR_CODES", "c_addr_id", "c_name_chn", "c_name", "/api/select/search/addr", False),
     # Snapshot only: ADMIN_CAT_CODES has no lookup endpoint and no /api/v2/read
     # (API.md 13.2 names only `nianhao`), which is the same gap that made
-    # tools/salt-admin/live_state.py necessary. Empty endpoint, handled in
+    # src/cbdb_agent/places_and_offices/live_state.py necessary. Empty endpoint, handled in
     # HttpCodeSource.row.
     "admin_cat": ("ADMIN_CAT_CODES", "c_admin_cat_code", "c_admin_cat_hz", "c_admin_cat_trans", "", False),
 }

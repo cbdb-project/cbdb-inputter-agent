@@ -134,7 +134,7 @@ class MutationApi:
         #
         # `ADMIN_CAT_CODES` cannot be checked here - it has no read endpoint at all
         # (API.md 13.2), so the only answer available is the snapshot-plus-operations
-        # composition `tools/salt-admin/live_state.py` makes at generation time, and
+        # composition `src/cbdb_agent/places_and_offices/live_state.py` makes at generation time, and
         # replaying that per create would be minutes of rate-limited requests inside
         # the write loop. Two category rows are also a far smaller surface than 55
         # place names.

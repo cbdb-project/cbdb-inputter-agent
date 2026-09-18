@@ -1,4 +1,4 @@
-"""`tools/salt-admin/emit_addresses.py` and `live_state.py` - the Track B half.
+"""`cbdb_agent/places_and_offices/` - emit_addresses.py and live_state.py.
 
 Track A (the office codes) was dropped on 2026-09-11: a separate import had already
 covered the salt-administration post titles, and Ning Hao's list names the
@@ -20,16 +20,23 @@ is its answer actually carried to the person who signs.
 
 import json
 import sqlite3
-import sys
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "tools" / "salt-admin"))
+# `load_case` resolves `cases/` against the working directory; point it at the
+# repo rather than chdir()-ing, which would leak into the rest of the session.
 
-EA = pytest.importorskip("emit_addresses", reason="PyYAML not installed")
-import live_state  # noqa: E402
+pytest.importorskip("yaml", reason="PyYAML not installed")
+pytest.importorskip("openpyxl", reason="openpyxl not installed")
+from cbdb_agent.places_and_offices import build_dataset            # noqa: E402
+from cbdb_agent.places_and_offices import emit_addresses as EA     # noqa: E402
+from cbdb_agent.places_and_offices import live_state               # noqa: E402
+
+# The case under test, loaded the way the CLI loads it.
+build_dataset.CASES = REPO / "cases"
+SD = build_dataset.load_case("salt-administration")
 
 from cbdb_agent.staging import (  # noqa: E402
     StagingBatch,
@@ -66,6 +73,7 @@ def _unit(key, *, kind="分司", emitted=True, short="泰州分司", name=None,
         "name": name or f"兩淮都轉運鹽使司{short}",
         "name_short": short,
         "romanization": "Lianghuai duzhuanyunyanshisi Taizhou fensi",
+        "admin_type": "Duzhuanyunyanshisi" if kind == "運司" else "Fensi",
         "emitted": emitted,
         "blocked": not emitted,
         "blocked_reason": None if emitted else "awaiting Ning Hao",
@@ -102,7 +110,7 @@ def _build(units, **kw):
     kw.setdefault("admin_cat_mode", "new")
     kw.setdefault("categories_present", {})
     kw.setdefault("evidence", ABSENT)
-    return EA.build_batch(_dataset(units), "b1", **kw)
+    return EA.build_batch(SD, _dataset(units), "b1", **kw)
 
 
 # --- the duplicate check is not optional --------------------------------------
@@ -118,15 +126,15 @@ class TestTheDuplicateCheckIsSigned:
         "is it already there?" - and the answer travels with the batch.
         """
         with pytest.raises(ValueError, match="duplicate-check evidence"):
-            EA.build_batch(_dataset([_unit("a")]), "b1",
+            EA.build_batch(SD, _dataset([_unit("a")]), "b1",
                            admin_cat_mode="new", categories_present={})
 
     def test_admin_cat_zero_still_needs_the_address_evidence(self):
         """`zero` removes the category creates, not the 55 place creates."""
         with pytest.raises(ValueError):
-            EA.build_batch(_dataset([_unit("a")]), "b1",
+            EA.build_batch(SD, _dataset([_unit("a")]), "b1",
                            admin_cat_mode="zero", categories_present={})
-        batch = EA.build_batch(_dataset([_unit("a")]), "b1",
+        batch = EA.build_batch(SD, _dataset([_unit("a")]), "b1",
                                admin_cat_mode="zero", categories_present={},
                                evidence=ABSENT)
         assert not [p for p in batch["proposals"]
@@ -169,11 +177,12 @@ class TestTheDuplicateCheckIsSigned:
         """It used to be possible, with the proposals merely marked low-confidence -
         and `confidence` gates nothing anywhere, so the only barrier to a permanent
         duplicate was a YAML comment."""
-        src = (REPO / "tools" / "salt-admin" / "emit_addresses.py").read_text(
+        src = (REPO / "src" / "cbdb_agent" / "places_and_offices" / "emit_addresses.py").read_text(
             encoding="utf-8")
         assert "--skip-live-check" not in src
         with pytest.raises(SystemExit):
-            EA.main(["--batch-id", "b", "--skip-live-check"])
+            EA.main(["--case", "salt-administration", "--batch-id", "b",
+                     "--skip-live-check"])
 
 
 # --- global reference data -----------------------------------------------------
@@ -295,7 +304,6 @@ class TestShape:
         note = edge["changes"]["c_notes"]
         assert "@" not in note, note
         assert "兩淮都轉運鹽使司（治揚州府）" in note
-        import salt_data as SD
         assert SD.SOURCE_NOTE in note
 
     def test_a_parent_with_no_seat_suffix_is_left_alone(self):
@@ -696,7 +704,8 @@ class TestCliRefusals:
     all, so deleting the ambiguity check left 584 tests green."""
 
     def _run(self, dataset_file, tmp_path, **kw):
-        argv = ["--dataset", str(dataset_file), "--batch-id", "b",
+        argv = ["--case", "salt-administration",
+                "--dataset-json", str(dataset_file), "--batch-id", "b",
                 "--staging-root", str(tmp_path / "staging"),
                 "--processed-root", str(tmp_path / "processed")]
         for k, v in kw.items():
@@ -704,7 +713,9 @@ class TestCliRefusals:
         return EA.main(argv)
 
     def test_a_missing_dataset_is_refused(self, tmp_path, capsys):
-        rc = EA.main(["--dataset", str(tmp_path / "nope.json"), "--batch-id", "b"])
+        rc = EA.main(["--case", "salt-administration",
+                      "--dataset-json", str(tmp_path / "nope.json"),
+                      "--batch-id", "b"])
         assert rc == 1
         assert "not found" in capsys.readouterr().err
 
@@ -712,7 +723,8 @@ class TestCliRefusals:
         p = tmp_path / "d.json"
         p.write_text(json.dumps({"schema_version": 1, "units": []}),
                      encoding="utf-8")
-        assert EA.main(["--dataset", str(p), "--batch-id", "b"]) == 1
+        assert EA.main(["--case", "salt-administration",
+                        "--dataset-json", str(p), "--batch-id", "b"]) == 1
         assert "schema_version" in capsys.readouterr().err
 
     def test_an_admin_cat_flag_that_contradicts_the_dataset_is_refused(

@@ -414,7 +414,7 @@ def find_addr_name_matches(client: HttpClient, name: str) -> list[dict[str, Any]
 def assert_addr_create_is_not_a_duplicate(client: HttpClient, *, name: str) -> None:
     """Raise unless no live ADDR_CODES row already carries exactly this name.
 
-    `tools/salt-admin/emit_addresses.py` runs the same check when it generates a
+    `src/cbdb_agent/places_and_offices/emit_addresses.py` runs the same check when it generates a
     batch, but that is minutes or days before the batch is submitted, and the
     review in between is the whole point of the delay. Anything entered by anyone
     else in that window would otherwise become a permanent duplicate: `ADDR_CODES`

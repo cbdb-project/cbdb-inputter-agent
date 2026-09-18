@@ -1,4 +1,4 @@
-"""The salt-administration dataset generator (`tools/salt-admin/`).
+"""`src/cbdb_agent/places_and_offices/` against the `salt-administration` case.
 
 This generator writes global reference data - `OFFICE_CODES` rows through the API and
 `ADDR_CODES`/`ADDR_BELONGS_DATA` rows through a hand-run SQL script. Nothing
@@ -17,19 +17,82 @@ Design: `docs/11-salt-administration-design.md`.
 """
 
 import csv
-import json
+import importlib.util
 import sqlite3
-import sys
 from pathlib import Path
 
 import pytest
 
+# The generator was split on 2026-09-18: `src/cbdb_agent/places_and_offices/` is the tool
+# (how a place-name import works - the same for every job) and
+# `cases/<name>/case.py` is one job's content. `BD` keeps the old flat namespace
+# for the ~116 assertions below, but the mapping is spelled out rather than
+# shimmed, so which module now owns each name is visible here instead of hidden
+# behind a compatibility layer.
 REPO = Path(__file__).resolve().parents[1]
-TOOLS = REPO / "tools" / "salt-admin"
-sys.path.insert(0, str(TOOLS))
 
-BD = pytest.importorskip("build_dataset", reason="openpyxl not installed")
-import salt_data as SD  # noqa: E402
+# `load_case` resolves `cases/` against the working directory, the way every data
+# path in this project does. Point it at the repo instead of chdir()-ing: a
+# module-level chdir is an unrestorable global side effect whose timing is decided
+# by collection order, and it leaked into every other test in the session.
+_CASES_ROOT = REPO / "cases"
+
+pytest.importorskip("openpyxl", reason="openpyxl not installed")
+pytest.importorskip("cbdb_agent.places_and_offices.build_dataset",
+                    reason="openpyxl not installed")
+
+from types import SimpleNamespace                                    # noqa: E402
+
+from cbdb_agent.places_and_offices import build_dataset              # noqa: E402
+from cbdb_agent.places_and_offices import (csv_export, intervals,    # noqa: E402
+                                           pipeline, seats)
+from cbdb_agent.places_and_offices.findings import Findings          # noqa: E402
+from cbdb_agent.places_and_offices.snapshot import Snapshot          # noqa: E402
+from cbdb_agent.places_and_offices.units import RawUnit, SheetError  # noqa: E402
+
+# The case under test. Loaded the way the CLI loads it, so a case that stops
+# satisfying `load_case`'s contract fails here too.
+build_dataset.CASES = _CASES_ROOT
+SD = build_dataset.load_case("salt-administration")
+
+# The joining rules are the tool's; the character table is the case's, so the
+# tests exercise them the way a case does - through the case's own wrappers.
+pinyin_of = SD.pinyin_of                                             # noqa: E305
+romanize_compact = SD.romanize_compact
+
+_spec = importlib.util.spec_from_file_location(
+    "salt_track_b_sql", REPO / "cases" / "salt-administration" / "track_b_sql.py")
+_TRACK_B_SQL = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_TRACK_B_SQL)
+
+BD = SimpleNamespace(
+    # cbdb_agent/places_and_offices/findings.py, snapshot.py, units.py
+    Findings=Findings, Snapshot=Snapshot, RawUnit=RawUnit, SheetError=SheetError,
+    # cbdb_agent/places_and_offices/intervals.py
+    collect_successor_years=intervals.collect_successor_years,
+    close_interval=intervals.close_interval, intersect=intervals.intersect,
+    IntervalError=intervals.IntervalError,
+    # cbdb_agent/places_and_offices/seats.py - resolve_seat now takes the case's SeatRules
+    resolve_seat=lambda snap, dyn, raw, f, key, rules=SD.SEAT_RULES:
+        seats.resolve_seat(snap, dyn, raw, f, key, rules),
+    _same_row_twice=seats._same_row_twice,
+    # cbdb_agent/places_and_offices/pipeline.py - build() now takes the case module
+    build=lambda xlsx, snap, **kw: pipeline.build(SD, xlsx, snap, **kw),
+    _advisory_duplicate_scan=pipeline._advisory_duplicate_scan,
+    # cbdb_agent/places_and_offices/csv_export.py
+    assert_exportable=csv_export.assert_exportable,
+    write_track_b=csv_export.write_track_b,
+    # The SQL loader is salt-administration's own, superseded export - it moved to
+    # cases/salt-administration/track_b_sql.py with the rest of that job's content.
+    write_track_b_sql=_TRACK_B_SQL.write_track_b_sql,
+    _sql_str=_TRACK_B_SQL._sql_str, SqlVars=_TRACK_B_SQL.SqlVars,
+    # datasets/salt_administration.py - the content half
+    read_sheet=SD.read_units, _region_of=SD.region_of, _branch_of=SD.branch_of,
+    qualified_name=SD.qualified_name, name_alt=SD.name_alt,
+    translation=SD.translation, type_ids_for=SD.type_ids_for,
+    # build_dataset.py - the CLI
+    main=build_dataset.main, unexpected_blockers=build_dataset.unexpected_blockers,
+)
 
 XLSX = Path(r"C:\Users\sudos\Dropbox\cbdb_helpers\Salt Administration - Ning Hao"
             r"\明清六個鹽運使司情況（完整版）.xlsx")
@@ -291,13 +354,13 @@ class TestRomanization:
 
     def test_an_unmapped_character_raises_rather_than_being_dropped(self):
         with pytest.raises(KeyError):
-            SD.pinyin_of("兩淮都轉運鹽使司龍")
+            pinyin_of("兩淮都轉運鹽使司龍")
 
     def test_the_office_pinyin_is_space_separated_lowercase(self):
-        assert SD.pinyin_of("兩淮都轉運鹽使司") == "liang huai du zhuan yun yan shi si"
+        assert pinyin_of("兩淮都轉運鹽使司") == "liang huai du zhuan yun yan shi si"
 
     def test_the_compact_form_capitalizes_once(self):
-        assert SD.romanize_compact("分司") == "Fensi"
+        assert romanize_compact("分司") == "Fensi"
 
 
 class TestCuratedTablesAreWellFormed:
@@ -438,7 +501,29 @@ class TestResolveSeat:
         r = BD.resolve_seat(mini_snapshot, "清代", "天津", f, "u")
         assert r.addr_id == 7242
         assert f.count("blocker") == 0
-        assert f.count("warning") == 1, "the decision is surfaced, not silent"
+        # Confirmed by the user on 2026-09-18, so it is a note. It must still be
+        # SURFACED - a pick between two real places is never silent.
+        assert f.count("warning") == 0
+        assert any("天津" in x["title"] and "confirmed" in x["title"]
+                   for x in f.as_list()), [x["title"] for x in f.as_list()]
+
+    def test_an_unconfirmed_decision_is_a_warning_not_a_note(self, mini_snapshot,
+                                                             monkeypatch):
+        """The distinction is load-bearing.
+
+        A recorded pick between two REAL places is the generator choosing which of
+        them a person was seated in. While that is only the generator's judgement it
+        has to read as an open question; otherwise the ninth ambiguous seat looks
+        exactly as settled as the one that was actually asked about.
+        """
+        entry = dict(SD.SEAT_DECISIONS[("清代", "天津")])
+        entry.pop("confirmed")
+        monkeypatch.setitem(SD.SEAT_DECISIONS, ("清代", "天津"), entry)
+        f = BD.Findings()
+        r = BD.resolve_seat(mini_snapshot, "清代", "天津", f, "u")
+        assert r.addr_id == 7242, "the pick itself does not change"
+        assert f.count("warning") == 1
+        assert any("not yet confirmed" in x["title"] for x in f.as_list())
 
     def test_an_unresolvable_name_is_a_blocker_not_a_guess(self, mini_snapshot):
         f = BD.Findings()
@@ -499,22 +584,48 @@ def unit(dataset, dynasty, short):
 @needs_sources
 class TestEndToEnd:
     def test_the_counts_are_what_the_design_promises(self, dataset):
+        """All 51 units, since the two 清代 兩浙 source defects were settled on
+        2026-09-18 (design §9.1, §9.2). 57 address rows rather than 51 because six
+        units moved their 治所 and get one row per seat period (§5.1)."""
         s = dataset["stats"]
         assert s["units_total"] == 51
-        assert s["office_creates"] == 49
-        assert s["address_rows"] == 55
-        assert s["belongs_edges"] == 57
+        assert s["office_creates"] == 51
+        assert s["address_rows"] == 57
+        assert s["belongs_edges"] == 59
 
     def test_the_header_row_is_not_read_as_a_unit(self, dataset):
         """Kills "stop skipping the header row"."""
         assert not any(u["name_short"] in ("鹽運總司", "分司") for u in dataset["units"])
 
-    def test_the_two_source_defects_are_excluded_from_every_output(self, dataset):
-        """Kills `BLOCKED = {}`."""
-        for short in ("寧紹分司", "嘉松分司"):
-            assert not unit(dataset, "清代", short)["emitted"]
-        assert {u["name_short"] for u in dataset["units"] if not u["emitted"]} \
-            == {"寧紹分司", "嘉松分司"}
+    def test_nothing_is_blocked_and_nothing_is_silently_dropped(self, dataset):
+        """`SD.BLOCKED` is empty since 2026-09-18, so every unit must be emitted.
+
+        Asserted rather than deleted: `emitted` is what decides whether a unit
+        reaches an irreversible batch, and a unit vanishing for some OTHER reason -
+        a parse failure, a seat that would not resolve - would look exactly like the
+        deliberate exclusions this used to pin.
+        """
+        assert [u["name_short"] for u in dataset["units"] if not u["emitted"]] == []
+        assert len(dataset["units"]) == 51
+
+    def test_the_settled_units_have_the_spans_the_user_confirmed(self, dataset):
+        """The corrected 清代兩浙 table, 2026-09-18.
+
+        The user writes a handover as "ends the year the successor starts"; §5.1(a)
+        materialises that as the predecessor closing the year BEFORE, so the two are
+        never in the database in the same year. 寧紹分司 therefore ends 1684, like
+        溫台分司 beside it, and its reversed 杭州府 row is gone - that seat was never
+        this unit's, it belongs to 寧紹溫台分司.
+        """
+        ningshao = unit(dataset, "清代", "寧紹分司")["addresses"]
+        assert len(ningshao) == 1
+        assert (ningshao[0]["seat"]["raw"], ningshao[0]["first"],
+                ningshao[0]["last"]) == ("紹興府", 1644, 1684)
+
+        jiasong = unit(dataset, "清代", "嘉松分司")["addresses"]
+        assert len(jiasong) == 1
+        assert (jiasong[0]["seat"]["raw"], jiasong[0]["first"],
+                jiasong[0]["last"]) == ("杭州府", 1704, 1911)
 
     def test_a_cross_unit_succession_is_applied(self, dataset):
         """Kills `SUCCESSIONS = {}`."""
@@ -630,18 +741,16 @@ class TestExports:
         assert "Lianghuai Duzhuanyunyanshisi Taizhou Fensi" in names
         assert not any(len(n.split()) == 1 for n in names)
 
-    def test_blocked_units_reach_no_export(self, written):
-        # By symbolic key, not by bare name: 明代 寧紹分司 is a perfectly good unit and
-        # IS exported. Only the 清代 one is blocked, and a substring search for the
-        # name cannot tell them apart.
-        _, out, sql = written
+    def test_every_unit_reaches_the_export_now_that_none_is_blocked(self, written):
+        # By symbolic key, not by bare name: 寧紹分司 exists in BOTH dynasties, and a
+        # substring search for the name cannot tell them apart - which is exactly how
+        # a leak would have hidden while the 清代 one was blocked.
+        ds, out, _ = written
         addresses = (out / "addresses.csv").read_text(encoding="utf-8-sig")
-        belongs = (out / "addr_belongs.csv").read_text(encoding="utf-8-sig")
-        for key in ("salt:qing:兩浙:寧紹分司", "salt:qing:兩浙:嘉松分司"):
-            for blob, where in ((addresses, "addresses.csv"),
-                                (belongs, "addr_belongs.csv"), (sql, "the SQL")):
-                assert key not in blob, f"{key} leaked into {where}"
-        assert "salt:ming:兩浙:寧紹分司" in addresses,             "the Ming unit of the same name must still be exported"
+        for key in ("salt:ming:兩浙:寧紹分司", "salt:qing:兩浙:寧紹分司",
+                    "salt:qing:兩浙:嘉松分司"):
+            assert key in addresses, f"{key} missing from addresses.csv"
+        assert all(u["emitted"] for u in ds["units"])
 
     def test_every_address_row_gets_its_own_sql_variable(self, written):
         """The real-data version of the SqlVars regression."""
@@ -677,18 +786,18 @@ class TestExports:
 
     def test_the_verification_counts_are_scoped_to_this_run(self, written):
         # Scoped to the exact allocated range AND to this dataset's c_admin_type.
-        # `> @addr_base` alone still reads 55 when one of our rows failed on a PK
-        # collision and a concurrent session's row filled the gap.
-        _, _, sql = written
+        # `> @addr_base` alone still reads the right count when one of our rows
+        # failed on a PK collision and a concurrent session's row filled the gap.
+        ds, _, sql = written
         flat = " ".join(sql.split())
-        assert "BETWEEN @addr_base + 1 AND @addr_base + 55" in flat
+        assert (f"BETWEEN @addr_base + 1 AND @addr_base + "
+                f"{ds['stats']['address_rows']}") in flat
         assert ("AND c_admin_type IN ('Duzhuanyunyanshisi','Fensi')) "
                 "AS actual_addresses") in flat
         assert "c_addr_id > @addr_base)" not in flat, "the unscoped form must be gone"
         assert "NOT EXISTS" in flat, "an orphan check must be present"
         assert "NOT IN ('Duzhuanyunyanshisi','Fensi')" in flat, \
             "nothing foreign may have landed inside the allocated range"
-
 
     def test_the_isolation_level_the_gap_lock_needs_is_pinned(self, written):
         # The id allocation relies on a next-key lock, which InnoDB only takes under
@@ -824,10 +933,11 @@ class TestBlockerExclusionEndToEnd:
             [None, "兩淮都轉運鹽使司", None, 1368, 1644, "通州", 1368, 1644],
             [None, None, "泰州分司", None, None, "無此地", 1368, 1644],
         ])
-        rc = BD.main(["--xlsx", str(xlsx), "--snapshot", str(mini_snapshot_path(tmp_path)),
+        rc = BD.main(["--case", "salt-administration", "--xlsx", str(xlsx),
+                      "--snapshot", str(mini_snapshot_path(tmp_path)),
                       "--out", str(tmp_path / "o")])
         assert rc == 1
-        assert "No CSV and no SQL written" in capsys.readouterr().err
+        assert "No exports written" in capsys.readouterr().err
 
 
 def mini_snapshot_path(tmp_path):
@@ -1199,3 +1309,161 @@ class TestSqlValuesMatchTheDataset:
         assert re.search(r"BETWEEN @addr_base \+ 1 AND @addr_base \+ \d+", sql)
         assert "must_be_zero_range_already_occupied" in sql
         assert "do NOT pass --force" in sql
+
+
+# --- the tool/case boundary itself --------------------------------------------
+
+
+class TestTheCaseContractIsEnforced:
+    """`load_case` is the whole of the boundary: below it the tool receives a case
+    as an argument and assumes every name is there. A review pass found the check
+    was incomplete (`UNKNOWN_ADDR_ID` was read by `pipeline` and absent from
+    `required`) and that deleting the check entirely left the suite green."""
+
+    def _stub(self, tmp_path, name="probe", body=""):
+        d = tmp_path / "cases" / name
+        d.mkdir(parents=True)
+        (d / "case.py").write_text(body, encoding="utf-8")
+        return d
+
+    def _case_body(self, name):
+        """A case module that satisfies `load_case` and imports a sibling file."""
+        return ("from helper import which" + "\n"
+                + "\n".join(f"{n} = 1"
+                               for n in build_dataset.REQUIRED_CASE_NAMES
+                               if n != "CASE_NAME")
+                + "\n" + f'CASE_NAME = "{name}"' + "\n")
+
+    def test_a_case_missing_a_required_name_is_refused_by_that_name(
+            self, tmp_path, monkeypatch):
+        """Kills `missing = []`. Without this, `load_case` could stop checking
+        anything and nothing here would notice."""
+        self._stub(tmp_path, body='CASE_NAME = "probe"\n')
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(build_dataset, "CASES", Path("cases"))
+        with pytest.raises(SystemExit) as exc:
+            build_dataset.load_case("probe")
+        msg = str(exc.value)
+        assert "ROOT_KIND" in msg and "DYNASTIES" in msg
+
+    def test_the_required_list_covers_every_name_the_tool_actually_reads(self):
+        """Kills adding a `case.X` read without declaring it.
+
+        Walks the package's AST for `case.<attr>` rather than trusting the list:
+        that is how `UNKNOWN_ADDR_ID` was found missing, and the same drift would
+        otherwise reappear the next time a helper reaches for something new.
+        """
+        import ast
+
+        pkg = Path(build_dataset.__file__).parent
+        read: dict[str, str] = {}
+        for py in sorted(pkg.glob("*.py")):
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Attribute)
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id == "case"):
+                    read.setdefault(node.attr, f"{py.name}:{node.lineno}")
+        undeclared = {k: v for k, v in read.items()
+                      if k not in build_dataset.REQUIRED_CASE_NAMES
+                      and k not in build_dataset.OPTIONAL_CASE_NAMES}
+        assert not undeclared, (
+            f"read off a case but not in load_case's `required`: {undeclared}")
+
+    def test_a_case_whose_name_disagrees_with_its_directory_is_refused(
+            self, tmp_path, monkeypatch):
+        """The same id names cases/, data/build/ and review/. A mismatch would put
+        the dataset where the review page never looks, with no error."""
+        body = "\n".join(f"{n} = 1" for n in build_dataset.REQUIRED_CASE_NAMES
+                          if n != "CASE_NAME")
+        self._stub(tmp_path, body='CASE_NAME = "something-else"\n' + body)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(build_dataset, "CASES", Path("cases"))
+        with pytest.raises(SystemExit) as exc:
+            build_dataset.load_case("probe")
+        assert "must match its directory name" in str(exc.value)
+
+    def test_a_case_name_cannot_escape_the_cases_directory(
+            self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "cases").mkdir()
+        monkeypatch.setattr(build_dataset, "CASES", Path("cases"))
+        with pytest.raises(SystemExit) as exc:
+            build_dataset.load_case("../../elsewhere")
+        assert "no case" in str(exc.value)
+
+    def test_a_case_helper_does_not_leak_to_the_next_case(
+            self, tmp_path, monkeypatch):
+        """A case may be several files, and their module names (`track_b_sql`) are
+        not namespaced by case. Found by codex: the helper stayed in `sys.modules`
+        after the load, so a second case with a file of the same name silently
+        bound to the first one's module - and its `extra_exports` would then write
+        the wrong export."""
+        import sys as _sys
+
+        for n, which in (("one", "ONE"), ("two", "TWO")):
+            d = self._stub(tmp_path, name=n, body=self._case_body(n))
+            (d / "helper.py").write_text(f'which = "{which}"\n',
+                                         encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(build_dataset, "CASES", Path("cases"))
+
+        assert build_dataset.load_case("one").which == "ONE"
+        assert build_dataset.load_case("two").which == "TWO"
+        assert "helper" not in _sys.modules
+
+    def test_a_name_already_in_sys_modules_does_not_shadow_a_case_helper(
+            self, tmp_path, monkeypatch):
+        """The other half of the same hole: an unrelated `helper` already imported
+        would have won, and the case would have bound to it instead of to its own
+        file."""
+        import sys as _sys
+        import types as _types
+
+        d = self._stub(tmp_path, body=self._case_body("probe"))
+        (d / "helper.py").write_text('which = "THE CASE OWN"\n',
+                                     encoding="utf-8")
+        intruder = _types.ModuleType("helper")
+        intruder.which = "SOMEONE ELSE"
+        monkeypatch.setitem(_sys.modules, "helper", intruder)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(build_dataset, "CASES", Path("cases"))
+
+        assert build_dataset.load_case("probe").which == "THE CASE OWN"
+        # and the intruder goes back, since it was not ours to remove
+        assert _sys.modules["helper"] is intruder
+
+    def test_a_case_that_raises_while_loading_leaves_nothing_behind(
+            self, tmp_path, monkeypatch):
+        """A half-executed module left in sys.modules would be reused by the next
+        load and look fine."""
+        import sys as _sys
+        self._stub(tmp_path, body='raise RuntimeError("boom")\n')
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(build_dataset, "CASES", Path("cases"))
+        with pytest.raises(RuntimeError):
+            build_dataset.load_case("probe")
+        assert "cbdb_case_probe" not in _sys.modules
+
+
+class TestTheDatasetCarriesItsCase:
+    """`dataset.json` is the only thing the review page reads. Everything it needs
+    in order to render a case it has never heard of travels in the `case` block, and
+    nothing in Python notices if that block stops being written."""
+
+    def test_build_writes_the_vocabulary_the_page_renders_from(self, dataset):
+        """Kills dropping `case=dict(...)` from `build()`'s return: the page throws
+        on `C.page.title` and the suite would otherwise stay green."""
+        c = dataset["case"]
+        assert c["name"] == SD.CASE_NAME
+        assert c["root_kind"] == SD.ROOT_KIND
+        assert c["branch_kind"] == SD.BRANCH_KIND
+        assert set(c["dynasties"]) == set(SD.DYNASTIES)
+        for label, meta in c["dynasties"].items():
+            assert (meta["first"], meta["last"]) == SD.DYNASTIES[label]["window"]
+        assert c["page"]["title"] and c["page"]["headline"]
+        assert set(c["admin_categories"]) == set(SD.ADMIN_CATEGORIES)
+
+    def test_every_unit_carries_the_admin_type_the_batch_will_send(self, dataset):
+        for u in dataset["units"]:
+            assert u["admin_type"] == SD.admin_type_of(u["kind"])

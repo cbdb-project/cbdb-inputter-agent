@@ -3,7 +3,7 @@
      a plain static server, neither of which sends a charset. Without it the
      browser sniffs windows-1252, every 治所 name in the JS becomes mojibake,
      and the dynasty lookup silently misses. -->
-<title>鹽運使司 Review</title>
+<title>Place names and offices · review</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Serif+TC:wght@500;700&display=swap">
@@ -11,10 +11,10 @@
 <style>
 /* ---------------------------------------------------------------------------
    Palette: brine. A cool mineral ground rather than the usual warm cream, with
-   a salt-water teal accent. The two dynasties are the primary axis of the whole
-   dataset, so each gets its own hue - bronze for 明, indigo for 清 - and those
-   hues are used only for dynasty identity, never for state. Severity is a
-   separate, unmistakable scale.
+   a salt-water teal accent. Dynasty is the primary axis of any dataset of this
+   shape, so each gets its own hue - bronze for the first, indigo for the second,
+   taken in the order the case lists them - and those hues are used only for
+   dynasty identity, never for state. Severity is a separate, unmistakable scale.
    --------------------------------------------------------------------------- */
 :root {
   --ground:      #eef1f2;
@@ -28,10 +28,10 @@
   --accent:      #0f6e77;
   --accent-ink:  #ffffff;   /* text ON the accent - flips with it, see dark blocks */
   --accent-soft: #d7e8ea;
-  --ming:        #9c5f28;
-  --ming-soft:   #f0e2d4;
-  --qing:        #2f5d8c;
-  --qing-soft:   #dce6f0;
+  --era-a:        #9c5f28;
+  --era-a-soft:   #f0e2d4;
+  --era-b:        #2f5d8c;
+  --era-b-soft:   #dce6f0;
   --blocker:     #a8261c;
   --blocker-soft:#f6ddda;
   --warn:        #7d5800;
@@ -54,10 +54,10 @@
     --accent:      #55b9c2;
     --accent-ink:  #08171a;   /* the dark accent is light, so its text goes dark */
     --accent-soft: #16343a;
-    --ming:        #d59a63;
-    --ming-soft:   #33251a;
-    --qing:        #8fb6dd;
-    --qing-soft:   #1a2734;
+    --era-a:        #d59a63;
+    --era-a-soft:   #33251a;
+    --era-b:        #8fb6dd;
+    --era-b-soft:   #1a2734;
     --blocker:     #f08b80;
     --blocker-soft:#3a1a17;
     --warn:        #e0b45c;
@@ -80,10 +80,10 @@
   --accent:      #55b9c2;
   --accent-ink:  #08171a;
   --accent-soft: #16343a;
-  --ming:        #d59a63;
-  --ming-soft:   #33251a;
-  --qing:        #8fb6dd;
-  --qing-soft:   #1a2734;
+  --era-a:        #d59a63;
+  --era-a-soft:   #33251a;
+  --era-b:        #8fb6dd;
+  --era-b-soft:   #1a2734;
   --blocker:     #f08b80;
   --blocker-soft:#3a1a17;
   --warn:        #e0b45c;
@@ -131,8 +131,10 @@ h1 {
 /* --- the two-track banner ------------------------------------------------ */
 .tracks { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin: 22px 0; }
 .track { border: 1px solid var(--line); border-left-width: 4px; border-radius: 3px; background: var(--surface); padding: 14px 16px; }
-.track.a { border-left-color: var(--accent); }
-.track.b { border-left-color: var(--warn); }
+/* Positional, not keyed on a track id the case chooses: a case naming its tracks
+   anything else would otherwise get no accent at all. */
+.track:nth-of-type(1) { border-left-color: var(--accent); }
+.track:nth-of-type(2) { border-left-color: var(--warn); }
 .track h2 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
 .track p { margin: 0; font-size: 13px; color: var(--ink-2); }
 .track .verdict { font-weight: 600; color: var(--ink); }
@@ -179,8 +181,8 @@ input.search { font: inherit; font-size: 13px; padding: 6px 10px; border: 1px so
 .group[open] > summary::before { content: "▾"; }
 .gname { font-family: "Noto Serif TC", serif; font-weight: 700; font-size: 16px; }
 .dyn { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; font-weight: 600; padding: 2px 7px; border-radius: 2px; }
-.dyn.ming { background: var(--ming-soft); color: var(--ming); }
-.dyn.qing { background: var(--qing-soft); color: var(--qing); }
+.dyn.era-a { background: var(--era-a-soft); color: var(--era-a); }
+.dyn.era-b { background: var(--era-b-soft); color: var(--era-b); }
 .gmeta { font-size: 12px; color: var(--ink-3); margin-left: auto; }
 
 /* --- unit rows ----------------------------------------------------------- */
@@ -219,8 +221,8 @@ dl.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .coord.none { color: var(--blocker); }
 .track-line { position: relative; height: 7px; margin: 6px 0 2px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
 .track-line i { position: absolute; top: 0; bottom: 0; background: var(--bar); border-radius: 2px; }
-.unit.ming .track-line i { background: var(--ming); }
-.unit.qing .track-line i { background: var(--qing); }
+.unit.era-a .track-line i { background: var(--era-a); }
+.unit.era-b .track-line i { background: var(--era-b); }
 .belongs { margin-top: 5px; font-size: 11.5px; color: var(--ink-2); }
 .belongs > span, .belongs > b { margin-right: 5px; }
 .belongs .mono { margin: 0 4px; }
@@ -259,10 +261,10 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
 </div>
 
 <script>
-/* The page holds no data. It reads data/salt-admin/dataset.json, produced by
-   tools/salt-admin/build_dataset.py, exactly as tools/review/index.html reads a
-   batch's review.json - see docs/08 for why the review surface is a committed,
-   network-free file rather than a page generated per batch. */
+/* The page holds no data. It reads a dataset.json produced by
+   python -m cbdb_agent.places_and_offices.build_dataset, exactly as review/batch.html
+   reads a batch's review.json - see docs/08 for why the review surface is a
+   committed, network-free file rather than a page generated per batch. */
 
 const H = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
   c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -270,13 +272,40 @@ const han = (s) => `<span class="han">${H(s)}</span>`;
 const nul = (v, fmt) => (v === null || v === undefined || v === "")
   ? '<span class="null">null</span>' : (fmt ? fmt(v) : H(v));
 
-const DYN = { "明代": { cls: "ming", lo: 1368, hi: 1643 },
-              "清代": { cls: "qing", lo: 1644, hi: 1911 } };
+/* `C` is dataset.json's `case` block: the vocabulary and the prose of whichever
+   job produced this file. Read rather than hard-coded, because this page renders
+   any dataset of this shape and a masthead describing someone else's contribution
+   is worse than no masthead. `DYN` is derived from it - a dynasty's hue is its
+   position in the case's own list, not a lookup on 明/清. */
+let C = null, DYN = {};
 
-const SCHEMA = 2;   // must match build_dataset.py's `schema_version`.
+function readCase(data) {
+  C = data.case;
+  DYN = {};
+  Object.entries(C.dynasties).forEach(([label, m], i) => {
+    DYN[label] = { cls: "era-" + "ab"[i % 2], lo: m.first, hi: m.last };
+  });
+}
+
+/* The only markup allowed in case prose, applied AFTER escaping so a case cannot
+   inject HTML into the page: **bold**, *emphasis*, `code`, and {stat} filled from
+   dataset.json's own stats. */
+function md(text, stats) {
+  let t = H(text).replace(/\{(\w+)\}/g,
+    (m, k) => (stats && Object.hasOwn(stats, k) ? H(stats[k]) : m));
+  // hasOwn, not `in`: `{constructor}` would otherwise reach through the
+  // prototype chain and render "function Object() { [native code] }".
+  t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  t = t.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  return t.replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+const SCHEMA = 3;   // must match build_dataset.py's `schema_version`.
                     // v1 -> v2: `stats.units_blocked` became `units_excluded`, every
                     // unit gained `emitted` (blocked in the source OR carrying a
                     // blocker finding) and `romanization`/`romanization_alt`.
+                    // v2 -> v3: the `case` block above, and `admin_type` on each
+                    // unit instead of three copies of one conditional.
 
 let DATA = null;
 const filters = { dynasty: "all", kind: "all", only: "all", q: "" };
@@ -288,35 +317,33 @@ function boot(data) {
         <p>This page reads <span class="mono">schema_version ${SCHEMA}</span>;
         that dataset is <span class="mono">${H(data.schema_version)}</span>.</p>
         <p>Refusing to render it — a mis-rendered review is worse than none.
-        Re-run <span class="mono">tools/salt-admin/build_dataset.py</span>.</p>
+        Re-run <span class="mono">python -m cbdb_agent.places_and_offices.build_dataset</span>.</p>
       </div>`;
     return;
   }
   DATA = data;
+  readCase(data);
+  document.title = C.page.title;
   render();
 }
 
 function render() {
   const d = DATA, s = d.stats;
+  /* Read, never asserted: the footer used to state `source_id is 0` as a literal,
+     which is a review surface claiming a value it had not looked at. */
+  const ids = new Set(d.units.map(u => u.office.source_id));
+  const D_SOURCE_ID = ids.size === 1 ? [...ids][0] : [...ids].sort().join(" / ");
   const blocked = d.units.filter(u => !u.emitted);
   const app = document.getElementById("app");
 
   app.innerHTML = `
     <header class="masthead">
       <p class="eyebrow">CBDB reference data · pre-submission review</p>
-      <h1>明清鹽運使司與分司</h1>
-      <p class="standfirst">Ning Hao's compilation of the Ming and Qing salt
-      administration, prepared for CBDB as place names. Every row below is a
-      proposed change to global reference data — visible to every CBDB user and
-      referenced by any number of person records. Nothing here has been
-      submitted.</p>
+      <h1>${H(C.page.headline)}</h1>
+      <p class="standfirst">${md(C.page.standfirst, s)}</p>
+      ${(C.page.notices || []).map(n => `
       <p class="standfirst" style="border-left:3px solid var(--warn);padding-left:12px">
-      <strong>Track A was dropped on 2026-09-11.</strong> A separate import had
-      already covered the salt-administration <em>post titles</em>, and Ning Hao's
-      list names the <em>institutions</em> — which belong in the place-name tables,
-      as he proposed. The office panels below are kept only as the working that led
-      to that decision; <strong>nothing in Track A is being submitted</strong>. What
-      ships is Track B, and it now goes through the API like anything else.</p>
+      ${md(n, s)}</p>`).join("")}
       <p class="provenance">
         <span>Source · ${H(d.source.xlsx)}</span>
         <span>Snapshot · <span class="mono">${H(d.source.snapshot)}</span> (${H((d.source.snapshot_generated_at||"").slice(0,10))})</span>
@@ -325,29 +352,22 @@ function render() {
     </header>
 
     <div class="tracks">
-      <div class="track a">
-        <h2>Track A · 官名表 <span class="pill" style="background:var(--warn-soft);color:var(--warn)">dropped</span></h2>
-        <p><span class="verdict">${H(s.office_creates)} <code>office</code> aggregate creates — NOT submitted.</span>
-        Superseded on 2026-09-11 by a separate import of the salt post titles. Kept
-        here as the working behind that decision, not as a plan.</p>
-      </div>
-      <div class="track b">
-        <h2>Track B · 地名表 <span class="pill">API</span></h2>
-        <p><span class="verdict">${H(s.address_rows)} <code>ADDR_CODES</code> rows,
-        ${H(s.belongs_edges)} <code>ADDR_BELONGS_DATA</code> edges.</span>
-        <code>/api/v2</code> gained create paths for both tables on 2026-09-11, so
-        these go through the normal staged, previewed, audit-logged path.
-        Every row is global reference data — visible to every CBDB user and
-        referenced by any number of person records. Emitted by
-        <code>tools/salt-admin/emit_addresses.py</code>; the SQL script this page
-        used to point at is superseded.</p>
-      </div>
+      ${(C.page.tracks || []).map(t => `
+      <div class="track ${H(t.id)}">
+        <h2>${H(t.heading)}${t.pill ? ` <span class="pill"${
+          t.pill_tone === "warn"
+            ? ' style="background:var(--warn-soft);color:var(--warn)"' : ""
+          }>${H(t.pill)}</span>` : ""}</h2>
+        <p><span class="verdict">${md(t.verdict, s)}</span> ${md(t.text, s)}</p>
+      </div>`).join("")}
     </div>
 
     <div class="stats">
       <div class="stat"><b>${H(s.units_total)}</b><span>units in source</span></div>
       <div class="stat${s.units_excluded ? " is-blocker" : ""}"><b>${H(s.units_excluded)}</b><span>excluded</span></div>
-      <div class="stat" style="opacity:.55"><b>${H(s.office_creates)}</b><span>office creates (dropped)</span></div>
+      ${C.page.office_stat_label ? `<div class="stat" style="opacity:.55">
+        <b>${H(s.office_creates)}</b><span>${H(C.page.office_stat_label)}</span>
+      </div>` : ""}
       <div class="stat"><b>${H(s.address_rows)}</b><span>address rows</span></div>
       <div class="stat"><b>${H(s.belongs_edges)}</b><span>parent edges</span></div>
       <div class="stat${s.findings_blocker ? " is-blocker" : ""}"><b>${H(s.findings_blocker)}</b><span>blockers</span></div>
@@ -382,21 +402,17 @@ function render() {
         </div>
       </div>`).join("")}</div>
 
-    <h2 class="sec">Every proposed row<span class="count">by 運司, both tracks side by side</span></h2>
-    <p class="sec-note">The left pane is the office reading of each unit, kept for
-    reference after Track A was dropped; <strong>the right pane is what actually
-    ships</strong>, now through the API rather than a SQL script. They are two
-    representations of one unit, which is the whole point of the request. The bar
-    under each seat shows the period against its dynasty, so a gap, an overlap or a
-    missing stretch reads without arithmetic.</p>
+    <h2 class="sec">Every proposed row<span class="count">by ${H(C.root_kind)}, both tracks side by side</span></h2>
+    <p class="sec-note">${C.page.rows_note ? md(C.page.rows_note, s) + " " : ""}The
+    bar under each seat shows the period against its dynasty, so a gap, an overlap
+    or a missing stretch reads without arithmetic.</p>
 
     <div class="controls">
-      ${chip("dynasty", "all", "Both dynasties")}
-      ${chip("dynasty", "明代", "明")}
-      ${chip("dynasty", "清代", "清")}
+      ${chip("dynasty", "all", "All dynasties")}
+      ${Object.keys(C.dynasties).map(l => chip("dynasty", l, l)).join("\n      ")}
       ${chip("kind", "all", "All units")}
-      ${chip("kind", "運司", "運司 only")}
-      ${chip("kind", "分司", "分司 only")}
+      ${chip("kind", C.root_kind, C.root_kind + " only")}
+      ${chip("kind", C.branch_kind, C.branch_kind + " only")}
       ${chip("only", "findings", "Has findings")}
       ${chip("only", "multiseat", "Seat moved")}
       ${chip("only", "nocoord", "No coordinate")}
@@ -406,12 +422,12 @@ function render() {
     <div id="groups"></div>
 
     <h2 class="sec">Coincident points<span class="count">${d.coincident_points.length} groups</span></h2>
-    <p class="sec-note">Where a 分司 sits in its parent's seat, the copied coordinate
-    says nothing about the 分司 itself. A note in <code>c_notes</code> does not stop a
-    GIS join returning stacked markers, so the pile-ups are counted here rather than
-    left for a map to reveal.</p>
+    <p class="sec-note">Where a ${H(C.branch_kind)} sits in its parent's seat, the
+    copied coordinate says nothing about the ${H(C.branch_kind)} itself. A note in
+    <code>c_notes</code> does not stop a GIS join returning stacked markers, so the
+    pile-ups are counted here rather than left for a map to reveal.</p>
     <div class="scroll-x"><table class="coin">
-      <thead><tr><th>n</th><th>Dynasty</th><th>運司</th><th>Point</th><th>Rows on it</th></tr></thead>
+      <thead><tr><th>n</th><th>Dynasty</th><th>${H(C.root_kind)}</th><th>Point</th><th>Rows on it</th></tr></thead>
       <tbody>${d.coincident_points.map(c => `
         <tr>
           <td class="n">${H(c.count)}</td>
@@ -425,9 +441,10 @@ function render() {
     <footer>
       Source note written into every <code>c_notes</code> on both tracks:
       <span class="han">${H(d.source_note)}</span><br>
-      <code>c_source</code> / <code>source_id</code> is <code>0</code> (<span class="han">未詳</span>),
-      by decision — the dataset rests on four bodies of material and the column holds one.
-      Design and reasoning: <code>docs/11-salt-administration-design.md</code>.
+      <code>c_source</code> / <code>source_id</code> is
+      <code>${H(D_SOURCE_ID)}</code>${C.page.source_id_note
+        ? ` — ${md(C.page.source_id_note, s)}` : ""}<br>
+      Design and reasoning: <code>${H(C.design_doc)}</code>.
     </footer>
   `;
 
@@ -482,14 +499,14 @@ function renderGroups() {
     const vis = all.filter(u => shown.includes(u));
     if (!vis.length) return "";
     const [dynasty, region] = gk.split("|");
-    const yunsi = all.find(u => u.kind === "運司");
-    const nBranch = all.filter(u => u.kind === "分司").length;
+    const root = all.find(u => u.kind === C.root_kind);
+    const nBranch = all.filter(u => u.kind === C.branch_kind).length;
     const nBlocked = all.filter(u => !u.emitted).length;
     return `<details class="group" open>
       <summary>
         <span class="dyn ${DYN[dynasty].cls}">${H(dynasty)}</span>
-        <span class="gname">${H(yunsi ? yunsi.name : region)}</span>
-        <span class="gmeta">${nBranch} 分司${nBlocked ? ` · <span style="color:var(--blocker)">${nBlocked} excluded</span>` : ""}
+        <span class="gname">${H(root ? root.name : region)}</span>
+        <span class="gmeta">${nBranch} ${H(C.branch_kind)}${nBlocked ? ` · <span style="color:var(--blocker)">${nBlocked} excluded</span>` : ""}
           · ${vis.length === all.length ? `${all.length} shown` : `${vis.length} of ${all.length} shown`}</span>
       </summary>
       ${vis.map(unitHTML).join("")}
@@ -504,10 +521,10 @@ function unitHTML(u) {
   const types = o.type_labels.map(t =>
     `<span class="mono">${H(t.id)}</span> ${t.chn ? han(t.chn) : '<span class="null">unknown node</span>'}`).join("<br>");
 
-  return `<div class="unit ${d.cls} ${u.kind === "分司" ? "branch" : ""} ${u.emitted ? "" : "is-blocked"}">
+  return `<div class="unit ${d.cls} ${u.kind === C.branch_kind ? "branch" : ""} ${u.emitted ? "" : "is-blocked"}">
     <div class="uhead">
       <span class="uname">${H(u.name)}</span>
-      ${u.kind === "分司" ? `<span class="ushort">${han(u.name_short)}</span>` : ""}
+      ${u.kind === C.branch_kind ? `<span class="ushort">${han(u.name_short)}</span>` : ""}
       <span class="utrans">${H(o.translation)}</span>
       ${u.emitted ? "" : `<span class="tag blocked">excluded · not emitted</span>`}
       ${u.succession ? `<span class="tag">succeeded by ${H(u.succession.successor)} @${H(u.succession.year)}</span>` : ""}
@@ -516,7 +533,10 @@ function unitHTML(u) {
     ${!u.emitted ? `<div class="ufind"><div class="blocker">${H(u.blocked_reason || "Carries a blocker finding — see below.")}</div></div>` : `
     <div class="ubody">
       <div class="pane a">
-        <h4>Track A · OFFICE_CODES <span class="pill" style="background:var(--warn-soft);color:var(--warn)">dropped 2026-09-11</span></h4>
+        <h4>${H(C.page.office_pane_heading || "OFFICE_CODES")}${
+          C.page.office_pane_pill
+            ? ` <span class="pill" style="background:var(--warn-soft);color:var(--warn)">${
+                H(C.page.office_pane_pill)}</span>` : ""}</h4>
         <dl class="kv">
           <dt>name</dt><dd>${han(o.name)}</dd>
           <dt>name_alt</dt><dd>${nul(o.name_alt, han)}</dd>
@@ -525,9 +545,10 @@ function unitHTML(u) {
           <dt>dynasty_code</dt><dd class="mono">${H(o.dynasty_code)}</dd>
           <dt>type_ids</dt><dd>${types}
             ${o.type_ids.length > 1 ? `<span class="decision">decision · the generic
-              bureau node plus this region's named node; a 分司 gets the generic one
-              only</span>` : ""}</dd>
-          <dt>source_id</dt><dd class="mono">${H(o.source_id)} <span class="null">未詳</span></dd>
+              bureau node plus this region's named node; a ${H(C.branch_kind)} gets
+              the generic one only</span>` : ""}</dd>
+          <dt>source_id</dt><dd class="mono">${H(o.source_id)}${
+            o.source_id === 0 ? ' <span class="null">未詳</span>' : ""}</dd>
           <dt>notes</dt><dd style="white-space:pre-line">${H(o.notes)}</dd>
         </dl>
         ${!(u.existing_office_matches || []).length ? `<div class="belongs" style="color:var(--ink-3)">
@@ -547,10 +568,10 @@ function unitHTML(u) {
           <dt>c_name</dt><dd class="mono">${H(u.romanization)}
             <span class="decision">decision · two-token alternative
               <span class="mono">${H(u.romanization_alt)}</span></span></dd>
-          <dt>c_admin_type</dt><dd class="mono">${u.kind === "運司" ? "Duzhuanyunyanshisi" : "Fensi"}</dd>
+          <dt>c_admin_type</dt><dd class="mono">${H(u.admin_type)}</dd>
           <dt>c_admin_cat_code</dt><dd class="mono">${DATA.admin_cat_mode === "zero"
             ? '0 <span class="null">[Unknown]</span>'
-            : "&lt;new:" + (u.kind === "運司" ? "Duzhuanyunyanshisi" : "Fensi") + "&gt;"}</dd>
+            : "&lt;new:" + H(u.admin_type) + "&gt;"}</dd>
         </dl>
         ${u.addresses.map(a => seatHTML(a, d, u)).join("")}
       </div>
@@ -595,12 +616,19 @@ function seatHTML(a, d, u) {
   </div>`;
 }
 
-/* Inlined payload (published copy) > the generator's output directory > a sibling
-   file > the file picker. The page lives in tools/salt-admin/ and the data lands in
-   data/salt-admin/, so the relative path out of the repo is tried first; a copy
+/* Inlined payload (published copy) > ?case=<name> > a sibling file > the file
+   picker. Which case to show is a query parameter rather than a constant, because
+   the page is generic and the case is not. The page lives at review/dataset.html, so
+   ?case=salt-administration resolves to ../data/build/salt-administration/
+   dataset.json. review/<case-id>/index.html is the link that supplies it. A copy
    sitting next to the page also works. Opened from file://, every fetch fails
    silently in some browsers, which is what the picker is for. */
-const SOURCES = ["../../data/salt-admin/dataset.json", "dataset.json"];
+const CASE_PARAM = new URLSearchParams(location.search).get("case");
+const SOURCES = [
+  ...(CASE_PARAM
+      ? [`../data/build/${encodeURIComponent(CASE_PARAM)}/dataset.json`] : []),
+  "dataset.json",
+];
 
 function tryLoad(i) {
   if (i >= SOURCES.length) return Promise.reject(new Error("no dataset"));
@@ -613,19 +641,24 @@ function tryLoad(i) {
    throw from boot() and report it as "file not found", which is exactly what it did
    the first time this page was run. Only a LOAD failure reaches showPicker; a
    rendering bug stays an unhandled rejection and shows up in the console. */
-if (window.SALT_DATASET) {
-  boot(window.SALT_DATASET);
+if (window.CBDB_DATASET) {
+  boot(window.CBDB_DATASET);
 } else {
   tryLoad(0).then(boot, () => {
     document.getElementById("app").innerHTML = `
       <div class="empty">
-        <p>Could not read <span class="mono">data/salt-admin/dataset.json</span>.
+        <p>Could not read a <span class="mono">dataset.json</span>${
+          CASE_PARAM ? ` for case <span class="mono">${H(CASE_PARAM)}</span>` : ""}.
         Opening this page straight from <span class="mono">file://</span> blocks the
         read in most browsers — either serve the repo root
-        (<span class="mono">python -m http.server</span>) or pick the file below.</p>
+        (<span class="mono">python -m http.server</span>, then
+        <span class="mono">…/review/dataset.html?case=&lt;name&gt;</span>) or pick
+        the file
+        below.</p>
         <p>Generate it with<br>
-        <span class="mono">python tools/salt-admin/build_dataset.py --xlsx &lt;path&gt;</span><br>
-        then pick <span class="mono">data/salt-admin/dataset.json</span>:</p>
+        <span class="mono">python -m cbdb_agent.places_and_offices.build_dataset --case
+        &lt;name&gt; --xlsx &lt;path&gt;</span><br>
+        then pick <span class="mono">data/build/&lt;name&gt;/dataset.json</span>:</p>
         <p><input type="file" accept="application/json" id="pick"></p>
       </div>`;
     document.getElementById("pick").addEventListener("change", e => {

@@ -19,7 +19,7 @@ looked like the submittable half. Both turned out the other way round within a d
    `ADDR_BELONGS_DATA`, `ADMIN_CAT_CODES` and `OFFICE_TYPE_TREE` for writing in
    commits `ea6badb0`, `ba2d0ec6` and `76ac0a47` — all dated 2026-09-10, pulled
    here on 2026-09-11 — explicitly in answer to §4 of this document.
-   All 55 address rows, 57 edges and 2 category codes now go through the ordinary
+   All 57 address rows, 59 edges and 2 category codes now go through the ordinary
    staged, previewed, audit-logged path. `track_b_load.sql` is superseded and kept
    only as a record of what was proposed.
 
@@ -302,7 +302,7 @@ So the work splits in two, and the split is not negotiable from inside this repo
 
 ### Track A — offices, through the API — **dropped 2026-09-11**
 
-> Not submitted, and `tools/salt-admin/emit_staging.py` now refuses to run. A separate
+> Not submitted, and `cases/salt-administration/emit_offices.py` now refuses to run. A separate
 > import had already entered the salt-administration *post titles*, and Ning Hao's list
 > names the *institutions* (see the header). The section is kept because the objection
 > it records against itself — that an office row makes a person appointable to a bureau
@@ -483,8 +483,8 @@ replaced it.
 
 Same dataset, emitted as `ADDR_CODES` + `ADDR_BELONGS_DATA` rows — since 2026-09-11 as
 an ordinary staging batch, submitted by this client through `/api/v2/create` like
-anything else. `tools/salt-admin/emit_addresses.py` writes it; `validate --staging`
-previews it; `tools/review/index.html` is where it is read.
+anything else. `src/cbdb_agent/places_and_offices/emit_addresses.py` writes it; `validate --staging`
+previews it; `review/batch.html` is where it is read.
 
 > Superseded wording, 2026-09-11. This section used to open "as a reviewed deliverable
 > (not submittable)" and to say the rows go to "somebody with database-side access".
@@ -500,7 +500,7 @@ Two things the API path adds that the export did not have:
   why it is one batch and not two phases: `ADDR_BELONGS_DATA` is the irreversible half,
   so the reviewer has to see the real document.
 * **A duplicate check runs before anything is emitted.** Neither table has a unique key
-  on its names and neither can be deleted, so `tools/salt-admin/live_state.py` asks
+  on its names and neither can be deleted, so `src/cbdb_agent/places_and_offices/live_state.py` asks
   `/api/select/search/addr` for every place name and composes snapshot-plus-operations
   for every category, and the generator refuses to emit if either answer is "already
   there" or "cannot tell". The result is written into the batch, so the evidence is
@@ -581,7 +581,7 @@ Two consequences worth stating rather than discovering:
   display-order convention, not a constraint — but nobody should be surprised by it.
 * **Duplicates.** The table has no unique key on its name columns and no read
   endpoint, so sending a category twice makes two rows and splits every `ADDR_CODES`
-  reference between them, permanently. `tools/salt-admin/live_state.py` composes the
+  reference between them, permanently. `src/cbdb_agent/places_and_offices/live_state.py` composes the
   answer from the snapshot baseline plus every `operations` row since, the generator
   refuses to emit if the answer is "already there" or "more than one", and the
   evidence is written into the batch for the signer to see. There is no flag to skip
@@ -787,7 +787,7 @@ The rules, in order:
    sort while reporting it as "CBDB holds duplicate rows". It goes to rule 4a instead.
 
 4a. **A recorded decision**, for candidates that survive rule 3 and are not
-   duplicates. `salt_data.SEAT_DECISIONS` maps `(dynasty, seat)` to a chosen
+   duplicates. `cases/salt-administration/case.py`'s `SEAT_DECISIONS` maps `(dynasty, seat)` to a chosen
    `c_addr_id` **and the reasoning**, and using one raises a `warning`, so the choice
    is visible in the review page rather than buried. Today it holds exactly one
    entry, 清 天津 → `7242`. A candidate set with no box and no decision is rule 5.
@@ -824,7 +824,7 @@ says nothing about the 分司 at all. Counted from the sheet:
 
 Computed over the rows actually emitted (so the two blocked units of §9 are excluded),
 clustering points that agree within 1e-5 degrees (~1 m) — nine groups, 26 of
-the 55 address rows:
+the address rows:
 
 | group | rows | point | which |
 |---|---|---|---|
@@ -896,21 +896,44 @@ identity.
 
 ## 6. Pipeline and files
 
-One directory for everything this task adds to the repo, named the way `tools/review/`
-already is:
+Nothing this task adds is named after this task, except the one directory that holds
+its content. The split is between *how* a place-name import works and *what* one job
+says — the first is reusable and the second is not, and mixing them is what the first
+version of this got wrong by calling the whole thing `tools/salt-admin/`. The rule is
+AGENTS.md, "Where code goes"; this section is its worked example.
 
 ```
-tools/salt-admin/
-    salt_data.py        the curated decisions: source note, dynasty windows, seat
-                        variants and boxes, blocked units, successions, romanization
-    build_dataset.py    xlsx -> data/salt-admin/dataset.json  (+ the CSV/SQL
-                        byproducts below), and every finding the arithmetic raised
-    index.html          the whole-dataset review page, reads dataset.json
-    emit_addresses.py   dataset.json -> data/staging/<batch>/proposal.yaml   <- ships
-    live_state.py       the pre-create duplicate checks emit_addresses depends on
-    emit_staging.py     Track A. Dropped 2026-09-11; main() refuses to run.
+src/cbdb_agent/places_and_offices/    the tool - the same for every job
+    build_dataset.py    CLI: --case <name> --xlsx <path>
+    units.py        RawUnit: the one row shape every rule below works against
+    intervals.py    the (d)->(a)->(b)->(c) interval arithmetic of section 5.1
+    seats.py        resolve a 治所 against the snapshot, under SeatRules
+    geo.py          same_point, on an absolute tolerance
+    romanize.py     characters -> syllables (the char map; extend as names arrive)
+    findings.py     Finding/Findings: the record of every judgement made
+    snapshot.py     read-only queries against the CBDB SQLite snapshot
+    pipeline.py     build(case, xlsx, snap) - the whole method in one place
+    csv_export.py   the two CSV byproducts
+    live_state.py   the pre-create duplicate checks emit_addresses depends on
+    emit_addresses.py  dataset.json -> data/staging/<batch>/proposal.yaml <- ships
 
-data/salt-admin/          (gitignored - generated, and derived from unpublished data)
+review/                            the pages a human opens
+    dataset.html        the whole-dataset review page, reads dataset.json
+                        (?case=<name>; no Python, no case knowledge)
+    batch.html          the batch review page, reads review.json
+    salt-administration/index.html   which of the two to open for this job
+
+cases/salt-administration/         the content - this job and no other
+    case.py         source note and id, the two dynasty windows, seat variants and
+                    boxes, the settled seat decisions, blocked units, successions,
+                    the naming/translation conventions, the character readings, the
+                    review page's prose, and the reader for this spreadsheet
+    track_b_sql.py  the superseded transactional loader, reached through the
+                    optional `extra_exports` hook
+    emit_offices.py Track A. Dropped 2026-09-11; main() refuses to run.
+    README.md       what the job was, its batch ids, and what actually landed
+
+data/build/<case id>/     (gitignored - generated, from unpublished source data)
     dataset.json          the single source every consumer reads
     addresses.csv         byproduct: the ADDR_CODES rows, for reading in a spreadsheet
     addr_belongs.csv      byproduct: the edges, likewise
@@ -918,21 +941,37 @@ data/salt-admin/          (gitignored - generated, and derived from unpublished 
                           kept as a record of what was proposed, not a route to take.
 
 data/staging/<batch-id>/  (gitignored)
-    proposal.yaml         the 114 proposals - 2 categories, 55 places, 57 edges
+    proposal.yaml         the 118 proposals - 2 categories, 57 places, 59 edges
     preview.md            written by `validate --staging`
-    review.json           likewise; what tools/review/index.html reads
+    review.json           likewise; what review/batch.html reads
+```
+
+What belongs on each side of that line is decided by one question: would a second job
+— another scholar's county-level gazetteer, say — need it unchanged? Dynasty windows,
+seat spellings, blocked rows and naming conventions all change with the job, so they
+are content. The interval rules, the seat resolver and the duplicate checks do not, so
+they are the tool. `pipeline.build()`'s docstring lists the names a case owes the
+tool, and `build_dataset.load_case` refuses a case that is missing any of them.
+
+Two run lines, both from the repo root:
+
+```
+python -m cbdb_agent.places_and_offices.build_dataset \
+    --case salt-administration --xlsx <path to the xlsx>
+python -m cbdb_agent.places_and_offices.emit_addresses \
+    --case salt-administration --batch-id <batch id>
 ```
 
 The path, end to end:
 
 ```
-xlsx ──▶ build_dataset.py ──▶ dataset.json ──▶ emit_addresses.py ──▶ proposal.yaml
+xlsx ──▶ build_dataset ──▶ dataset.json ──▶ emit_addresses ──▶ proposal.yaml
                                    │                   │
                                    │                   └─ live_state.py: duplicate
                                    │                      checks, refuses on doubt
-                                   └─ tools/salt-admin/index.html (the data review)
+                                   └─ review/dataset.html (the data review)
 
-proposal.yaml ──▶ validate --staging ──▶ review.json ──▶ tools/review/index.html
+proposal.yaml ──▶ validate --staging ──▶ review.json ──▶ review/batch.html
                                               │                   │
                                          preview.md          decisions.json
                                                                   │
@@ -942,22 +981,22 @@ proposal.yaml ──▶ validate --staging ──▶ review.json ──▶ tools
                                                    cbdb:regenerate-addresses-table)
 ```
 
-The CSVs and the SQL are byproducts now, not the deliverable. `build_dataset.py`
-still writes them because they are the easiest way to read 55 rows at a glance in a
+The CSVs and the SQL are byproducts now, not the deliverable. `build_dataset`
+still writes them because they are the easiest way to read 57 rows at a glance in a
 spreadsheet; nothing downstream consumes them.
 
 ## 7. Review surface
 
 Two pages, because they answer two different questions.
 
-**`tools/salt-admin/index.html`** — the *data* review, reading `dataset.json`. Every
+**`review/dataset.html`** — the *data* review, reading `dataset.json`. Every
 unit, both readings side by side, each seat period drawn against its dynasty so a gap
 or an overlap reads without arithmetic, plus every finding the generator raised and
 the coincident-point check. This is where you decide whether the *dataset* is right.
 The office panels are kept in it, labelled as dropped, because the two readings side
 by side is what the original request was about.
 
-**`tools/review/index.html`** — the *batch* review, reading `review.json`. The 114
+**`review/batch.html`** — the *batch* review, reading `review.json`. The 114
 proposals exactly as they will be sent, grouped by table (`person_id: 0` means a row
 belongs to no person, so grouping by person is meaningless here), each with its
 resolved code labels, its source quote, and a notice on the rows that are global
@@ -1013,19 +1052,32 @@ unchanged, so here it is against the current shape:
 
 ## 9. Open items for the user / Ning Hao
 
-**Blocking — the generator refuses to emit these units until they are answered.**
-Answering one means re-running `build_dataset.py` and `emit_addresses.py`, which
-produces a new `proposal.yaml` — and every proposal id in it is derived from the
-source row, so the ids are the same while the values may not be. Decisions do not
-carry over: each proposal ships a content hash, and both the review page and
-`apply-review` refuse a decision made about a different version of a row (§7). Expect
-to re-review the rows that changed.
+**Blocking — none left as of 2026-09-18.** Both entries were 清代 兩浙, and both are
+settled. The case's `BLOCKED` table is now empty, so all **51 units** are emitted (55 → **57**
+`ADDR_CODES` rows, 57 → **59** edges) and the generator raises no blocker findings.
 
-1. §3.1 清代 寧紹分司. Two defects, not one: the reversed `1793 → 1685`, *and* the
-   1644–1793 first seat that outlives the merge recorded on 寧紹溫台分司. Blocks the
-   whole unit.
-2. §3.10 清代 嘉松分司: the 備註 says 松江 was merged into **嘉興分司**, but the seat
-   moves to **杭州府**. One of the two is wrong.
+1. ~~§3.1 清代 寧紹分司: the reversed `1793 → 1685`, *and* the 1644–1793 first seat
+   outliving the merge recorded on 寧紹溫台分司.~~ **Settled.** The sheet now reads
+   `紹興府 1644–1685` and nothing else — the row was corrected upstream, matching the
+   corrected 清代兩浙 table the user supplied on 2026-09-18. 1793 was a slip for 1685
+   in both cells, and the second seat was never this unit's: `杭州府 1685–1911`
+   belongs to 寧紹溫台分司, which is what the 備註 says. 1685 closes to **1684** under
+   §5.1(a), so the unit now behaves exactly like 溫台分司 beside it.
+2. ~~§3.10 清代 嘉松分司: the 備註 says 松江 was merged into **嘉興分司**, but the seat
+   moves to **杭州府**.~~ **Settled — not a defect.** The user, 2026-09-18:
+   「并入嘉興分司之后，确实搬到杭州府」. Both cells were right and the seat move is
+   real; only the block was wrong. No data changed.
+
+   Worth keeping in view: this one cost nothing to hold back, because holding it back
+   was free — the unit was simply absent. The alternative, guessing which of the two
+   cells to honour, would have written an `ADDR_BELONGS_DATA` key that can never be
+   corrected. That asymmetry is the whole argument for the case's `BLOCKED` table.
+
+**How a future answer propagates.** Re-run `build_dataset.py` then
+`emit_addresses.py` with a **new** `--batch-id`. Every proposal id is derived from
+the source row, so ids are stable while values may not be; decisions do not carry
+over — each proposal ships a content hash, and both the review page and
+`apply-review` refuse a decision made about a different version of a row (§7).
 
 **Non-blocking — a default is applied and flagged:**
 
@@ -1033,8 +1085,25 @@ to re-review the rows that changed.
    §5.1(c), the unit's own 起/止 wins. Confirm the 起/止 are the right ones.
 4. §3.8 萬曆三十八年 = 1610 but both citing rows give 1611. Default: the structured
    columns win.
-5. §3.11 清代 長蘆's 天津府 from 1677 is an anachronism (天津衛 until 1725). Default:
-   resolve as the sheet writes it; `700000 天津 (Wei) 1644–1910` is the alternative.
+5. ~~§3.11 清代 長蘆's 天津府 from 1677 is an anachronism (天津衛 until 1725).~~
+   **Settled by the user, 2026-09-18: `7242 天津（縣，1644–1911）`.** The two
+   candidates sit on the same point but are different rows — a county and a guard —
+   and the guard was defensible for the 17th-century 分司 rows, since 天津 was
+   天津衛 until 1725. Taking the county keeps all three 清代 長蘆 rows on one
+   consistent series. The resolution now reads:
+
+   | unit | sheet cell | → | span |
+   |---|---|---|---|
+   | 明代 青州分司 | 天津衛 | `4448` | 1611–1643 |
+   | 清代 長蘆都轉運鹽使司 | 天津府 | `7241` | 1677–1911 |
+   | 清代 青州分司 | 天津 | `7242` | 1644–1780 |
+   | 清代 天津分司 | 天津 | `7242` | 1781–1911 |
+
+   `SD.SEAT_DECISIONS` carries a `confirmed` date for this, and the finding it
+   raises dropped from **warning** to note as a result. That distinction is
+   load-bearing: a recorded pick between two real places stays a warning while it
+   is only the generator's, so the next ambiguous seat cannot look as settled as
+   the one that was actually asked about.
 6. The four-token `c_name` romanization (§5) — this design's judgement, shown
    per-row in the review page. (The Qing `type_ids` choice was the other half of this
    item; it belonged to the dropped Track A office payloads and no longer arises.)
@@ -1061,6 +1130,6 @@ to re-review the rows that changed.
    asked for: upstream added `ADDR_CODES`, `ADDR_BELONGS_DATA`, `ADMIN_CAT_CODES` and
    `OFFICE_TYPE_TREE` to the code-table write registry rather than building an
    aggregate. Track B is ordinary, audit-logged, rate-limited API work now. The one
-   thing an aggregate would still have given is transactional grouping: the 114 rows
+   thing an aggregate would still have given is transactional grouping: the 118 rows
    go one request at a time, so a mid-batch failure leaves the earlier rows written.
    `batch_runner` isolates and reports that, but it cannot undo it.

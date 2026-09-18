@@ -2093,3 +2093,179 @@ in `skills/cbdb-data-entry/SKILL.md` still instructing an agent never to fill in
 **634 tests** (656 before the removal; 35 tested the gate, and some of what they
 covered came back as tests of the thing itself).
 
+
+## The salt-address batch goes to production, and stops at proposal 12 — 2026-09-18
+
+The first real use of the `ADDR_CODES` / `ADDR_BELONGS_DATA` create paths. 118
+proposals, reviewed, gate opened, submitted. It stopped at the twelfth on
+`SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING]'))`.
+
+That is an **indeterminate write** — the request left, the response did not arrive,
+and the row may or may not exist. Rule 11's handling is what ran: not retried, whole
+batch stopped, `results.json` recording 11 `success`, 1 `failed`, 106
+`skipped_auth_aborted`. The gate was re-locked immediately afterwards.
+
+### Reconciliation
+
+Two routes, because the twelfth row is in a table with no read endpoint and the
+create response never arrived:
+
+* `GET /api/v2/operations` — exactly 11 operations, ids 365606–365616. Two
+  `ADMIN_CAT_CODES` (**226** 都轉運鹽使司, **227** 分司) and nine `ADDR_CODES`
+  (**702716–702724**, all 明代 兩淮/兩浙). Zero `ADDR_BELONGS_DATA`.
+* `GET /api/select/search/addr` for the twelfth (`長蘆都轉運鹽使司`) — zero exact
+  matches.
+
+So the 12th did **not** land: a direct write is one transaction, and no `operations`
+row means no row. **11 of 118 in production, 107 outstanding.**
+
+### What this exposed
+
+There is no resume path. `emit_addresses.main` refuses to emit when
+`live_state.find_existing_addresses` reports any name already present — correct as a
+default, and exactly what now blocks a re-run. Resuming has to be driven from
+`data/processed/2026-09-18-salt-addresses/results.json`'s `proposal_id → pk` map
+rather than by name matching. Not built yet; recorded in
+`cases/salt-administration/README.md` under "What is still owed", along with the
+`php artisan cbdb:regenerate-addresses-table` that has to follow the last row.
+
+---
+
+## Milestone: one home for tools, one for cases — 2026-09-18
+
+`tools/salt-admin/` was named after a job. The user's objection was that the working
+method is a *data type*, not a data set: "未来我们再做 salt admin 的概率几乎为 0，而我们
+做地址、官名、地址官名归属的工作可能是经常的". Four rounds of restructuring followed,
+and three of them were wrong in ways worth recording.
+
+### The three wrong shapes, and why each failed
+
+1. **`tools/places-and-offices/` with `method/` and `datasets/` inside.** Abstracted
+   the *name* but added a second home for abstract code beside `src/`, and minted a
+   new project-named output directory (`data/salt-administration/`) that was not even
+   gitignored — it would have committed generated data derived from an unpublished
+   spreadsheet. Caught by the user: "之前似乎都没有建立这么多以项目命名的文件夹".
+2. **Everything into `src/cbdb_agent/`, including the two HTML pages.** Right for the
+   Python, wrong for the pages: `src/` is what the project installs and imports, and
+   a page a human opens from disk is not that.
+3. **`tools/` kept for the pages alone.** Rejected on the name: "tools 和 src 的语义
+   非常容易让人误解". A directory whose only definition is "not Python" is a
+   classification by file extension, not by role.
+
+### What it settled on
+
+Four homes, written into AGENTS.md as **"Where code goes — tools vs cases"** with
+eight binding rules:
+
+| | |
+|---|---|
+| `src/cbdb_agent/` | the abstract program — the only Python installed and imported |
+| `review/` | the pages a human opens: `batch.html`, `dataset.html`, and one thin `review/<case-id>/index.html` per case |
+| `cases/<case-id>/` | one job's content, plus code no other job would want |
+| `data/**` | generated and submitted artifacts, gitignored |
+
+The generator became `src/cbdb_agent/places_and_offices/` (13 modules) and
+`cases/salt-administration/` (`case.py`, `track_b_sql.py`, `emit_offices.py`,
+`README.md`). Output moved from a project-named directory to `data/build/<case-id>/`,
+under a generic ignore rule.
+
+`cases/` also became the index of everything this repo has ever been used for. The
+seven batches to date existed only under gitignored `data/staging|processed/`, so a
+fresh clone showed no trace of any of it; five `cases/<id>/README.md` now record what
+each job was, which batch ids it produced and what actually landed. Facts only — the
+repo is public, and rule 5 says what may not go in one.
+
+### The boundary is a contract, not a convention
+
+`build_dataset.load_case` is the only place a case is loaded: by path, because
+`cases/salt-administration` is not an importable module name and renaming the thing a
+human reads to suit the import system is the wrong way round. It checks the case
+exposes all 29 names in `REQUIRED_CASE_NAMES`, checks `CASE_NAME` matches the
+directory, refuses a name that is not in `cases/`, and leaves nothing in `sys.modules`
+if the case raises. Below it, everything takes the case as an argument.
+
+### What the review passes found — and the finding that mattered
+
+Two review agents. The second one asked the question the split existed to answer:
+**can the tool build a case that is not this one?** It wrote a synthetic Ming
+gazetteer (`ROOT_KIND=府`, `BRANCH_KIND=縣`) and ran it through `pipeline.build`.
+Every unit came back blocked, with a diagnostic telling the operator to go and find
+a **運司**.
+
+`_attach_belongs` — the function that decides the entire hierarchy — tested
+`u["kind"] == "運司"` directly, in seven places, while `case.ROOT_KIND` was used
+correctly seven times elsewhere in the same file. The root row never matched, so it
+got no dynasty edge and was orphaned; every branch was then orphaned because its
+parent was excluded. A cascade from one string literal, and replacing it changed
+nothing for the salt case, so no existing test noticed.
+
+Four more of the same class:
+
+* `sql_export.write_track_b` raised `KeyError '府'`; `write_track_b_sql` **succeeded**
+  and produced a load script whose repeat-load abort guard and all six verification
+  SELECTs matched zero of their own rows. Silently wrong is worse than the KeyError.
+  Resolved by splitting them: the CSV writer stayed as `csv_export.py` and reads the
+  vocabulary out of the dataset; the superseded SQL loader is
+  `cases/salt-administration/track_b_sql.py`, reached through a new optional
+  `extra_exports` hook.
+* `romanize.PINYIN` was the tool's table but only this job's characters, so any other
+  case died on its first name. The joining rules stayed; the table moved to the case,
+  and both functions now take it as an argument.
+* `pipeline` wrote `ADDR_CODES {case.UNKNOWN_ADDR_ID}` into a `c_notes` while the id
+  actually on the row came from `SEAT_RULES` — two sources for one value in one row of
+  global reference data. Now read off the row. `seats.resolve_seat` likewise stopped
+  hard-coding `未詳`; the sentinel spelling is `SeatRules.unknown_seat_name`.
+* `load_case`'s `required` list was missing `UNKNOWN_ADDR_ID`, found by walking the
+  package's AST for `case.<attr>`. A case without it passed the check and died with an
+  `AttributeError` after every unit was assembled — the exact failure the function's
+  docstring claims to prevent.
+
+### The tests were the other half of the finding
+
+Five mutations left the suite green: deleting `load_case`'s check entirely; dropping
+the `case` block from `build()`'s return (which blanks the review page and Python
+never notices); removing `H()` from the page's `md()`, turning case prose into stored
+XSS; and both hard-codings above. `review/dataset.html` — 656 lines with a `SCHEMA`
+constant, a new escaping function and a new data contract — had **no test at all**,
+while its sibling had 19.
+
+Added: `tests/test_second_case.py` (the gazetteer, as a permanent test — the tool is
+now driven by two cases, not one), `tests/test_dataset_page.py` (14 Playwright tests,
+including that a case cannot inject HTML), and a `load_case` contract group whose AST
+check fails if a new `case.<attr>` read is not declared.
+
+One real defect came out of writing them: `md()`'s `{stat}` substitution used
+`k in stats`, so `{constructor}` rendered `function Object() { [native code] }`.
+`Object.hasOwn` now.
+
+### codex — one SERIOUS, and it was the multi-file case
+
+A case may be more than one file: `cases/salt-administration/case.py` does
+`import track_b_sql`, which works because `load_case` puts the case's directory on
+`sys.path` while it executes. codex found that the *module* was then left in
+`sys.modules` under that bare, un-namespaced name — so a second case with its own
+`track_b_sql.py` would silently bind to the first one's, and write the wrong export.
+It demonstrated the mirror image too: a `track_b_sql` already in `sys.modules` from
+anywhere else shadows the case's own file.
+
+Both sides of the window are closed now. Names matching a `*.py` in the case
+directory are stashed and restored around the load, and modules the load added from
+that directory are dropped once `case.py` holds its references. Two tests, one per
+direction, and removing the cleanup kills them.
+
+Its three MINOR findings: the optional `extra_exports` hook was asserted by absence
+rather than driven through `build_dataset.main()`, so making it mandatory left the
+suite green (two tests added, one each way); AGENTS.md said "four homes" over a
+five-row table; and rule 3's "never imported" read as a claim about `sys.modules`
+rather than about the import graph — `load_case` does register what it executes,
+under a `cbdb_case_<name>` key, and the rule now says so.
+
+**677 tests**, up from 634.
+
+### Also corrected
+
+The 2026-09-18 batch's own numbers had drifted through the docs — 55 address rows and
+114 proposals where the current dataset has 57 and 118 — including in `docs/11`'s
+supersession header, which is the first thing that document tells you to read. Row
+counts for one job were also sitting in three of the tool's module docstrings; they
+are gone rather than corrected.

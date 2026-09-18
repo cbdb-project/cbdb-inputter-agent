@@ -12,7 +12,8 @@ own `API.md`, digested — read this before any endpoint/field question**),
 architecture and milestones), `docs/03-extraction-review-workflow.md` (source-text →
 staging-file → human-review pipeline), `docs/04-field-whitelists.md` (per-resource
 allowed fields), `docs/05-testing-strategy.md` (mocking/fixture conventions),
-`docs/08-review-interface-design.md` (the offline review page and the
+`cases/README.md` (the index of every job this repo has been used for, and what
+landed), `docs/08-review-interface-design.md` (the offline review page and the
 `review.json` → `decisions.json` → `apply-review` round trip),
 `docs/11-salt-administration-design.md` (the Ming/Qing salt import, and the worked
 example of **place names and hierarchy edges going in through the API** — read before
@@ -331,7 +332,7 @@ user how old the build is instead of quietly trusting it.
       the same `ADMIN_CAT_CODES` name twice makes two rows, and every address that
       then picks one splits across two synonyms. Check before creating — and check
       **twice**, because the two moments are different: once where the batch is
-      generated (`tools/salt-admin/live_state.py` shows the composition that answers
+      generated (`src/cbdb_agent/places_and_offices/live_state.py` shows the composition that answers
       this for a table with no read endpoint, without letting the snapshot decide on
       its own), and again immediately before the request
       (`preflight.assert_addr_create_is_not_a_duplicate`, called from
@@ -360,6 +361,78 @@ user how old the build is instead of quietly trusting it.
     postings write through the aggregate's whitelist and label it global reference
     data; and `http_client` refuses `offices`/`office-load` on the wire outright,
     because which table they hit is registry order it cannot see.
+
+## Where code goes — tools vs cases
+
+Two kinds of thing live in this repo and they must not be mixed. The test is one
+question: **would the next job need this unchanged?**
+
+Five directories, and every file belongs to exactly one of them. Three hold code and
+prose a human writes; `data/` holds only what a program generated.
+
+| Directory | Holds | Named after |
+|---|---|---|
+| `src/cbdb_agent/` | **the abstract program**: the only Python the project installs and imports. Every line operates on a *kind* of CBDB data — a resource, a code table, an endpoint — and knows nothing about any particular contribution. | the API surface it operates on (`mutation_api`, `staging`, `preflight`, `places_and_offices`) |
+| `review/` | **the pages a human opens**, and nothing else: two shared HTML review surfaces plus one thin `review/<case-id>/index.html` per case saying which to open. No Python, no data. | what it is for (`batch.html`, `dataset.html`) |
+| `cases/<case-id>/` | **one job's content**: the facts of this contribution, plus code that will never be reused. | the subject (`salt-administration`, `yuan-18-persons`) |
+| `docs/` | the reasoning and the accumulated experience. `docs/02-review-log.md` is append-only. | the topic |
+| `data/staging/<batch-id>/`, `data/processed/<batch-id>/`, `data/build/<case-id>/` | generated and submitted artifacts. **Gitignored** — they hold unpublished source material and the content of real writes. | the batch or case id |
+
+Rules that follow, all of them binding:
+
+1. **Never name anything under `src/` or `review/` after a job** — except a
+   `review/<case-id>/` entry point, which is a pointer and holds no logic.
+   `tools/salt-admin/` existed until 2026-09-18 and was wrong three times over: named
+   after one job, holding that job's facts, and sitting in a directory whose name
+   (`tools/`) said nothing `src/` did not already say. The next place-name import
+   would have had to live inside it or copy it. **Do not add a top-level directory
+   for code**; the three that hold code and prose are `src/`, `review/` and
+   `cases/`, and they are enough.
+2. **Never put a job's facts in `src/`.** Dynasty windows, a source's own spellings,
+   which rows a human has ruled on, translation and romanization conventions, the
+   reader for one spreadsheet's column layout, the prose on a review page — all of it
+   is content and belongs in `cases/<case-id>/case.py`. If a module in `src/` tests
+   for a string that only this job uses, that string is content that leaked.
+3. **A case is loaded at the edge and passed inward.** No module in `src/` may
+   name a case in an `import` statement — `cases/` is not a package and is not
+   installed. (`load_case` does register the module it executes, under a
+   `cbdb_case_<name>` key; "never imported" is about the import *graph*, not about
+   `sys.modules`.) Exactly one function loads one:
+   `places_and_offices.build_dataset.load_case` reads `cases/<name>/case.py` by path,
+   checks it exposes every name the tool will touch, checks its `CASE_NAME` matches
+   its directory, and fails by naming what is missing. Everything below that entry
+   point receives the case as an argument (`pipeline.build(case, ...)`), so the tool
+   runs against any case and can be tested against a synthetic one.
+4. **Most cases have no code at all.** Four of the five cases so far are a
+   hand-written `proposal.yaml` run through the CLI. A `case.py` is for when a job
+   genuinely needs to generate its batch; do not invent one to have somewhere to put
+   things.
+5. **Every case gets a `cases/<case-id>/README.md`**, whether or not it has code:
+   what the job was, which batch ids it produced, what actually landed, and which
+   `docs/` section carries the reasoning. The batches are gitignored, so without this
+   a fresh clone shows no trace that the work happened. **This repo is public**, so:
+   facts only, no verbatim source text, no reproduced `c_notes` content, and no
+   unpublished personal data — a historical figure's name and `c_personid` are
+   already public in CBDB and are fine, an unpublished reader's genealogy is not.
+   A claim that cannot be checked against a batch file, `docs/02` or git history gets
+   logged in `docs/02` first or left out. `cases/README.md` is the index and its
+   table must stay in step, and so must `review/<case-id>/index.html`.
+6. **Case ids are the subject, batch ids carry the date.** A case spans batches
+   (`salt-administration` produced `2026-09-10-salt-administration` and
+   `2026-09-18-salt-addresses`), so dating the case directory would date it wrong.
+   Name a batch `<date>-<case-id>[-<what changed>]` so the mapping reads without
+   opening the case README. The same id names the case's directory, its
+   `review/<case-id>/`, its `data/build/<case-id>/`, and its `CASE_NAME`.
+7. **A case-only dependency goes in `requirements-dev.txt`, never `pyproject.toml`.**
+   `openpyxl` is there because one case reads a spreadsheet; submitting data has
+   never needed it. `pyproject.toml` carries only what the abstract program needs to
+   run.
+8. **Tests of the tool live in `tests/` and may use a real case — say which.**
+   `tests/test_places_and_offices*.py` load `cases/salt-administration/case.py` at
+   module scope, which binds the tool's suite to one job's content. Accepted for now
+   because it is also the only end-to-end coverage there is, but it means deleting a
+   case breaks the tool's tests. When a second case arrives, give the tool a
+   synthetic one to test against instead.
 
 ## Review workflow for changes in this repo
 

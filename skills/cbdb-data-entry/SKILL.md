@@ -125,7 +125,7 @@ does when invoked this way:
      as the primary way to review a batch instead of raw YAML.
    - **For a batch of more than a few proposals, point the user at the review page
      instead of `preview.md`**: `validate --staging` also writes a `review.json`
-     next to the YAML, and `tools/review/index.html` (open it directly, no server)
+     next to the YAML, and `review/batch.html` (open it directly, no server)
      loads that file. It gives a dense per-person table, filters, and — the reason
      it exists — **bulk resolution of repeated conflicts**: identical questions
      asked across many rows (an index-year convention, a reign-year check) collapse

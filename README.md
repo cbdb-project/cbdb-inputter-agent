@@ -31,17 +31,27 @@ Start here:
   chain), using CBDB's weekly SQLite build, plus the hard line between what that
   snapshot may and may not be used for.
 - [`docs/08-review-interface-design.md`](docs/08-review-interface-design.md) — the
-  offline review page (`tools/review/index.html`) that loads a batch's `review.json`,
+  offline review page (`review/batch.html`) that loads a batch's `review.json`,
   lets a human resolve conflicts and edit values in bulk, and exports a
   `decisions.json` that `apply-review` writes back into the YAML.
 - [`docs/06-staging-preview-design.md`](docs/06-staging-preview-design.md) — the
   generated, read-only `preview.md` (with a best-effort live old-vs-new diff)
   that `validate --staging` refreshes on every run, for reviewing a batch without
   reading raw YAML.
+- [`docs/10-office-aggregate-design.md`](docs/10-office-aggregate-design.md) and
+  [`docs/11-salt-administration-design.md`](docs/11-salt-administration-design.md) —
+  the two **global reference data** designs: writing `OFFICE_CODES` through the
+  `office` aggregate, and place names plus hierarchy edges through `ADDR_CODES` /
+  `ADDR_BELONGS_DATA`. Read the second before touching either place-name table.
+- [`cases/README.md`](cases/README.md) — the index of every job this repo has been
+  used for, what each one produced and what actually landed. The batches themselves
+  are gitignored, so this is the only record a clone carries.
 - [`docs/02-review-log.md`](docs/02-review-log.md) — the review-agent + `codex`
   findings and fixes for every milestone, including the two real bugs Milestone 7's
   live validation caught that no amount of mocked testing would have found.
-- [`AGENTS.md`](AGENTS.md) — hard rules for any agent (or human) working in this repo.
+- [`AGENTS.md`](AGENTS.md) — hard rules for any agent (or human) working in this
+  repo, including **"Where code goes"**: what belongs in `src/`, `review/`, `cases/`
+  and `data/`, and why a directory is never named after a job.
 
 ## Setup
 
@@ -66,9 +76,25 @@ semantics) and both entry paths — already-structured JSON records, or an
 unstructured-source-text extraction workflow that drafts a bulk-editable YAML
 staging file for human review before anything is submitted.
 
+## Layout
+
+```
+src/cbdb_agent/      the abstract program - the only Python installed and imported
+review/              the pages a human opens, plus one entry point per case
+cases/<case-id>/      one job's content; most jobs have only a README
+docs/                the reasoning, and docs/02-review-log.md as the append-only log
+data/                generated and submitted artifacts (gitignored)
+```
+
+AGENTS.md's "Where code goes" is the binding version of this, with the rule that
+nothing under `src/` or `review/` may be named after a job.
+
 ## Status
 
-All 8 planned milestones are implemented, tested (167 unit tests, no real network
+All 8 planned milestones are implemented and tested (677 tests, no real network
 calls), and — for the core write path — validated live against a real local
-`cbdb-online-main-server` instance. See `docs/01-implementation-plan.md` for the
-milestone list and `docs/02-review-log.md` for what each one's review passes found.
+`cbdb-online-main-server` instance. Work has continued past them into global
+reference data: the `office` aggregate (docs/10) and the place-name tables
+(docs/11). See `docs/01-implementation-plan.md` for the milestone list,
+`docs/02-review-log.md` for what each one's review passes found, and
+`cases/README.md` for what has actually been submitted.
