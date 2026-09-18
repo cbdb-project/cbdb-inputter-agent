@@ -2439,3 +2439,68 @@ address creates carry `c_admin_cat_code` 226/227 directly. 21 of the 59 edges ca
 a literal `c_belongs_to`, of which **7** were rewritten by the resume (702716 ×3,
 702720 ×4) — the other 14 were always literal, being the dynasty roots 4329 and
 6756. Validates with no issues. Not submitted.
+
+---
+
+## The salt-administration import completes — 2026-09-19
+
+All 118 rows are in production: 2 `ADMIN_CAT_CODES` (226 都轉運鹽使司, 227 分司),
+**57 `ADDR_CODES`** and **59 `ADDR_BELONGS_DATA`** edges. Verified afterwards
+against the live system rather than against our own results files: all 57 places
+answer to their own name *and period* through `GET /api/select/search/addr`
+(57/57), and `GET /api/v2/operations` carries exactly 59 `ADDR_BELONGS_DATA` and
+2 `ADMIN_CAT_CODES` entries.
+
+It took five runs — 11, 68, 15, 4, 20 — because four were cut short mid-flight.
+`resume` handled every one: each interruption left exactly one indeterminate row,
+each was reconciled against `operations` **with a control** (rows of the same kind
+from the same run that ARE visible in the window, so "absent" is evidence rather
+than a failed query), and none of the four turned out to have landed. No row was
+created twice, and the final count matches the design exactly.
+
+The period fix earned itself immediately: run 2 created 48 addresses, **10 of them
+under names that already existed** because run 1 had created the other seat period
+of the same place. Under the old name-only guard every one of those would have
+been refused.
+
+So did the review agent's S1. It had objected that `assigned_pk` demanded a
+server-assigned id from every landed proposal, and that twelve of eighteen
+resources — `addr_belongs_data` among them — have none, so the tool could not
+resume its own output. Run 2 landed 20 edges. Without that fix, run 3 would not
+have been generatable at all.
+
+### The network
+
+Runs stopped at proposals 12, 69, 16 and 4, each with a dropped TCP connection and
+no HTTP status: `SSLEOFError` twice, then `ProxyError('Unable to connect to
+proxy')`, then `WinError 10061`.
+
+A controlled comparison settled the first half of it — 120 identical requests at
+1/s to one endpoint, back to back:
+
+```
+through the local proxy :  37/120, first failure at request 38
+direct                  : 120/120, no failures
+direct + authenticated  :  60/60,  no failures
+```
+
+So `http_client._direct_session()` now sets `trust_env = False`, which is what it
+takes: clearing `HTTP_PROXY`/`HTTPS_PROXY` is not enough on Windows, because
+`requests` falls back to the WinINET registry through
+`urllib.request.getproxies()`. AGENTS.md rule 2 carries it.
+
+**The honest part: that is not the whole cause, and the rule says so.** The fourth
+run was verifiably direct — `trust_env=False`, DNS resolving to the real public
+address, no TUN adapter — and still failed after four writes. Reads are reliable
+direct; sustained *writes* are not, in any configuration tried. It is not
+application-level throttling: that answers `429` (rules 9 and 10) and no run has
+ever seen one. Unresolved, and recorded as unresolved.
+
+What made it survivable is rule 11 behaving exactly as designed. A dropped
+connection on a mutating request is never retried and stops the batch; one
+uncertain row, named in `results.json`, is the recoverable outcome. Four times
+over, that is what happened, and four times the row turned out not to exist.
+
+**Still owed:** `php artisan cbdb:regenerate-addresses-table` on the server.
+`ADDRESSES` is a derived cache; until it is rebuilt these 57 places are invisible
+to posting autofill and dynasty homonym disambiguation.
