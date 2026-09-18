@@ -401,25 +401,92 @@ def find_addr_name_matches(client: HttpClient, name: str) -> list[dict[str, Any]
     `/api/select/search/addr` is a substring search, so the filter matters: a hit on
     泰州 while creating 兩淮都轉運鹽使司泰州分司 is a different place, and reporting
     it as a duplicate would train the operator to click past this check.
+
+    **A partial page is not an answer.** If the response says there are more rows
+    than it returned, this raises instead of filtering what arrived. It used to
+    read page one and treat it as the whole survey, which was survivable while a
+    name meant one row - but `ADDR_CODES` holds one row per period, so a name can
+    have several and the one that actually clashes is now materially more likely
+    to be on a later page. The failure mode of getting that wrong is `allow`, on
+    a table with no delete. `live_state.find_existing_addresses` has refused a
+    partial answer since it was written; these two decide the same question and
+    have to decide it the same way.
     """
     body = client.get("/api/select/search/addr", params={"q": name}, public=True)
     rows = body.get("data") if isinstance(body, dict) else body
     if rows is None and isinstance(body, dict):
         rows = body.get("raw")
-    return [r for r in (rows or [])
+    rows = list(rows or [])
+    pagination = body.get("pagination") if isinstance(body, dict) else None
+    total = pagination.get("total") if isinstance(pagination, dict) else None
+    if isinstance(total, int) and total > len(rows):
+        raise PreflightError(
+            f"/api/select/search/addr returned {len(rows)} of {total} rows for "
+            f"{name!r}. An exact match could be on a later page, and 'no "
+            f"duplicate' is not a conclusion this check may reach from a partial "
+            f"answer - ADDR_CODES has no delete path.")
+    return [r for r in rows
             if isinstance(r, dict)
             and str(r.get("c_name_chn", "")).strip() == str(name).strip()]
 
 
-def assert_addr_create_is_not_a_duplicate(client: HttpClient, *, name: str) -> None:
-    """Raise unless no live ADDR_CODES row already carries exactly this name.
+def periods_overlap(a_first, a_last, b_first, b_last) -> bool:
+    """Do two inclusive year ranges intersect? Unknown ends count as overlapping.
 
-    `src/cbdb_agent/places_and_offices/emit_addresses.py` runs the same check when it generates a
-    batch, but that is minutes or days before the batch is submitted, and the
-    review in between is the whole point of the delay. Anything entered by anyone
-    else in that window would otherwise become a permanent duplicate: `ADDR_CODES`
-    has no unique key on `c_name_chn` and no delete path, and the duplicate then
-    collects `ADDR_BELONGS_DATA` edges whose keys can never be changed.
+    Conservative on purpose. A live row with a NULL or 0 year cannot be shown NOT
+    to overlap, and this decides whether an irreversible create goes ahead, so an
+    unanswerable comparison has to come back "yes, it might".
+    """
+    def year(value):
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, int):
+            return value or None            # 0 is the "unknown" sentinel
+        text = str(value).strip()
+        if not text or not text.lstrip("-").isdigit():
+            return None
+        # `or None` applies to the string form too: "0" is the same unknown
+        # sentinel as 0, and reading it as year zero would make an unknown period
+        # look disjoint from every real one.
+        return int(text) or None
+
+    a1, a2, b1, b2 = year(a_first), year(a_last), year(b_first), year(b_last)
+    if None in (a1, a2, b1, b2):
+        return True
+    if a1 > a2 or b1 > b2:
+        # A range that ends before it starts is not a period, it is a broken row.
+        # `1700-1600` against `1650-1660` would otherwise come back "no overlap"
+        # in both argument orders, and the guard would wave through a create it
+        # has no basis to judge. Same rule as an unknown year: cannot be shown not
+        # to overlap, so it does.
+        return True
+    return a1 <= b2 and b1 <= a2
+
+
+def assert_addr_create_is_not_a_duplicate(
+    client: HttpClient, *, name: str, first_year=None, last_year=None
+) -> None:
+    """Raise unless no live ADDR_CODES row carries this name over these years.
+
+    `emit_addresses.py` runs the same check when it generates a batch, but that is
+    minutes or days before the batch is submitted, and the review in between is the
+    whole point of the delay. Anything entered by anyone else in that window would
+    otherwise become a permanent duplicate: `ADDR_CODES` has no unique key on
+    `c_name_chn` and no delete path, and the duplicate then collects
+    `ADDR_BELONGS_DATA` edges whose keys can never be changed.
+
+    **The period is part of the identity, and leaving it out made this guard refuse
+    correct data.** `ADDR_CODES` holds one row per name per period (docs/11 §5.1):
+    兩浙都轉運鹽使司松江分司 is three rows - 1368-1643, 1644-1663, 1664-1703 - with
+    three different seats and three different coordinates. Matching on the name
+    alone meant that as soon as a unit's first period landed, its second was
+    refused as a duplicate of it. 25 of one batch's 57 rows were unreachable that
+    way, and an SSL failure at proposal 12 was what hid it.
+
+    So: same name and an **overlapping** period is a duplicate and raises. Same
+    name and a disjoint period is the intended shape and is allowed - the caller
+    gets no say, because "allow it anyway" is exactly the flag that would let a
+    real duplicate through.
 
     Live, not from the snapshot - AGENTS.md names "does this row already exist" as
     exactly what the weekly build may never answer.
@@ -430,12 +497,18 @@ def assert_addr_create_is_not_a_duplicate(client: HttpClient, *, name: str) -> N
             "c_name_chn - and models.py requires one on create anyway"
         )
     matches = find_addr_name_matches(client, name)
-    if matches:
-        ids = ", ".join(str(m.get("c_addr_id")) for m in matches)
+    clashing = [m for m in matches
+                if periods_overlap(first_year, last_year,
+                                   m.get("c_firstyear"), m.get("c_lastyear"))]
+    if clashing:
+        rows = "; ".join(
+            f"{m.get('c_addr_id')} ({m.get('c_firstyear')}-{m.get('c_lastyear')})"
+            for m in clashing)
         raise PreflightError(
-            f"a place named {name!r} already exists in ADDR_CODES ({ids}). The "
-            "server does not dedupe and offers no delete, so submitting this would "
-            "add a second permanent row and split the hierarchy between the two. "
-            "If the intent is to amend the existing place, send an `update` against "
-            "that c_addr_id instead."
+            f"a place named {name!r} already covers {first_year}-{last_year} in "
+            f"ADDR_CODES [{rows}]. The server does not dedupe and offers no "
+            "delete, so submitting this would add a second permanent row for the "
+            "same place over the same years and split the hierarchy between the "
+            "two. If the intent is to amend the existing place, send an `update` "
+            "against that c_addr_id instead."
         )

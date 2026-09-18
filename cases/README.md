@@ -28,7 +28,7 @@ See AGENTS.md, "Where code goes", for the rule that separates a case from a tool
 | [yuan-18-persons](yuan-18-persons/) | 1 (2026-08-18) | not submitted — 41 unresolved conflicts | `docs/03` |
 | [yuan-text-codes](yuan-text-codes/) | 1 (2026-08-18) | not submitted — reported as a finding (rule 12) | `docs/02` §*text-codes support* |
 | [tang-zhi-mou-zhou-shi](tang-zhi-mou-zhou-shi/) | 1 (2026-09-04) | submitted — production, verified | `docs/10` |
-| [salt-administration](salt-administration/) | 2 (2026-09-10, 2026-09-18) | partly submitted — 11 of 118 rows | `docs/11` |
+| [salt-administration](salt-administration/) | 3 (2026-09-10, 2026-09-18, 2026-09-19) | partly submitted — 11 of 118 rows; 107 staged | `docs/11` |
 
 ## Writing a case README
 

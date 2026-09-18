@@ -38,6 +38,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# One overlap rule for both duplicate checks - the generation-time one here and
+# the submit-time one in preflight. Two copies is how they come to disagree.
+from cbdb_agent.preflight import periods_overlap
+
 
 class LiveStateError(RuntimeError):
     """The check could not be completed, so no answer may be given.
@@ -340,8 +344,15 @@ def _code_from(op: dict, data: dict) -> Any | None:
 # --- ADDR_CODES: the table that CAN be read live ------------------------------
 
 
-def find_existing_addresses(client, names: list[str]) -> dict[str, list[dict]]:
-    """`c_name_chn` -> the live rows that already carry exactly that name.
+def find_existing_addresses(client, wanted) -> dict[str, list[dict]]:
+    """`c_name_chn` -> the live rows that would collide with what we want to create.
+
+    `wanted` is either a list of names, or - and this is the form to use -
+    `{name: [(first_year, last_year), ...]}`. With periods, a live row counts only
+    if it OVERLAPS one of them: `ADDR_CODES` holds one row per place per period
+    (docs/11 section 5.1), so 兩浙都轉運鹽使司松江分司 is legitimately three rows
+    with disjoint years. Given a bare list of names the periods are unknown, so
+    any match counts - the conservative reading, and the reason to pass periods.
 
     `ADDR_CODES` has no unique key on `c_name_chn` either, and no delete path, so
     a second run - or anyone else having entered 兩淮都轉運鹽使司 in the meantime -
@@ -354,8 +365,12 @@ def find_existing_addresses(client, names: list[str]) -> dict[str, list[dict]]:
     so a hit on 泰州 when we are about to create 兩淮都轉運鹽使司泰州分司 is not a
     duplicate, and reporting it as one would train the operator to click past this.
     """
+    periods = ({name: [(None, None)] for name in wanted}
+               if not isinstance(wanted, dict) else
+               {name: list(spans) or [(None, None)]
+                for name, spans in wanted.items()})
     out: dict[str, list[dict]] = {}
-    for name in sorted(set(names)):
+    for name in sorted(periods):
         try:
             body = client.get("/api/select/search/addr", params={"q": name},
                               public=True)
@@ -375,8 +390,12 @@ def find_existing_addresses(client, names: list[str]) -> dict[str, list[dict]]:
                 f"is not a conclusion this check may reach from a partial answer")
         matches = [r for r in rows
                    if str(r.get("c_name_chn", "")).strip() == name]
-        if matches:
-            out[name] = matches
+        clashing = [r for r in matches
+                    if any(periods_overlap(first, last,
+                                           r.get("c_firstyear"), r.get("c_lastyear"))
+                           for first, last in periods[name])]
+        if clashing:
+            out[name] = clashing
     return out
 
 

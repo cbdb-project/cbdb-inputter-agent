@@ -386,13 +386,19 @@ def main(argv=None) -> int:
     from cbdb_agent import snapshot as snapmod
 
     units = [u for u in dataset["units"] if u["emitted"]]
-    names = sorted({u["name"] for u in units})
+    # Name AND period: a unit with two seat periods is two rows with one name, and
+    # checking the name alone would call the second a duplicate of the first.
+    wanted: dict[str, list[tuple]] = {}
+    for u in units:
+        for a in u["addresses"]:
+            wanted.setdefault(u["name"], []).append((a["first"], a["last"]))
+    names = sorted(wanted)
     present: dict[str, int | None] = {}
 
     client = HttpClient(load_config(), AuditLog(Path("logs")))
     checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
-        existing = live_state.find_existing_addresses(client, names)
+        existing = live_state.find_existing_addresses(client, wanted)
         cats_evidence: dict = {}
         if admin_cat == "new":
             snap = snapmod.ensure_snapshot(allow_download=False)
@@ -435,10 +441,12 @@ def main(argv=None) -> int:
         return 1
 
     if existing:
-        print("error: these place names already exist in ADDR_CODES:",
-              file=sys.stderr)
+        print("error: these places already exist in ADDR_CODES over the years this "
+              "batch would create them for:", file=sys.stderr)
         for name, rows in sorted(existing.items()):
-            ids = ", ".join(str(r.get("c_addr_id")) for r in rows)
+            ids = ", ".join(
+                f"{r.get('c_addr_id')} ({r.get('c_firstyear')}-{r.get('c_lastyear')})"
+                for r in rows)
             print(f"  {name}: {ids}", file=sys.stderr)
         print("Creating them again would make permanent duplicates that nothing "
               "can delete, and split the hierarchy between them. Decide per name "

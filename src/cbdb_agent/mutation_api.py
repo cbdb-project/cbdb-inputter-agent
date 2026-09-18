@@ -146,8 +146,14 @@ class MutationApi:
                     dynasty_code=merged_changes.get("dynasty_code"),
                 )
             elif spec.key == "addr_codes":
+                # The years go with the name: this table holds one row per place
+                # per period, so the name alone cannot say whether a live row is
+                # the same place at the same time.
                 assert_addr_create_is_not_a_duplicate(
-                    self._client, name=merged_changes.get("c_name_chn")
+                    self._client,
+                    name=merged_changes.get("c_name_chn"),
+                    first_year=merged_changes.get("c_firstyear"),
+                    last_year=merged_changes.get("c_lastyear"),
                 )
 
         envelope = _build_envelope(
