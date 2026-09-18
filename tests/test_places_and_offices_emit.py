@@ -679,6 +679,49 @@ class TestLiveStateAddresses:
         assert live_state.find_existing_addresses(
             client, ["兩淮都轉運鹽使司泰州分司"]) == {}
 
+    def test_a_disjoint_period_of_the_same_place_is_not_a_duplicate(self):
+        """The row the generator could not emit before this fix.
+
+        ADDR_CODES holds one row per place per period (docs/11 section 5.1), so a
+        unit with two seat periods is two rows with one name. Checking the name
+        alone called the second a duplicate of the first, which is what made 25 of
+        the 2026-09-18 batch's 57 rows unreachable.
+        """
+        client = _Client([], addr={"兩浙都轉運鹽使司松江分司": [
+            {"c_addr_id": 702721, "c_name_chn": "兩浙都轉運鹽使司松江分司",
+             "c_firstyear": 1368, "c_lastyear": 1643}]})
+        assert live_state.find_existing_addresses(
+            client, {"兩浙都轉運鹽使司松江分司": [(1644, 1663)]}) == {}
+
+    def test_an_overlapping_period_of_the_same_place_is_a_duplicate(self):
+        """Kills relaxing this to "the name no longer matters"."""
+        client = _Client([], addr={"兩浙都轉運鹽使司松江分司": [
+            {"c_addr_id": 702721, "c_name_chn": "兩浙都轉運鹽使司松江分司",
+             "c_firstyear": 1644, "c_lastyear": 1703}]})
+        found = live_state.find_existing_addresses(
+            client, {"兩浙都轉運鹽使司松江分司": [(1664, 1703)]})
+        assert [r["c_addr_id"] for r in found["兩浙都轉運鹽使司松江分司"]] == [702721]
+
+    def test_one_clashing_period_out_of_several_is_enough(self):
+        """A unit's periods are checked together: the second may be clean while the
+        third collides, and reporting nothing because the first was fine would let
+        the collision through."""
+        client = _Client([], addr={"兩淮都轉運鹽使司": [
+            {"c_addr_id": 702716, "c_name_chn": "兩淮都轉運鹽使司",
+             "c_firstyear": 1700, "c_lastyear": 1911}]})
+        found = live_state.find_existing_addresses(
+            client, {"兩淮都轉運鹽使司": [(1368, 1643), (1644, 1911)]})
+        assert list(found) == ["兩淮都轉運鹽使司"]
+
+    def test_a_bare_list_of_names_still_blocks_on_any_match(self):
+        """Periods unknown means the check cannot say "different period", so it
+        must keep its old, conservative answer."""
+        client = _Client([], addr={"兩淮都轉運鹽使司": [
+            {"c_addr_id": 90001, "c_name_chn": "兩淮都轉運鹽使司",
+             "c_firstyear": 1368, "c_lastyear": 1643}]})
+        assert list(live_state.find_existing_addresses(
+            client, ["兩淮都轉運鹽使司"])) == ["兩淮都轉運鹽使司"]
+
     def test_a_failed_lookup_raises_rather_than_reporting_absent(self):
         class _Broken:
             def get(self, *a, **kw):
@@ -838,3 +881,55 @@ def _stub_client_and_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(snapmod, "ensure_snapshot", lambda **kw: db)
     monkeypatch.setattr(cfgmod, "load_config", lambda *a, **kw: None)
     monkeypatch.setattr(hc, "HttpClient", lambda *a, **kw: object())
+
+
+class TestTheGeneratorAsksWithPeriods:
+    """The generator's own duplicate check had no test of its REAL call site -
+    `tests/test_places_and_offices_emit.py` monkeypatches
+    `find_existing_addresses` away - so reverting it to name-only, or checking
+    only each unit's first period, left the whole suite green."""
+
+    def _capture(self, monkeypatch, tmp_path):
+        seen = {}
+
+        def fake(client, wanted):
+            seen["wanted"] = wanted
+            return {}
+
+        monkeypatch.setattr(live_state, "find_existing_addresses", fake)
+        monkeypatch.setattr(
+            live_state, "resolve_admin_categories",
+            lambda c, s, w: {"ambiguous": {},
+                             "found": {py: None for py in w},
+                             "as_of": "2026-08-15", "age_days": 27,
+                             "baseline_rows": 211, "baseline_names": 207,
+                             "operations_seen": 0, "changes": []})
+        _stub_client_and_snapshot(monkeypatch, tmp_path)
+        return seen
+
+    def test_it_passes_a_mapping_of_name_to_periods_not_bare_names(
+            self, monkeypatch, tmp_path, dataset_file, capsys):
+        """Kills `find_existing_addresses(client, list(wanted))`, which is the
+        exact bug this whole change set exists to fix."""
+        seen = self._capture(monkeypatch, tmp_path)
+        assert TestCliRefusals()._run(dataset_file, tmp_path) == 0
+        wanted = seen.get("wanted")
+        assert isinstance(wanted, dict), \
+            "a bare list of names is the name-only check coming back"
+        assert all(isinstance(v, list) and v and isinstance(v[0], tuple)
+                   for v in wanted.values())
+
+    def test_every_period_of_a_unit_is_offered_not_just_the_first(
+            self, monkeypatch, tmp_path, capsys):
+        """Kills `for a in u["addresses"][:1]`: a unit's later seat periods would
+        never be checked against anything live."""
+        seen = self._capture(monkeypatch, tmp_path)
+        unit = _unit("u1")
+        unit["addresses"] = [_addr("u1@1368", first=1368, last=1643),
+                             _addr("u1@1644", first=1644, last=1911)]
+        path = tmp_path / "dataset.json"
+        path.write_text(json.dumps(_dataset([unit]), ensure_ascii=False),
+                        encoding="utf-8")
+        assert TestCliRefusals()._run(path, tmp_path) == 0
+        periods = next(iter(seen["wanted"].values()))
+        assert sorted(periods) == [(1368, 1643), (1644, 1911)]

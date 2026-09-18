@@ -91,7 +91,7 @@ nothing under `src/` or `review/` may be named after a job.
 
 ## Status
 
-All 8 planned milestones are implemented and tested (677 tests, no real network
+All 8 planned milestones are implemented and tested (758 tests, no real network
 calls), and — for the core write path — validated live against a real local
 `cbdb-online-main-server` instance. Work has continued past them into global
 reference data: the `office` aggregate (docs/10) and the place-name tables

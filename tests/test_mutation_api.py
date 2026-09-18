@@ -530,3 +530,99 @@ def test_an_envelope_carries_no_meta_when_there_is_no_comment(tmp_path):
     )
     sent = json.loads(responses.calls[0].request.body)
     assert "meta" not in sent
+
+
+# --- ADDR_CODES: the create-time duplicate guard, and its wiring -------------
+#
+# The guard itself is tested in tests/test_preflight.py. What is tested here is
+# that `create()` hands it the PERIOD as well as the name. Removing those two
+# arguments left every other test green, and the effect in production is that the
+# second seat period of every place is refused as a duplicate of the first - which
+# is what silently made 25 of one batch's 57 rows unreachable.
+
+
+def _addr_changes(first, last):
+    return {
+        "c_name_chn": "\u5169\u6d59\u90fd\u8f49\u904b\u9e7d\u4f7f\u53f8\u677e\u6c5f\u5206\u53f8",
+        "c_name": "Liangzhe Duzhuanyunyanshisi Songjiang Fensi",
+        "c_admin_type": "Fensi", "c_admin_cat_code": 227,
+        "c_firstyear": first, "c_lastyear": last,
+    }
+
+
+@responses.activate
+def test_an_addr_create_passes_its_period_to_the_duplicate_guard(tmp_path):
+    """The live row is the SAME place's earlier seat period, so the create must go
+    through. Kills dropping `first_year`/`last_year` from the guard call."""
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{
+            "c_addr_id": 702721,
+            "c_name_chn": "\u5169\u6d59\u90fd\u8f49\u904b\u9e7d\u4f7f\u53f8\u677e\u6c5f\u5206\u53f8",
+            "c_firstyear": 1368, "c_lastyear": 1643}]},
+        status=200,
+    )
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        json={"ok": True, "result": {"pk": {"c_addr_id": 702800}}}, status=200,
+    )
+    api = make_api(tmp_path)
+    result = api.create("addr_codes", person_id=0, target_pk={},
+                        changes=_addr_changes(1644, 1663))
+    assert result["result"]["pk"]["c_addr_id"] == 702800
+
+
+@responses.activate
+def test_an_addr_create_over_the_same_period_is_still_stopped(tmp_path):
+    """The other direction, through the same wiring: an overlapping live row must
+    stop the create before anything is sent."""
+    from cbdb_agent.preflight import PreflightError
+
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{
+            "c_addr_id": 702721,
+            "c_name_chn": "\u5169\u6d59\u90fd\u8f49\u904b\u9e7d\u4f7f\u53f8\u677e\u6c5f\u5206\u53f8",
+            "c_firstyear": 1644, "c_lastyear": 1703}]},
+        status=200,
+    )
+    api = make_api(tmp_path)
+    with pytest.raises(PreflightError, match="1644-1703"):
+        api.create("addr_codes", person_id=0, target_pk={},
+                   changes=_addr_changes(1664, 1703))
+    assert not [c for c in responses.calls if c.request.method == "POST"], \
+        "nothing may be sent once the guard has refused"
+
+
+@responses.activate
+def test_the_period_arguments_reach_the_guard_the_right_way_round(tmp_path):
+    """Kills swapping `first_year` and `last_year` in the call.
+
+    With them swapped the guard computes `periods_overlap(1643, 1368, ...)` - an
+    inverted range - and the two existing wiring tests happen to give the same
+    answer either way. A genuinely overlapping live row would be waved through.
+    Here the create's period is 1368-1643 and the live row is 1600-1700: they
+    overlap, so this must raise whichever way the guard is reached, and under the
+    swap the inverted-range rule is what it hits instead.
+    """
+    from cbdb_agent.preflight import PreflightError
+
+    seen = {}
+
+    def capture(client, *, name, first_year=None, last_year=None):
+        seen.update(name=name, first_year=first_year, last_year=last_year)
+        raise PreflightError("stop here")
+
+    import cbdb_agent.mutation_api as ma
+    original = ma.assert_addr_create_is_not_a_duplicate
+    ma.assert_addr_create_is_not_a_duplicate = capture
+    try:
+        api = make_api(tmp_path)
+        with pytest.raises(PreflightError):
+            api.create("addr_codes", person_id=0, target_pk={},
+                       changes=_addr_changes(1368, 1643))
+    finally:
+        ma.assert_addr_create_is_not_a_duplicate = original
+
+    assert seen["first_year"] == 1368, "first_year must be c_firstyear"
+    assert seen["last_year"] == 1643, "last_year must be c_lastyear"

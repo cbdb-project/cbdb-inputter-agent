@@ -2269,3 +2269,173 @@ The 2026-09-18 batch's own numbers had drifted through the docs — 55 address r
 supersession header, which is the first thing that document tells you to read. Row
 counts for one job were also sitting in three of the tool's module docstrings; they
 are gone rather than corrected.
+
+---
+
+## The interrupted batch gets a resume path — and the defect it was hiding — 2026-09-19
+
+`python -m cbdb_agent resume --processed data/processed/<batch-id> --batch-id <new>`
+writes the part of an interrupted batch that was never sent. It is a **generator,
+not an editor**: what comes out is an ordinary staging file that goes through
+`validate --staging`, the review page and `submit --staging` like any other. Opening
+the old `proposal.yaml` and deleting the rows that landed would be a hand-edit of a
+file whose whole purpose is to be reviewed and audited, and it would lose the record
+of which ids the first attempt assigned.
+
+It works from the **submitted** `proposal.yaml` and its `results.json`, never from
+what the generator would produce today. Those two are the record of what was sent
+and what happened; a regeneration could differ from both and would resume with
+different content under the same proposal ids.
+
+Three things it has to get right, each of them a way to write permanent data:
+
+* **What landed is dropped, and its id remembered.** Re-sending a create makes a
+  second row in a table with no dedupe and no delete.
+* **References to what landed become real ids.** An edge carrying
+  `{"ref": "addr-ming-兩淮-泰州分司-1368"}` cannot reference a proposal that is no
+  longer in the batch; unresolved, it goes on the wire as a literal dict, which PHP
+  casts to 1 — a plausible wrong parent inside a key that can never be changed.
+* **The indeterminate row is not guessed.** `plan()` refuses until a human has
+  reconciled it and written down the evidence. `reconciliation.json` requires an
+  `evidence` string that nothing reads: the person asserting that a row did or did
+  not land, about a table that cannot be corrected, should have to say what that
+  rests on.
+
+### The defect the SSL error was hiding
+
+While checking whether the resumed batch would pass the duplicate guards, 10 of its
+48 address creates turned out to collide with names that already exist — **because
+we created them**. That led to the real problem.
+
+`ADDR_CODES` holds **one row per place per period** (docs/11 §5.1).
+兩浙都轉運鹽使司松江分司 is three rows — 1368–1643, 1644–1663, 1664–1703 — with three
+different seats and three different coordinates. Both duplicate checks matched on
+`c_name_chn` alone:
+
+* `preflight.assert_addr_create_is_not_a_duplicate`, which runs immediately before
+  each create;
+* `live_state.find_existing_addresses`, which runs when the batch is generated.
+
+So the moment a unit's first seat period landed, its second was refused as a
+duplicate of it. **25 of the batch's 57 address rows were unreachable.** The
+2026-09-18 run stopped at proposal 12 on an SSL error. The first collision would
+have been proposal 14 (`addr-ming-長蘆-滄州分司-1611`, whose name proposal 13
+creates), so the network failure is the only reason this was not discovered two
+rows later as a mid-batch abort.
+
+A duplicate is the same name over an **overlapping** period. Both checks now take
+the years, share one `periods_overlap` rule (in `preflight`, imported by
+`live_state`, because two copies is how they come to disagree), and treat an
+unreadable year as overlapping — the conservative answer, since this decides an
+irreversible create.
+
+### Tests
+
+The fix was invisible to the suite: **677 tests passed both before and after it**,
+which is to say nothing covered the period semantics at all. 16 tests now execute
+`periods_overlap`, and every mutation of the resume logic and of the guard listed
+below is killed by a named test.
+One of those five is worth recording separately — removing the two arguments that
+pass the period from `mutation_api.create()` to the guard left every other test
+green, so the fix was live in `preflight` and dead in production; `tests/
+test_mutation_api.py` now drives that wiring from both sides.
+
+### codex — three SERIOUS, and one of them found a lie in my own constants
+
+* **`periods_overlap` accepted an inverted range as non-overlapping.**
+  `(1700, 1600)` against `(1650, 1660)` returned `False` in either argument order,
+  so the guard waved through a create it had no basis to judge. A range that ends
+  before it starts is a broken row, not a period; it now counts as overlapping,
+  the same as an unreadable year.
+* **`load_reconciliation` did not require `landed` to be a JSON boolean.** The
+  string `"false"` is truthy, so one pair of quotes in a hand-written file meant
+  the opposite of what it said — and what it would have meant is dropping a row
+  that was never written.
+* **Unknown statuses and duplicate `results.json` ids were accepted**, both
+  falling through to "outstanding" and being re-sent. For these tables that is a
+  permanent duplicate. Both now stop the resume.
+
+The third led somewhere worse. `batch_runner.ProposalResult` declares exactly four
+statuses — `success`, `failed`, `skipped_dependency_failed`, `skipped_auth_aborted`
+— and `resume.NOT_ATTEMPTED` had been written as
+`("skipped_auth_aborted", "skipped", "pending", "dry_run")`: three invented, and
+the real `skipped_dependency_failed` missing. Such a proposal still came out
+"outstanding", which is correct, but by falling off the end of the list rather than
+by being classified. The constants are now cross-checked against that `Literal` by
+a test, so the two cannot drift.
+
+codex also found `cmd_resume` had **no test at all**. Seven now cover it: each
+clobber refusal independently, the indeterminate refusal writing nothing, the
+default reconciliation path, and a failed write leaving no partial file. It also
+pointed out that `assigned_pk` preferring `result.pk` over `result.row`, and
+`_rewrite_refs` recursing into lists, were both correct and both untested — so both
+mutations survived. Covered now.
+
+### A hole in my own mutation testing
+
+Writing those CLI tests immediately caught something unrelated and worse: a test
+failed against source that was demonstrably correct. `inspect.getsource` showed
+`out_dir / "proposal.yaml"`; the running code was using `out_dir / "never-matches"`
+from a mutation that had been restored.
+
+`"proposal.yaml"` and `"never-matches"` are both 13 characters. Python invalidates
+a `.pyc` on the source's (mtime, size), `shutil.move` restored the backup's older
+mtime, and with the size unchanged the interpreter kept executing bytecode compiled
+from the mutated file. Every mutation run since then had been reporting on a mix of
+old and new code.
+
+All twelve mutations were re-run with `PYTHONDONTWRITEBYTECODE=1` and every
+`__pycache__` removed first; all twelve are killed, and the suite is green from a
+cold start. **Any future mutation testing in this repo runs with bytecode writing
+off** — a same-length edit is otherwise invisible to the import system, which is
+exactly the kind of edit a careful mutation is.
+
+**758 tests**, up from 677.
+
+### A second review pass, and the finding that mattered most
+
+A review agent then asked what happens if the *resumed* batch is itself
+interrupted — and found the tool unusable for exactly that. `assigned_pk` was
+called for every landed proposal, and it refuses unless the resource has exactly
+one server-assigned key field. Twelve of the eighteen resources have none:
+`addr_belongs_data`, whose four-column key IS the row, and the eleven person
+resources among them. So an interruption after any of the 59 edges landed left no
+way forward, on the very batch this module had just produced. Resolving an id is
+now best-effort and only *required* where something outstanding references it.
+
+Four more, all of them "silently wrong" rather than "refuses":
+
+* `preflight.find_addr_name_matches` read page one and called it the survey, while
+  `live_state.find_existing_addresses` had refused a partial answer since it was
+  written. Survivable when a name meant one row; now that a name means two or
+  three and the guard filters them by period, the row that actually clashes is
+  materially more likely to be on a later page — and this side's failure mode is
+  *allow*, on a table with no delete.
+* Two proposals sharing an id, one of them landed, dropped both: the row that was
+  never sent vanished without a word.
+* `batch_notes` was not carried onto the resumed batch.
+* A `reconciliation.json` `pk` of `{"c_addr_id": 702725}` — the plausible
+  copy-paste out of `results.json` — was accepted and substituted into a child's
+  permanent key as a dict.
+
+It also found **nine mutations the suite did not kill**, including swapping
+`first_year`/`last_year` in `mutation_api`'s call to the guard: the arguments
+become an inverted range, a genuinely overlapping live row is waved through, and
+both of the wiring tests written the day before happen to give the same answer
+either way. All nine are covered now, and all fourteen re-run mutations are
+killed.
+
+And it caught four claims in this log that did not check out: the test baseline
+(677, not 686), how many tests exercise `periods_overlap` (16, not 40), how many
+edges the resume rewrote (7 of the 21 literal parents — the other 14 are dynasty
+roots that were always literal), and how close the SSL failure came to the first
+collision (two rows, not one). All four are corrected above.
+
+### The batch
+
+`data/staging/2026-09-19-salt-addresses-resume/` — 107 proposals: 48 `ADDR_CODES`
+and 59 `ADDR_BELONGS_DATA`. The two `ADMIN_CAT_CODES` rows are not repeated; the 48
+address creates carry `c_admin_cat_code` 226/227 directly. 21 of the 59 edges carry
+a literal `c_belongs_to`, of which **7** were rewritten by the resume (702716 ×3,
+702720 ×4) — the other 14 were always literal, being the dynasty roots 4329 and
+6756. Validates with no issues. Not submitted.

@@ -24,7 +24,7 @@
 </style>
 
 <h1>Ming/Qing salt administration</h1>
-<p class="sub">Six 都轉運鹽使司 and their branch offices, as place names with hierarchy edges. 11 of 118 rows are in production.</p>
+<p class="sub">Six 都轉運鹽使司 and their branch offices, as place names with hierarchy edges. 11 of 118 rows are in production; the remaining 107 are staged as a resume batch.</p>
 
 <a class="page" href="../dataset.html?case=salt-administration">
   <b>Data review — every unit, both readings, each seat period against its dynasty</b>
@@ -32,7 +32,15 @@
   <code>python -m cbdb_agent.places_and_offices.build_dataset --case salt-administration --xlsx &lt;path&gt;</code></span>
 </a>
 <a class="page" href="../batch.html">
-  <b>Batch review — the place names and edges</b>
+  <b>Batch review — the 107 rows still to go</b>
+  <span>open, then load
+  <code>data/staging/2026-09-19-salt-addresses-resume/review.json</code> (the page
+  has a file picker; from <code>file://</code> that is the only way). What the
+  2026-09-18 run did not send, with every reference to a row that DID land already
+  replaced by the id the server gave it.</span>
+</a>
+<a class="page" href="../batch.html">
+  <b>Batch review — the first attempt, for the record</b>
   <span>open, then load <code>data/staging/2026-09-18-salt-addresses/review.json</code> (the page has a
   file picker; from <code>file://</code> that is the only way). 11 succeeded, 1 failed, 106 never attempted.</span>
 </a>

@@ -372,3 +372,153 @@ def test_submit_structural_error_blocks_before_any_network_call(tmp_path, monkey
     assert rc == cli.EXIT_VALIDATION_ERROR
     assert len(responses.calls) == 0
     assert input_path.exists()  # never archived - nothing was submitted
+
+
+# --- resume: the unsent remainder of an interrupted batch --------------------
+#
+# `resume` writes a staging file that goes straight on to be reviewed and
+# submitted, so the two things worth pinning are that it refuses to overwrite
+# anything a human may have touched, and that a run which fails leaves no
+# half-written file for someone to pick up and send.
+
+
+def _interrupted(tmp_path, *, status="skipped_auth_aborted"):
+    """A two-proposal batch where the first landed and the second did not."""
+    processed = tmp_path / "processed" / "b1"
+    processed.mkdir(parents=True)
+    batch = {
+        "batch_id": "b1",
+        "source_excerpt": "two places",
+        "proposals": [
+            {"id": "a1", "resource": "addr-codes", "operation": "create",
+             "person_id": 0, "confidence": "high", "source_quote": "one",
+             "changes": {"c_name_chn": "甲地", "c_name": "Jia",
+                         "c_admin_type": "Fensi", "c_admin_cat_code": 227,
+                         "c_firstyear": 1368, "c_lastyear": 1643}},
+            {"id": "e1", "resource": "addr-belongs-data", "operation": "create",
+             "person_id": 0, "confidence": "high", "source_quote": "edge",
+             "target_pk": {"c_addr_id": {"ref": "a1"}, "c_belongs_to": 4329,
+                           "c_firstyear": 1368, "c_lastyear": 1643},
+             "changes": {"c_source": 0, "c_pages": None, "c_notes": "n"}},
+        ],
+    }
+    (processed / "proposal.yaml").write_text(
+        yaml.safe_dump(batch, allow_unicode=True, sort_keys=False),
+        encoding="utf-8")
+    (processed / "results.json").write_text(json.dumps([
+        {"proposal_id": "a1", "status": "success",
+         "response": {"ok": True, "result": {"pk": {"c_addr_id": 702716}}},
+         "error": None, "resolved_person_id": 0, "resolved_target_pk": None},
+        {"proposal_id": "e1", "status": status, "response": None,
+         "error": "batch aborted", "resolved_person_id": 0,
+         "resolved_target_pk": None},
+    ]), encoding="utf-8")
+    return processed
+
+
+def _resume_argv(tmp_path, processed, batch_id="b2"):
+    return ["resume", "--processed", str(processed), "--batch-id", batch_id,
+            "--staging-root", str(tmp_path / "staging"),
+            "--processed-root", str(tmp_path / "processed")]
+
+
+def test_resume_writes_only_what_was_not_sent(tmp_path, capsys):
+    processed = _interrupted(tmp_path)
+    rc = cli.main(_resume_argv(tmp_path, processed))
+    assert rc == cli.EXIT_OK
+    written = yaml.safe_load(
+        (tmp_path / "staging" / "b2" / "proposal.yaml").read_text(encoding="utf-8"))
+    assert [p["id"] for p in written["proposals"]] == ["e1"]
+    # and the reference to the row that landed is now its real id
+    assert written["proposals"][0]["target_pk"]["c_addr_id"] == 702716
+    assert "a1 -> 702716" in written["source_excerpt"]
+
+
+def test_resume_refuses_to_overwrite_an_existing_staging_file(tmp_path, capsys):
+    """It may already carry a reviewer's decisions."""
+    processed = _interrupted(tmp_path)
+    existing = tmp_path / "staging" / "b2" / "proposal.yaml"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("# reviewed by hand\n", encoding="utf-8")
+    rc = cli.main(_resume_argv(tmp_path, processed))
+    assert rc == cli.EXIT_VALIDATION_ERROR
+    assert existing.read_text(encoding="utf-8") == "# reviewed by hand\n"
+    assert "already exists" in capsys.readouterr().err
+
+
+def test_resume_refuses_a_batch_id_that_has_already_been_submitted(tmp_path, capsys):
+    """A directory under data/processed/ means that id has been sent."""
+    processed = _interrupted(tmp_path)
+    (tmp_path / "processed" / "b2").mkdir(parents=True)
+    rc = cli.main(_resume_argv(tmp_path, processed))
+    assert rc == cli.EXIT_VALIDATION_ERROR
+    assert not (tmp_path / "staging" / "b2").exists()
+    assert "already been submitted" in capsys.readouterr().err
+
+
+def test_resume_refuses_while_a_proposal_is_indeterminate(tmp_path, capsys):
+    """The row nobody knows about. Nothing is written until a human has said, in
+    writing, whether it landed."""
+    processed = _interrupted(tmp_path, status="failed")
+    rc = cli.main(_resume_argv(tmp_path, processed))
+    assert rc == cli.EXIT_VALIDATION_ERROR
+    assert not (tmp_path / "staging" / "b2" / "proposal.yaml").exists()
+    assert "indeterminate" in capsys.readouterr().err
+
+
+def test_resume_reads_the_reconciliation_beside_the_results(tmp_path):
+    """Default location, so the answer lives with the batch it is about."""
+    processed = _interrupted(tmp_path, status="failed")
+    (processed / "reconciliation.json").write_text(json.dumps({
+        "e1": {"landed": False, "evidence": "operations shows nothing for it"}}),
+        encoding="utf-8")
+    rc = cli.main(_resume_argv(tmp_path, processed))
+    assert rc == cli.EXIT_OK
+    written = yaml.safe_load(
+        (tmp_path / "staging" / "b2" / "proposal.yaml").read_text(encoding="utf-8"))
+    assert [p["id"] for p in written["proposals"]] == ["e1"]
+
+
+def test_resume_leaves_no_partial_file_when_the_write_fails(tmp_path, capsys,
+                                                            monkeypatch):
+    """A half-written proposal.yaml is the one artifact nobody should find: it
+    looks like a batch and is not one."""
+    processed = _interrupted(tmp_path)
+
+    def boom(batch, path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli, "save_staging_file", boom)
+    rc = cli.main(_resume_argv(tmp_path, processed))
+    assert rc == cli.EXIT_LOAD_ERROR
+    assert not (tmp_path / "staging" / "b2" / "proposal.yaml").exists()
+    assert "could not write" in capsys.readouterr().err
+
+
+def test_resume_reports_a_missing_processed_directory(tmp_path, capsys):
+    rc = cli.main(_resume_argv(tmp_path, tmp_path / "nowhere"))
+    assert rc == cli.EXIT_LOAD_ERROR
+    assert "not found" in capsys.readouterr().err
+
+
+def test_resume_refuses_a_named_reconciliation_that_is_not_there(tmp_path, capsys):
+    """Naming a path that does not exist is a typo, not "there is no
+    reconciliation" - and the difference decides whether an indeterminate row is
+    re-sent. The default path falling back silently is fine; an explicit one is
+    not."""
+    processed = _interrupted(tmp_path, status="failed")
+    rc = cli.main(_resume_argv(tmp_path, processed)
+                  + ["--reconciliation", str(tmp_path / "typo.json")])
+    assert rc == cli.EXIT_LOAD_ERROR
+    assert not (tmp_path / "staging" / "b2" / "proposal.yaml").exists()
+    assert "not found" in capsys.readouterr().err
+
+
+def test_resume_reports_a_malformed_results_file_as_a_load_error(tmp_path, capsys):
+    """Exit 2, not a traceback and exit 1 - which means "the batch ran and
+    something failed" everywhere else in this CLI."""
+    processed = _interrupted(tmp_path)
+    (processed / "results.json").write_text("{not json", encoding="utf-8")
+    rc = cli.main(_resume_argv(tmp_path, processed))
+    assert rc == cli.EXIT_LOAD_ERROR
+    assert "could not read" in capsys.readouterr().err

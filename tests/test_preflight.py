@@ -19,6 +19,7 @@ from cbdb_agent.http_client import HttpClient
 from cbdb_agent.preflight import (
     PreflightError,
     assert_addr_create_is_not_a_duplicate,
+    periods_overlap,
     assert_office_create_is_not_a_duplicate,
     describe_office_conflicts,
     find_office_name_conflicts,
@@ -452,6 +453,10 @@ def test_an_authorization_failure_is_not_downgraded_to_a_preflight_error(tmp_pat
         )
 
 
+YUNSI = "兩淮都轉運鹽使司"          # 兩淮都轉運鹽使司
+SONGJIANG = "兩浙都轉運鹽使司松江分司"  # 兩浙都轉運鹽使司松江分司
+
+
 # --- ADDR_CODES: the duplicate check that runs at SUBMIT time ----------------
 
 
@@ -466,12 +471,15 @@ def test_addr_create_is_blocked_by_an_exact_live_name_match(tmp_path):
     """
     responses.add(
         responses.GET, "http://localhost:8000/api/select/search/addr",
-        json={"data": [{"c_addr_id": 90001, "c_name_chn": "\u5169\u6dee\u90fd\u8f49\u904b\u9e7d\u4f7f\u53f8"}]},
+        json={"data": [{"c_addr_id": 90001,
+                        "c_name_chn": "\u5169\u6dee\u90fd\u8f49\u904b\u9e7d\u4f7f\u53f8",
+                        "c_firstyear": 1368, "c_lastyear": 1643}]},
         status=200,
     )
     with pytest.raises(PreflightError, match="90001"):
         assert_addr_create_is_not_a_duplicate(
-            make_client(tmp_path), name="\u5169\u6dee\u90fd\u8f49\u904b\u9e7d\u4f7f\u53f8")
+            make_client(tmp_path), name="\u5169\u6dee\u90fd\u8f49\u904b\u9e7d\u4f7f\u53f8",
+            first_year=1368, last_year=1643)
 
 
 @responses.activate
@@ -492,3 +500,170 @@ def test_an_addr_create_with_no_chinese_name_is_refused(tmp_path):
     """A check that cannot block anything is worse than no check."""
     with pytest.raises(PreflightError, match="c_name_chn"):
         assert_addr_create_is_not_a_duplicate(make_client(tmp_path), name="")
+
+
+# --- ADDR_CODES: the period is half of the identity --------------------------
+#
+# This table holds one row per place per period (docs/11 section 5.1), so the same
+# c_name_chn legitimately appears two or three times with disjoint years. The guard
+# used to refuse any live row with a matching name, which meant that as soon as a
+# unit's first seat period landed, its second was refused as a duplicate of it.
+# 25 of the salt batch's 57 rows were unreachable that way; an SSL failure at
+# proposal 12 is what hid it.
+
+
+@responses.activate
+def test_a_later_seat_period_of_the_same_place_is_not_a_duplicate(tmp_path):
+    """The row that could not be created before this fix.
+
+    兩浙都轉運鹽使司松江分司 is three rows - 1368-1643, 1644-1663, 1664-1703 - with
+    three different seats and three different coordinates. Creating the second
+    while the first exists is the intended shape, not a duplicate.
+    """
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{"c_addr_id": 702721, "c_name_chn": SONGJIANG,
+                        "c_firstyear": 1368, "c_lastyear": 1643}]},
+        status=200,
+    )
+    assert_addr_create_is_not_a_duplicate(
+        make_client(tmp_path), name=SONGJIANG, first_year=1644, last_year=1663)
+
+
+@responses.activate
+def test_an_overlapping_period_is_still_a_duplicate(tmp_path):
+    """Kills relaxing the check to "same name is fine now". Same place, same years,
+    twice, is the permanent duplicate this guard exists for."""
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{"c_addr_id": 702721, "c_name_chn": SONGJIANG,
+                        "c_firstyear": 1644, "c_lastyear": 1703}]},
+        status=200,
+    )
+    with pytest.raises(PreflightError, match="1644-1703"):
+        assert_addr_create_is_not_a_duplicate(
+            make_client(tmp_path), name=SONGJIANG, first_year=1664, last_year=1703)
+
+
+@responses.activate
+def test_a_single_shared_year_is_an_overlap(tmp_path):
+    """The years are INCLUSIVE (docs/11 section 5.1), so 1643-1643 against
+    1600-1643 is one shared year, not a clean handover."""
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{"c_addr_id": 90002, "c_name_chn": YUNSI,
+                        "c_firstyear": 1600, "c_lastyear": 1643}]},
+        status=200,
+    )
+    with pytest.raises(PreflightError, match="90002"):
+        assert_addr_create_is_not_a_duplicate(
+            make_client(tmp_path), name=YUNSI, first_year=1643, last_year=1700)
+
+
+@responses.activate
+def test_a_touching_but_not_overlapping_period_is_allowed(tmp_path):
+    """1643 then 1644 is the half-open handover the interval rules produce, and it
+    is not an overlap."""
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{"c_addr_id": 90003, "c_name_chn": YUNSI,
+                        "c_firstyear": 1368, "c_lastyear": 1643}]},
+        status=200,
+    )
+    assert_addr_create_is_not_a_duplicate(
+        make_client(tmp_path), name=YUNSI, first_year=1644, last_year=1911)
+
+
+@responses.activate
+def test_a_live_row_with_an_unknown_year_blocks(tmp_path):
+    """Conservative by design: a row whose period cannot be read cannot be shown
+    NOT to overlap, and this decides an irreversible create."""
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{"c_addr_id": 90004, "c_name_chn": YUNSI,
+                        "c_firstyear": 0, "c_lastyear": None}]},
+        status=200,
+    )
+    with pytest.raises(PreflightError, match="90004"):
+        assert_addr_create_is_not_a_duplicate(
+            make_client(tmp_path), name=YUNSI, first_year=1644, last_year=1911)
+
+
+@responses.activate
+def test_a_create_with_no_years_of_its_own_blocks_on_any_name_match(tmp_path):
+    """The same rule from the other side. A create that does not say when cannot
+    claim to be a different period."""
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{"c_addr_id": 90005, "c_name_chn": YUNSI,
+                        "c_firstyear": 1368, "c_lastyear": 1643}]},
+        status=200,
+    )
+    with pytest.raises(PreflightError, match="90005"):
+        assert_addr_create_is_not_a_duplicate(
+            make_client(tmp_path), name=YUNSI, first_year=None, last_year=None)
+
+
+def test_an_inverted_range_counts_as_overlapping():
+    """codex: `1700-1600` against `1650-1660` came back "no overlap" in both
+    argument orders, so the guard waved through a create it had no basis to
+    judge. A range that ends before it starts is a broken row, not a period."""
+    assert periods_overlap(1700, 1600, 1650, 1660) is True
+    assert periods_overlap(1650, 1660, 1700, 1600) is True
+    assert periods_overlap(1700, 1600, 1800, 1900) is True
+
+
+def test_periods_overlap_is_inclusive_and_conservative():
+    assert periods_overlap(1368, 1643, 1600, 1700) is True
+    assert periods_overlap(1368, 1643, 1643, 1700) is True     # one shared year
+    assert periods_overlap(1368, 1643, 1644, 1700) is False    # handover
+    assert periods_overlap(1644, 1700, 1368, 1643) is False    # order-independent
+    for unknown in (None, 0, "", "n/a"):
+        assert periods_overlap(1368, 1643, unknown, 1700) is True
+        assert periods_overlap(unknown, 1643, 1644, 1700) is True
+
+
+@responses.activate
+def test_a_partial_page_is_refused_rather_than_read_as_no_duplicate(tmp_path):
+    """The submit-time guard used to take page one as the whole survey. That was
+    survivable while a name meant one row; now that ADDR_CODES holds one row per
+    period and the guard filters those by period, the row that actually clashes
+    is materially more likely to be on a later page - and the failure mode of
+    getting it wrong is `allow`, on a table with no delete.
+
+    `live_state.find_existing_addresses` has refused a partial answer since it
+    was written. These two decide the same question.
+    """
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{"c_addr_id": 1, "c_name_chn": "somewhere else",
+                        "c_firstyear": 1, "c_lastyear": 2}],
+              "pagination": {"total": 40}},
+        status=200,
+    )
+    with pytest.raises(PreflightError, match="1 of 40 rows"):
+        assert_addr_create_is_not_a_duplicate(
+            make_client(tmp_path), name=YUNSI, first_year=1368, last_year=1643)
+
+
+@responses.activate
+def test_a_complete_page_is_not_refused(tmp_path):
+    """The guard must not become unusable: a total that matches what arrived is
+    a whole answer."""
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/addr",
+        json={"data": [{"c_addr_id": 1, "c_name_chn": "somewhere else",
+                        "c_firstyear": 1, "c_lastyear": 2}],
+              "pagination": {"total": 1}},
+        status=200,
+    )
+    assert_addr_create_is_not_a_duplicate(
+        make_client(tmp_path), name=YUNSI, first_year=1368, last_year=1643)
+
+
+def test_the_string_zero_is_an_unknown_year_not_year_zero():
+    """`0` is the unknown sentinel for every numeric column in this database
+    (digest 1.5), and a JSON response may carry it as a string. Read as year zero
+    it would look disjoint from every real period."""
+    assert periods_overlap(1368, 1643, "0", "1200") is True
+    assert periods_overlap("0", 1643, 1700, 1800) is True

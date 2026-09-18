@@ -25,6 +25,7 @@ from `.env.sample`) with a real `CBDB_API_TOKEN`.
 ```
 python -m cbdb_agent validate --staging <path> | --input <path>  [--env <path>]
 python -m cbdb_agent submit   --staging <path> | --input <path>  [--dry-run] [--env <path>]
+python -m cbdb_agent resume   --processed data/processed/<batch-id> --batch-id <new-id>
 ```
 
 - `validate` checks the file's structure/whitelists/conflicts
@@ -33,6 +34,18 @@ python -m cbdb_agent submit   --staging <path> | --input <path>  [--dry-run] [--
   conflicts alone still exit `0` — they're expected mid-review, per
   `docs/03-extraction-review-workflow.md` §2.5), `2` couldn't load/parse the
   file, `3` structural error found.
+- `resume` is for a batch that stopped part-way through — a timeout or a 5xx on a
+  mutating request is not retried and stops the whole run (AGENTS.md rule 11). It
+  reads the submitted `proposal.yaml` and its `results.json` and writes a NEW
+  staging file holding only what was never sent, with every reference to a row
+  that did land replaced by the id the server assigned it. Then review and submit
+  that file normally. It refuses while any proposal is indeterminate: write
+  `<processed>/reconciliation.json` saying, with evidence, whether each one landed.
+  **Never resume by editing the old `proposal.yaml`** — that loses the assigned ids
+  the remaining rows reference. Exit codes: `0` written, `2` couldn't read the
+  processed directory or a named `--reconciliation`, `3` refused (a proposal is
+  indeterminate, the target batch id already exists, or the result would not
+  validate). It writes nothing on any non-zero exit.
 - `validate --staging` additionally writes/refreshes `preview.md` next to the
   staging YAML on every run (`docs/06-staging-preview-design.md` §3) — a
   generated, read-only Markdown summary (status line, per-proposal diffs,

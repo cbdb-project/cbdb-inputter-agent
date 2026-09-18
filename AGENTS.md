@@ -222,8 +222,9 @@ user how old the build is instead of quietly trusting it.
     past one would mean later rows referencing something whose id was never learned,
     with a re-run duplicating whatever did land. One uncertain row, named in
     `results.json`, is the recoverable outcome; reconcile it against
-    `GET /api/v2/operations` before re-sending anything. For the same reason a write
-    never follows an HTTP redirect: `requests` would re-send the body transparently. After a real (non-dry-run) write that matters, read the row back
+    `GET /api/v2/operations` before re-sending anything. For the same reason a
+    write never follows an HTTP redirect: `requests` would re-send the body
+    transparently. After a real (non-dry-run) write that matters, read the row back
     yourself via `/api/v2/get` and compare — don't infer it from the exit code.
     **One exception, of capability rather than judgement — and it is narrower than
     "these resources cannot be read".** `/api/v2/get`'s resource table
@@ -237,6 +238,14 @@ user how old the build is instead of quietly trusting it.
     have no read surface at all: for those the create response is the only sighting,
     so take `result.pk` **and** `result.row` (§13.2) at the time, and afterwards
     `GET /api/v2/operations` is the only record.
+
+    **Once it is reconciled, resume with `python -m cbdb_agent resume`, never by
+    hand.** It reads the submitted `proposal.yaml` and its `results.json`, drops
+    what landed, rewrites every reference to a landed row into the id the server
+    gave it, and refuses until a `reconciliation.json` says — with evidence — what
+    became of each indeterminate proposal. Editing the old file instead loses which
+    ids the first attempt assigned, and those ids are exactly what the remaining
+    rows reference.
 12. **Code-table and entity-aggregate writes are a different, higher risk class than
     person data — never create, change or remove one on your own initiative.** This covers
     every code table that can be written — `text-codes` (new `TEXT_CODES` rows),
@@ -442,6 +451,14 @@ run `codex exec --dangerously-bypass-approvals-and-sandbox` (via `Write-Output "
 to avoid stdin blocking, with `$env:HTTPS_PROXY`/`$env:HTTP_PROXY` set for proxy access)
 as an independent second review, and resolve its findings too, before starting the next
 milestone. Log both passes in `docs/02-review-log.md`.
+
+**Mutation testing runs with `PYTHONDONTWRITEBYTECODE=1`, and clears every
+`__pycache__` first.** Python invalidates a `.pyc` on the source's (mtime, size),
+and restoring a backup puts back an older mtime — so a same-length edit
+(`"proposal.yaml"` → `"never-matches"`, both 13 characters) leaves the interpreter
+running bytecode compiled from the mutated file. That happened on 2026-09-19 and
+made one run's results a mix of old and new code. A same-length edit is exactly
+what a careful mutation looks like, so this is not an edge case.
 
 ## Git workflow
 

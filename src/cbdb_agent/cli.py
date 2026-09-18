@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 from .audit_log import AuditLog
+from . import resume as resume_mod
 from .batch_runner import ProposalResult, fetch_current_values, run_batch
 from .code_lookup import CodeResolver, collect_code_values
 from .snapshot import (
@@ -352,6 +353,88 @@ def cmd_apply_review(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_resume(args: argparse.Namespace) -> int:
+    """Write the part of an interrupted batch that has not been sent yet.
+
+    Generates rather than edits: the output is an ordinary staging file that goes
+    through `validate --staging`, the review page and `submit --staging` like any
+    other. See `resume.py` for why, and for the three things it has to get right.
+    """
+    processed = Path(args.processed)
+    try:
+        batch, results = resume_mod.load_processed(processed)
+    except (resume_mod.ResumeError, StagingError, OSError, ValueError) as exc:
+        # ValueError covers both a malformed results.json (JSONDecodeError) and a
+        # proposal.yaml that does not fit the schema (pydantic ValidationError).
+        # Without it the command died with a traceback and exit 1, which means
+        # "the batch ran and something failed" everywhere else in this CLI.
+        print(f"error: could not read {processed}: {exc}", file=sys.stderr)
+        return EXIT_LOAD_ERROR
+
+    reconciliation = (Path(args.reconciliation) if args.reconciliation
+                      else processed / "reconciliation.json")
+    if args.reconciliation and not reconciliation.exists():
+        # Naming a path that is not there is a typo, not "there is no
+        # reconciliation" - and the difference decides whether an indeterminate
+        # row gets re-sent.
+        print(f"error: {reconciliation} not found.", file=sys.stderr)
+        return EXIT_LOAD_ERROR
+    reconciled = {}
+    if reconciliation.exists():
+        try:
+            reconciled = resume_mod.load_reconciliation(reconciliation)
+        except (resume_mod.ResumeError, OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_LOAD_ERROR
+
+    staging_root = Path(args.staging_root)
+    out_dir = staging_root / args.batch_id
+    # Same refusal as the generators: a proposal.yaml that already exists may
+    # carry a reviewer's decisions, and a batch id already under data/processed/
+    # has already been submitted.
+    for existing, why in ((out_dir / "proposal.yaml", "already exists and may "
+                           "carry a reviewer's decisions"),
+                          (Path(args.processed_root) / args.batch_id,
+                           "has already been submitted")):
+        if existing.exists():
+            print(f"error: {existing} {why}; move it aside or pass a different "
+                  f"--batch-id.", file=sys.stderr)
+            return EXIT_VALIDATION_ERROR
+
+    try:
+        resumed, plan = resume_mod.resume_batch(
+            batch, results, args.batch_id, reconciled=reconciled)
+    except resume_mod.ResumeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION_ERROR
+
+    issues = find_issues(resumed)
+    errors = [i for i in issues if i.severity == "error"]
+    if errors:
+        print("error: the resumed batch does not validate - nothing written:",
+              file=sys.stderr)
+        for issue in errors:
+            print(f"  {issue.proposal_id or '<batch>'}: {issue.message}",
+                  file=sys.stderr)
+        return EXIT_VALIDATION_ERROR
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "proposal.yaml"
+    try:
+        save_staging_file(resumed, str(path))
+    except OSError as exc:
+        print(f"error: could not write {path}: {exc}", file=sys.stderr)
+        return EXIT_LOAD_ERROR
+
+    print(f"{len(plan.landed)} already landed, {len(plan.outstanding)} to go")
+    for line in plan.notes:
+        print(line)
+    print()
+    print(f"wrote {path}")
+    print(f"next: python -m cbdb_agent validate --staging {path.as_posix()}")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m cbdb_agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -383,6 +466,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--decisions", required=True, help="decisions.json exported by review/batch.html"
     )
     apply_review.set_defaults(func=cmd_apply_review)
+
+    resume = subparsers.add_parser(
+        "resume",
+        help="Generate the unsent remainder of a batch that stopped part-way",
+    )
+    resume.add_argument(
+        "--processed", required=True,
+        help="data/processed/<batch-id>/ - the submitted proposal.yaml and its "
+             "results.json",
+    )
+    resume.add_argument("--batch-id", required=True,
+                        help="the NEW batch id to write under data/staging/")
+    resume.add_argument(
+        "--reconciliation", default=None,
+        help="JSON saying what became of each indeterminate proposal (default: "
+             "<processed>/reconciliation.json). Required if any proposal's "
+             "outcome is unknown - see resume.py",
+    )
+    resume.add_argument("--staging-root", default="data/staging")
+    resume.add_argument("--processed-root", default="data/processed")
+    resume.set_defaults(func=cmd_resume)
 
     return parser
 
