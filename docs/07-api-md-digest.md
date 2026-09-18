@@ -421,7 +421,7 @@ Rules that apply to the whole set:
   `422 changes: ["foreign_key_violation"]` — §13.2's own example is
   `addr-belongs-data.c_belongs_to` naming an `ADDR_CODES` row not yet created, and
   `c_source` naming a missing `TEXT_CODES.c_textid`. This is why
-  `tools/salt-admin/emit_addresses.py` emits in dependency order and carries parent
+  `src/cbdb_agent/places_and_offices/emit_addresses.py` emits in dependency order and carries parent
   ids as `{"ref": ...}`.
 - **`"target": {"pk": {}}` is mandatory even when the key is auto-assigned.** The key
   may be given in `target.pk` or in `changes`, and a single-column key given in

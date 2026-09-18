@@ -13,7 +13,7 @@ why.
 
 `validate --staging` additionally refreshes a `preview.md` file next to the
 staging YAML on every run (docs/06-staging-preview-design.md section 3), plus a
-`review.json` for the offline review page in `tools/review/`
+`review.json` for the offline review page in `src/cbdb_agent/`
 (docs/08-review-interface-design.md). `apply-review` is the return leg of that
 round trip: it reads the page's exported `decisions.json` and writes the choices
 back into the staging YAML - the YAML remains the only source of truth and the
@@ -152,7 +152,7 @@ def _write_preview(args: argparse.Namespace, batch: StagingBatch, issues: list[I
             ),
             encoding="utf-8",
         )
-        print(f"Review data written to {review_path}  (open tools/review/index.html)")
+        print(f"Review data written to {review_path}  (open review/batch.html)")
     except OSError as exc:
         print(f"Warning: could not write review.json: {exc}", file=sys.stderr)
 
@@ -380,7 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     apply_review.add_argument("--staging", required=True, help="Path to the YAML staging file")
     apply_review.add_argument(
-        "--decisions", required=True, help="decisions.json exported by tools/review/index.html"
+        "--decisions", required=True, help="decisions.json exported by review/batch.html"
     )
     apply_review.set_defaults(func=cmd_apply_review)
 

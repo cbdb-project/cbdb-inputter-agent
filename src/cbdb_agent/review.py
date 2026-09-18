@@ -1,4 +1,4 @@
-"""Bridge between a staging batch and the offline review page (tools/review/).
+"""Bridge between a staging batch and the offline review page (src/cbdb_agent/).
 
 Design (docs/08-review-interface-design.md):
 
@@ -7,7 +7,7 @@ module adds a *round trip* around it, not a second write path:
 
     proposal.yaml  --export_review_json-->  review.json
                                                  |
-                                       tools/review/index.html
+                                       review/batch.html
                                        (human reviews, decides, edits)
                                                  |
                                             decisions.json

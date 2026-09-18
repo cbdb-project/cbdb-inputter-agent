@@ -29,7 +29,7 @@ playwright_api = pytest.importorskip(
 )
 
 REPO_ROOT = pytest.importorskip("pathlib").Path(__file__).resolve().parents[1]
-PAGE = REPO_ROOT / "tools" / "review" / "index.html"
+PAGE = REPO_ROOT / "review" / "batch.html"
 
 
 @pytest.fixture(scope="module")

@@ -502,7 +502,7 @@ PK `c_addr_id`, **server-assigned** (`max+1` when the key is given in neither
   updatable, so a wrong *value* is correctable; a wrong *row* is not removable.
 - **No dedupe and no unique key on `c_name_chn`** — sending the same place twice makes
   two rows. Unlike `ADMIN_CAT_CODES`, this one has a sanctioned live read
-  (`GET /api/select/search/addr`), so check before creating; `tools/salt-admin/
+  (`GET /api/select/search/addr`), so check before creating; `src/cbdb_agent/places_and_offices/
   live_state.find_existing_addresses()` is the worked example.
 - **`ADDRESSES` is a derived cache** rebuilt only by
   `php artisan cbdb:regenerate-addresses-table`. Rows created here are invisible to
@@ -553,7 +553,7 @@ because a category with neither is unusable, undeletable, and the FK target of e
 `ADDR_CODES` row that picks it.
 
 - **No read endpoint of any kind** — no `/api/select/*`, and `/api/v2/get` is `501`.
-  This is the table that forced `tools/salt-admin/live_state.py`: the only way to ask
+  This is the table that forced `src/cbdb_agent/places_and_offices/live_state.py`: the only way to ask
   "does this already exist?" is to compose the weekly snapshot's state at its build
   date with every `GET /api/v2/operations` row for the table since.
 - **No unique key on the names, and duplicates already exist** (`Dao` is both 道 and

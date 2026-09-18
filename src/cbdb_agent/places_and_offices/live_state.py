@@ -345,7 +345,7 @@ def find_existing_addresses(client, names: list[str]) -> dict[str, list[dict]]:
 
     `ADDR_CODES` has no unique key on `c_name_chn` either, and no delete path, so
     a second run - or anyone else having entered 兩淮都轉運鹽使司 in the meantime -
-    would mint 55 permanent duplicate places, each then referenced by permanent,
+    would mint a second, permanent copy of every place, each then referenced by permanent,
     unmodifiable ADDR_BELONGS_DATA keys. Unlike ADMIN_CAT_CODES this one does not
     need composing: `/api/select/search/addr` is a sanctioned public lookup, so
     ask it.

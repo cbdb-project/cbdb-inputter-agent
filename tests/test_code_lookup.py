@@ -593,7 +593,7 @@ def test_the_two_sources_agree_on_the_same_code(tmp_path, snapshot):
 
 def test_a_code_table_with_no_lookup_endpoint_returns_nothing_over_http():
     """ADMIN_CAT_CODES has no `/api/select/*` and no `/api/v2/get` (only `nianhao`
-    has one) - the same gap that made tools/salt-admin/live_state.py necessary.
+    has one) - the same gap that made src/cbdb_agent/places_and_offices/live_state.py necessary.
 
     Without an explicit guard the empty endpoint string was requested as-is: an
     AUTHENTICATED GET at the bare base URL, once per c_admin_cat_code in the batch.

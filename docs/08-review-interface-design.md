@@ -1,6 +1,6 @@
 # Review Interface — Design
 
-Status: implemented (`src/cbdb_agent/review.py`, `tools/review/index.html`, CLI
+Status: implemented (`src/cbdb_agent/review.py`, `review/batch.html`, CLI
 `apply-review`). Written 2026-08-18, while preparing a 78-proposal / 41-conflict
 batch of 元代 person records — the first batch big enough that reading `preview.md`
 top to bottom stopped being a usable review.
@@ -31,7 +31,7 @@ Markdown summary with a live old-vs-new diff. That was the right answer for a
 
 `docs/06` Tier 3 suggested rendering `preview.md` as a session Artifact. That is a
 nicer *read*, not a review tool, and it has to be regenerated (and re-trusted) every
-batch. Instead: **one HTML file committed to the repo** at `tools/review/index.html`,
+batch. Instead: **one HTML file committed to the repo** at `review/batch.html`,
 which loads a batch's `review.json` at runtime.
 
 Why this way round:
@@ -58,7 +58,7 @@ review surface read-only:
 ```
 proposal.yaml  ──validate --staging──▶  review.json  (generated, disposable)
                                              │
-                                    tools/review/index.html
+                                    review/batch.html
                                     (human reviews, decides, edits)
                                              │
                                        decisions.json  (the human's output)
@@ -165,7 +165,9 @@ merely stale or actually incompatible.
 
 ```
 src/cbdb_agent/review.py         export_review_json() / apply_decisions()
-tools/review/index.html          the page (no data, no dependencies, no network)
+review/batch.html                the page (no data, no dependencies, no network)
+review/<case-id>/index.html      which page to open for that case (AGENTS.md,
+                                 "Where code goes")
 src/cbdb_agent/cli.py            validate --staging also writes review.json;
                                  new `apply-review --staging <yaml> --decisions <json>`
 tests/test_review.py             export shape, apply strictness, round trip

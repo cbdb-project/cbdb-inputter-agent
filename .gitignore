@@ -14,8 +14,10 @@ data/processed/*
 !data/processed/.gitkeep
 data/staging/*
 !data/staging/.gitkeep
-data/salt-admin/*
-!data/salt-admin/.gitkeep
+# Generated build output, one directory per case
+# (src/cbdb_agent/places_and_offices).
+data/build/*
+!data/build/.gitkeep
 
 # The weekly CBDB SQLite snapshot (~557 MB) and the label cache derived from it.
 # Downloaded on demand by snapshot.py; see AGENTS.md. Kept inside the repo rather
