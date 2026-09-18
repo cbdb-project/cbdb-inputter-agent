@@ -154,6 +154,37 @@ user how old the build is instead of quietly trusting it.
    target system — reads included — must go through the shared client so local audit
    logging (`audit_log.py`) and rate limiting apply uniformly. Do not write a "quick"
    inline `requests.post(...)` anywhere else in the codebase.
+
+   **The client connects DIRECTLY and must keep doing so — never through a proxy.**
+   `http_client._direct_session()` sets `trust_env = False`, so `HTTP_PROXY`,
+   `HTTPS_PROXY` and (on Windows) the WinINET registry settings that
+   `urllib.request.getproxies()` falls back to are all ignored. Clearing the
+   environment variables is **not** enough on Windows, which is why this is in code
+   rather than left to whoever runs the command.
+
+   This is measured. A controlled comparison, 120 identical requests at 1/s to the
+   same endpoint back to back: **through the local proxy 37/120, first failure at
+   request 38; direct 120/120, no failures.** Direct authenticated reads are
+   likewise 60/60. So a proxy in the path is demonstrably worse and there is no
+   reason to keep one.
+
+   **It is not the whole story, and do not let this rule tell you it is.** Four
+   production runs of the same batch were cut short mid-flight on 2026-09-18/19 —
+   at proposals 12, 69, 16 and 4 — and the fourth was verifiably direct
+   (`trust_env=False`, DNS resolving to the real public address, no TUN adapter)
+   and still failed, with `WinError 10061` after four writes. Reads are reliable
+   on the direct path; sustained *writes* are not, in any configuration tried.
+   Whatever that is sits in the write path or between this machine and the host,
+   and it is **not** application-level throttling — that answers `429` (rules 9
+   and 10), and no run has ever seen one. Unresolved as of 2026-09-19.
+
+   It matters here more than it would elsewhere because of rule 11: a network error
+   on a *mutating* request is not retried and stops the whole batch, so every drop
+   costs an indeterminate row that a human must reconcile against
+   `GET /api/v2/operations` before anything can resume. A proxy that drops one
+   connection in forty turns a 118-row batch into four runs. If you are on a machine
+   with a proxy configured, that is fine — just never route this client through it,
+   and never "fix" a dropped batch by adding a retry to the write path.
 3. **Never commit `.env` or any real token/credential.** `.env` is gitignored; only
    `.env.sample` (placeholders only) is committed. If you ever see a real-looking
    token in a diff, stop and flag it instead of committing.

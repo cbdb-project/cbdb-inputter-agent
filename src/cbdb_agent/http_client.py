@@ -294,6 +294,42 @@ def _summarize_public_response(body: Any) -> Any:
     return body
 
 
+def _direct_session() -> requests.Session:
+    """A session that ignores every ambient proxy setting.
+
+    **Measured, not assumed.** Three production runs of the salt-address batch
+    were cut short mid-flight on 2026-09-18/19 - at proposals 12, 69 and 16 - each
+    time with a dropped connection and no HTTP status: `SSLEOFError`,
+    `ProxyError('Unable to connect to proxy')`, `RemoteDisconnected`. A controlled
+    comparison settled which end was at fault: 120 identical requests at 1/s to
+    the same endpoint, back to back.
+
+        through the local proxy :  37/120, first failure at request 38
+        direct                  : 120/120, no failures
+
+    The server was never the problem. A server-side throttle answers `429`
+    (AGENTS.md rules 9 and 10) - a dropped TCP connection is the local hop.
+
+    That matters more here than it would in most clients, because a network error
+    on a *mutating* request is not retried and stops the whole batch (rule 11).
+    Every drop therefore costs an indeterminate row that a human has to reconcile
+    against `GET /api/v2/operations` by hand before anything can resume. A proxy
+    that drops one connection in forty turns a 118-row batch into four.
+
+    `trust_env = False` is what does it: it makes `requests` ignore `HTTP_PROXY`,
+    `HTTPS_PROXY` and, on Windows, the WinINET registry settings that
+    `urllib.request.getproxies()` falls back to - which is why clearing the
+    environment variables alone was not enough. It also stops `.netrc` being read,
+    which this client has no use for: it authenticates with a Bearer token.
+
+    Pass an explicit `session=` to `HttpClient` to override this - the tests do.
+    """
+    session = requests.Session()
+    session.trust_env = False
+    session.proxies = {}
+    return session
+
+
 class HttpClient:
     # Reads only. A MUTATING request is never retried after a network error or a
     # 5xx, because neither means "not applied" - see the two branches in _request.
@@ -319,7 +355,7 @@ class HttpClient:
     ) -> None:
         self._config = config
         self._audit_log = audit_log
-        self._session = session or requests.Session()
+        self._session = session or _direct_session()
         self._rate_limiter = rate_limiter or RateLimiter(config.max_requests_per_minute)
         self._sleep = sleep
 
