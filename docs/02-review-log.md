@@ -2622,3 +2622,42 @@ build can never be labelled. `c_source: 72219` therefore shows bare in the revie
 while the 2026-08-15 build stands. That is the common case for a code table the user
 has just written to, so it is worth knowing; changing it would put a rate-limited HTTP
 request behind every label miss, which is not a change to make in passing.
+
+### 2026-09-21, submitted — 6/6 in production, first batch since the network fix to run clean
+
+`2026-09-21-zhenanzhou-renhuai-suiyang` went to production at 07:01 UTC on the
+operator's authorization. **6/6 succeeded in a single run**, no interruption — the
+first place-name batch to do so since the direct-connection change (AGENTS.md rule 2).
+The six `operations` timestamps are 07:01:04, :06, :09, :10, :11, :12, which is
+`RateLimiter.slot()` measuring from the previous *response* as designed.
+
+| Row | `c_addr_id` | Parent | `operations` |
+|---|---|---|---|
+| 真安州 1601–1643 Zhou | 702773 | 702684 遵義 | 366683, edge 366686 |
+| 綏陽 1601–1643 Xian | 702774 | 702773 真安州 | 366684, edge 366687 |
+| 仁懷 1601–1643 Xian | 702775 | 702773 真安州 | 366685, edge 366688 |
+
+Cross-proposal `{ref: ...}` substitution did its job: both counties' write-once edge
+keys carry 702773, an id that did not exist when the batch was written.
+
+**Read back rather than inferred** (rule 11). The three `ADDR_CODES` rows come back
+live from `GET /api/select/search/addr` with the expected name, period, category and
+coordinates. The edges have no read surface, so their confirmation is two-sided: the
+create responses' `result.pk`/`result.row` taken at the time, and the parent
+`/api/select/search/addr` embeds per child row — which renders from
+`ADDR_BELONGS_DATA` and reads 702774 → 702773, 702775 → 702773, 702773 → 702684.
+
+**The `""` fix, confirmed end to end.** Every field the reviewer left empty came back
+from the server as `null` in its echo of the written row — `c_alt_names` ×3,
+`CHGIS_PT_ID` on 真安州, `c_pages` ×3. No empty strings landed anywhere.
+
+The production gates are re-locked (`CBDB_DRY_RUN=true`, `CBDB_CONFIRM_PROD` empty).
+
+**One correction to a claim made mid-run**, for the record: `results.json` was read as
+not carrying the assigned primary keys. It does — they are at
+`response.result.pk`, not at a top-level `pk`. Nothing was missing and nothing needed
+recovering from the audit log.
+
+**Still owed on the server:** `php artisan cbdb:regenerate-addresses-table`, as after
+the salt import. `ADDRESSES` is a derived cache, so until it is rebuilt these three
+places are invisible to posting autofill and dynasty homonym disambiguation.

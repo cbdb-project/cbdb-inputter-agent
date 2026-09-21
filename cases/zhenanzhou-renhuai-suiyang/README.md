@@ -17,7 +17,34 @@ No `case.py`: three places and three edges are hand-written YAML, per AGENTS.md
 
 | Batch id | Proposals | Outcome |
 |---|---|---|
-| `2026-09-21-zhenanzhou-renhuai-suiyang` | 6 (3 `addr-codes`, 3 `addr-belongs-data`) | **reviewed, validated clean, not submitted** |
+| `2026-09-21-zhenanzhou-renhuai-suiyang` | 6 (3 `addr-codes`, 3 `addr-belongs-data`) | **complete** — 6/6 in production |
+
+## What landed
+
+Submitted to production 2026-09-21 07:01 UTC, 6/6 in one run, no interruption.
+
+| Row | `c_addr_id` | Parent | `operations` |
+|---|---|---|---|
+| 真安州 `Zhen'an Zhou`, 1601–1643, Zhou | **702773** | 702684 遵義 | 366683, edge 366686 |
+| 綏陽 `Suiyang`, 1601–1643, Xian | **702774** | 702773 真安州 | 366684, edge 366687 |
+| 仁懷 `Renhuai`, 1601–1643, Xian | **702775** | 702773 真安州 | 366685, edge 366688 |
+
+Verified independently afterwards, not inferred from the `200 ok:true` (AGENTS.md
+rule 11). All three `ADDR_CODES` rows read back live through
+`GET /api/select/search/addr` with the expected name, period, category and
+coordinates. The three `ADDR_BELONGS_DATA` edges have no read surface at all, so
+their confirmation is two-sided: the create responses' `result.pk`/`result.row`, and
+the parent that `/api/select/search/addr` embeds for each child row — which renders
+from `ADDR_BELONGS_DATA` and reads 702774 → 702773, 702775 → 702773, 702773 → 702684.
+`GET /api/v2/operations` shows all six rows under the token's user.
+
+Empty fields landed as NULL, confirmed in the server's own echo of each row:
+`c_alt_names` on all three places, `CHGIS_PT_ID` on 真安州, `c_pages` on all three
+edges. No empty strings anywhere.
+
+**Still owed on the server:** `php artisan cbdb:regenerate-addresses-table`.
+`ADDRESSES` is a derived cache, so until it is rebuilt these three places stay
+invisible to posting autofill and dynasty homonym disambiguation.
 
 ## What it writes
 
