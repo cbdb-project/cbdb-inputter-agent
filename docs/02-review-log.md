@@ -2564,3 +2564,61 @@ re-creating the row.
 the 縣-suffixed spellings too. The snapshot agreed and was not allowed to be the
 answer. The 36-day-old snapshot supplied the code labels in the preview and the
 surrounding-row statistics quoted above — reference data, which is what it is for.
+
+### 2026-09-21, later — reviewed: seat decided, finding closed, and `""` is not a value
+
+The reviewer returned a `decisions.json` for
+`2026-09-21-zhenanzhou-renhuai-suiyang`. Four things came back, and the third is a
+change to the tool.
+
+**The conflict is settled.** `zhenanzhou-which-seat` resolved as `107.68781` —
+hvd_99379, the 1601 seat, which is the suggestion the batch carried. So 真安州 is one
+row for 1601–1643, and the two-row split is not taken.
+
+**The finding closed by the user doing the write, not us.** 《中國行政區劃通史·明代卷》
+now exists as `TEXT_CODES` 72219, created 2026-09-21 13:55 and verified live via
+`GET /api/v2/texts/72219` (`c_text_type_id` 0201, same as 唐代卷 40304). All three
+edges moved from `c_source: 0` to 72219. This is rule 12 working as intended: the
+missing code table row was reported with its evidence, the user decided, and the
+agent never created global reference data on its own initiative.
+
+**`""` is not a value, and `apply_decisions` was writing it as one.** The review page
+sends `"value": ""` for a field the reviewer cleared — or simply left empty while
+deciding about its neighbours. Six of the eleven decisions in this file were that:
+`c_alt_names` ×3, `CHGIS_PT_ID` on 真安州, `c_pages` ×3. Applied verbatim they would
+have replaced a real `null` with the string `''` in the staging file.
+
+That is wrong twice over. It misstates what will be written — `docs/07` §1.5: the
+target system runs `TrimStrings` + `ConvertEmptyStringsToNull` over every JSON body,
+so `""` and `null` are *the same request* and the row lands with NULL either way — and
+it makes `preview.md` show an edit that isn't one, on exactly the fields a reviewer is
+least likely to look at twice. On `CHGIS_PT_ID`, an integer column, `''` is not even a
+candidate: the live table holds 19104 NULLs and zero empty strings there.
+
+`review._empty_string_as_null` now normalizes an empty or whitespace-only *field*
+value to `None`. Two carve-outs, both load-bearing:
+
+- **not the conflict `resolution`**, where `None` is the "unresolved" sentinel
+  (`staging.find_issues`). Normalizing there would quietly reopen a conflict the
+  reviewer had settled and re-block the batch on it.
+- **not `0` or `-9999`**, which are CBDB's explicit "unknown" sentinels (§1.5) and mean
+  something a NULL does not.
+
+With that in place the six confirmations became no-ops and `apply-review` reported
+exactly the four real changes. The batch re-validates with **no issues at all**, and
+every empty field in it is a `NoneType`, checked. Four tests cover the normalization,
+the no-op, the surviving `0` sentinel, and the resolution carve-out.
+
+The general rule, which is the reviewer's and is wider than this batch: **do not write
+a placeholder into an empty field** — not `∅`, not the literal text `null`. An empty
+field is the database's own empty, and whether that is NULL or `""` is decided from the
+API contract or from what the column already holds, not from taste. "Unknown" is a
+different statement and is made with a sentinel.
+
+**One limitation, reported and not fixed.** `code_lookup` picks its source once —
+`_SnapshotSource(snapshot) if snapshot is not None else _HttpSource(client)` — so with
+a snapshot present there is no per-miss live fallback, and a code created *since* the
+build can never be labelled. `c_source: 72219` therefore shows bare in the review page
+while the 2026-08-15 build stands. That is the common case for a code table the user
+has just written to, so it is worth knowing; changing it would put a rate-limited HTTP
+request behind every label miss, which is not a change to make in passing.

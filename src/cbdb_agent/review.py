@@ -316,6 +316,35 @@ def _check_reviewed_version(
     )
 
 
+def _empty_string_as_null(value: Any) -> Any:
+    """An emptied field is NULL, never the string `""`.
+
+    The review page sends `"value": ""` for a field the reviewer cleared, or left
+    empty while deciding about its neighbours. Written through verbatim, that puts
+    `c_alt_names: ''` into the staging file where `null` was, and `preview.md` then
+    shows an edit that isn't one.
+
+    It is also not what would be written. `docs/07-api-md-digest.md` §1.5: the target
+    system runs `TrimStrings` + `ConvertEmptyStringsToNull` over every JSON body, so
+    `""` and `null` are *the same request* — the row lands with NULL either way. The
+    staging file is meant to say what will be written, so it says `null`.
+
+    Whitespace strips first, for the same reason: `"  "` is `""` by the time the
+    server has trimmed it.
+
+    Deliberately NOT applied to a conflict's `resolution`, where `None` is the
+    sentinel for "unresolved" (`staging.find_issues`). Normalizing there would turn a
+    decision the reviewer actually made back into an open question, silently, and
+    re-block the batch on a conflict they had settled.
+
+    Not applied to a `0` or a `-9999` either: those are CBDB's explicit "unknown"
+    sentinels (digest §1.5) and mean something a NULL does not.
+    """
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    return value
+
+
 def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[AppliedChange]:
     """Apply a decisions.json produced by the review page onto `batch`, in place.
 
@@ -398,7 +427,7 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
                         AppliedChange("drop", proposal_id, f"removed field {field_name}")
                     )
                 continue
-            new_value = raw.get("value")
+            new_value = _empty_string_as_null(raw.get("value"))
             if proposal.changes.get(field_name) != new_value:
                 _check_reviewed_version(raw, proposal_id, reviewed_hash)
                 old = proposal.changes.get(field_name)
