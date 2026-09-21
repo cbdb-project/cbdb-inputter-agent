@@ -17,7 +17,7 @@ No `case.py`: three places and three edges are hand-written YAML, per AGENTS.md
 
 | Batch id | Proposals | Outcome |
 |---|---|---|
-| `2026-09-21-zhenanzhou-renhuai-suiyang` | 6 (3 `addr-codes`, 3 `addr-belongs-data`) | **staged, not submitted** — 1 unresolved conflict |
+| `2026-09-21-zhenanzhou-renhuai-suiyang` | 6 (3 `addr-codes`, 3 `addr-belongs-data`) | **reviewed, validated clean, not submitted** |
 
 ## What it writes
 
@@ -40,18 +40,17 @@ The parent, `ADDR_CODES` 702684 遵義 1378–1643, was confirmed live in the sa
 The weekly snapshot agreed, but per AGENTS.md it is not allowed to answer this
 question — a row added since its build date is invisible in it.
 
-## Decisions taken, and the one left open
+## Decisions
 
 Recorded in full in the batch's `batch_notes`. In brief:
 
-1. **真安州's seat — left open, and it blocks the batch.** CHGIS gives three
-   successive seat points; two fall inside 1601–1643. `ADDR_CODES` holds one
-   coordinate per row, so the row records one of them. Filed as an unresolved
-   conflict (`zhenanzhou-which-seat`) with the 1601 point suggested, because
-   《通史》 records exactly one Ming seat for 真安州 and that is the point matching it.
-   The alternative shape — two rows split at 1619/1620, as `docs/11` §5.1 did for the
-   salt 分司 that moved — cannot be reached by resolving the conflict; it needs the
-   batch regenerated, and takes the write-once edge count from 3 to 6.
+1. **真安州's seat — one row, at the 1601 point.** Decided by the user 2026-09-21
+   (conflict `zhenanzhou-which-seat`, resolved as 107.68781). CHGIS gives three
+   successive seat points and two fall inside 1601–1643, while `ADDR_CODES` holds one
+   coordinate per row. The row takes the 1601 point: 《通史》 records exactly one Ming
+   seat for 真安州 and that is the one matching it. The alternative shape — two rows
+   split at 1619/1620, as `docs/11` §5.1 did for the salt 分司 that moved — was not
+   taken; it would have doubled the write-once edge count from 3 to 6.
 2. **縣 bare, 州 suffixed.** The request writes 綏陽縣 / 仁懷縣; CBDB stores counties
    without the 縣 (15010 rows vs 909; 1086 vs 112 within the Ming window) and 州 with
    it (3734 vs 22), so the counties go in as 綏陽 / 仁懷, spelled to match their own
@@ -62,16 +61,25 @@ Recorded in full in the batch's `batch_notes`. In brief:
    for the identical CHGIS point, where one exists; it agrees with the supplied
    extract at 5 decimal places and makes each Ming row geometrically identical to its
    Qing successor.
+5. **Empty fields are NULL, not `""`.** `c_alt_names` on all three places,
+   `CHGIS_PT_ID` on 真安州 and `c_pages` on all three edges carry `null`. That is also
+   what would be written whatever we sent: the target system converts `""` to NULL on
+   every request (`docs/07` §1.5), and the two integer columns here hold no `''` at
+   all in the live table.
 
-## Finding reported, not acted on
+## The finding, and how it closed
 
-《中國行政區劃通史·明代卷》 has **no `TEXT_CODES` row**, though the 唐代, 宋代 and 遼金
-volumes do (40304, 68950, 68967 — and 40304 is the most-used source on
-`ADDR_BELONGS_DATA`). Creating it is a code-table write and therefore the user's call
-under rule 12, so the three edges carry `c_source: 0`, the documented unknown
-sentinel, with the citation written out in `c_notes`. `c_source` is in the update
-whitelist, so it can be corrected to a real `c_textid` later without re-creating the
-row.
+《中國行政區劃通史·明代卷》 had **no `TEXT_CODES` row** when the batch was drafted, though
+the 唐代, 宋代 and 遼金 volumes did (40304, 68950, 68967 — and 40304 is the most-used
+source on `ADDR_BELONGS_DATA`). Creating it is a code-table write, so under rule 12 it
+was reported rather than done, and the three edges were drafted with `c_source: 0`, the
+documented unknown sentinel.
+
+The user created the row on 2026-09-21 as `c_textid` **72219**, verified live via
+`GET /api/v2/texts/72219` — 中國行政區劃通史(明代卷), `c_text_type_id` 0201, the same type
+as the other volumes. All three edges now carry it. The review page shows the id
+unlabelled, because label resolution reads the weekly snapshot and that build predates
+the row by five weeks; the title was confirmed against the live endpoint instead.
 
 Two pre-existing oddities in the parent chain are noted in `batch_notes` and left
 alone, since changing either would itself be a rule-12 write: CBDB has no

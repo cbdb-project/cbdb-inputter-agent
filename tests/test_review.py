@@ -259,6 +259,58 @@ def test_apply_edits_a_field_value_and_reports_the_old_one():
     assert "18" in applied[0].detail and "19" in applied[0].detail
 
 
+def test_apply_reads_an_emptied_field_as_null_not_as_an_empty_string():
+    """The review page sends "" for a field the reviewer cleared. That must land as
+    NULL: the server runs ConvertEmptyStringsToNull over the body (docs/07 section
+    1.5), so "" and null are the same request, and writing "" into the staging file
+    would make preview.md show empty-string content where a null is meant."""
+    b = batch(person())
+    applied = apply_decisions(
+        b, _decisions({"proposal_id": "p1", "field": "c_dy", "value": ""})
+    )
+    assert b.proposals[0].changes["c_dy"] is None
+    assert [c.kind for c in applied] == ["field"]
+
+    # Whitespace-only is the same case - the server trims before converting.
+    b2 = batch(person())
+    apply_decisions(b2, _decisions({"proposal_id": "p1", "field": "c_dy", "value": "  "}))
+    assert b2.proposals[0].changes["c_dy"] is None
+
+
+def test_apply_leaves_an_already_null_field_alone_when_the_page_sends_empty():
+    """The page sends "" for every field it shows, including ones already null. Those
+    are confirmations, not edits, and must report no change - otherwise a reviewer who
+    touched one field appears to have edited every empty one beside it."""
+    p = person()
+    p.changes["c_notes"] = None
+    b = batch(p)
+    applied = apply_decisions(
+        b, _decisions({"proposal_id": "p1", "field": "c_notes", "value": ""})
+    )
+    assert applied == []
+    assert b.proposals[0].changes["c_notes"] is None
+
+
+def test_apply_keeps_the_zero_sentinel_which_is_not_an_empty_value():
+    """0 means "unknown" on a code/FK column (docs/07 section 1.5) and is a real
+    value - normalizing it to null would silently drop the sentinel."""
+    b = batch(person())
+    apply_decisions(b, _decisions({"proposal_id": "p1", "field": "c_dy", "value": 0}))
+    assert b.proposals[0].changes["c_dy"] == 0
+
+
+def test_apply_does_not_unresolve_a_conflict_settled_as_an_empty_string():
+    """resolution=None is the "unresolved" sentinel, so the empty-string
+    normalization must NOT reach a resolution: doing so would reopen a conflict the
+    reviewer had settled and silently re-block the batch."""
+    b = batch(person(), posting(conflicts=[a_conflict("c1")]))
+    apply_decisions(
+        b, _decisions({"proposal_id": "p1o1", "conflict_id": "c1", "resolution": ""})
+    )
+    assert b.proposals[1].conflicts[0].resolution == ""
+    assert find_issues(b) == []
+
+
 def test_apply_can_drop_a_field():
     b = batch(person())
     applied = apply_decisions(
