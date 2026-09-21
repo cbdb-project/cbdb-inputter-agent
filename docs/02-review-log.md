@@ -2504,3 +2504,63 @@ over, that is what happened, and four times the row turned out not to exist.
 **Still owed:** `php artisan cbdb:regenerate-addresses-table` on the server.
 `ADDRESSES` is a derived cache; until it is rebuilt these 57 places are invisible
 to posting autofill and dynasty homonym disambiguation.
+
+---
+
+## 2026-09-21 — 真安州 / 綏陽 / 仁懷 under 遵義軍民府: staged, one decision open
+
+Ning Hao's 2026-09-18 request: add the three units 《中國行政區劃通史·明代卷》 records
+under 遵義軍民府 — 真安州 and the two counties it governed, 綏陽 and 仁懷 — for
+1601–1643, with CHGIS coordinates supplied per unit.
+
+Batch `2026-09-21-zhenanzhou-renhuai-suiyang`: 3 `ADDR_CODES` + 3
+`ADDR_BELONGS_DATA`, hand-written, no `case.py`. Validates with 0 structural errors
+and 1 unresolved conflict, which is deliberate and blocks submit. Nothing sent.
+
+**Both admin categories already exist** — 215 州, 21 縣 — so this batch creates no
+`ADMIN_CAT_CODES` row. That is the one table with no read endpoint at submit time
+and no unique key on its names, so not needing it removes the salt import's most
+awkward exposure entirely.
+
+**The parent exists, and is not called what the source calls it.** `ADDR_CODES`
+702684 遵義, 1378–1643, `Fu` — confirmed live, not read off the snapshot. CBDB has no
+遵義軍民府 row at all, so 702684's single Ming span conflates the 播州宣慰司 period
+(to 1601) with the 遵義軍民府 period (from 1601). It is still the right parent for a
+1601–1643 child, being the row that carries the name. Two pre-existing oddities left
+alone, since changing either is itself a rule-12 write: its romanization is `Zhunyi`,
+and its own edge puts it under 貴州布政司 for the whole Ming where the source has
+遵義 under 四川布政司 from 洪武二十七年 (the transfer to Guizhou was 1727). A separate
+播州宣慰使司 row, 5775, does sit under 四川布政司 for the same span.
+
+**The open decision: one 真安州 row or two.** CHGIS gives it three successive seat
+points and two fall inside 1601–1643 (hvd_99379 1601–1619, hvd_99380 1620–1657),
+while `ADDR_CODES` holds one coordinate per row. Filed as conflict
+`zhenanzhou-which-seat` with hvd_99379 suggested: 《通史》 records exactly one Ming
+seat for 真安州, 道真縣南舊城區, and that is the point matching it — the 1620 move is
+CHGIS's assertion and is not in the passage supplied. The alternative shape, two rows
+split at 1619/1620 as §5.1 of `docs/11` did for the salt 分司 that moved, is **not**
+reachable by resolving the conflict; it needs the batch regenerated, and takes the
+write-once edge count from 3 to 6. Recorded in `batch_notes` so the reviewer sees that
+the conflict's two options are not the whole option set.
+
+**Naming settled by measurement, not by the request's spelling.** The request writes
+綏陽縣 / 仁懷縣; the live table stores counties bare (15010 rows vs 909 suffixed; 1086
+vs 112 within the Ming window) and 州 suffixed (3734 vs 22). So the counties go in as
+綏陽 / 仁懷, spelled to match their own Qing successors (8906, 8877), and 真安州 keeps
+its 州. Romanization from the same table: `Zhen'an Zhou`, after `Bao'an Zhou` (4346)
+and `Tai'an Zhou` (3447).
+
+**Finding, reported and not acted on (rule 12).** 《中國行政區劃通史·明代卷》 has no
+`TEXT_CODES` row, though 唐代卷 40304, 宋代卷 68950 and 遼金卷 68967 do — and 40304 is
+the most-used `c_source` on `ADDR_BELONGS_DATA` (11843 edges). Creating the 明代卷 row
+is a code-table write and so the user's call. Until then the three edges carry
+`c_source: 0`, the documented unknown sentinel and the commonest value in that table
+(15264 edges), with the citation written out in `c_notes`. Unlike the four-column key,
+`c_source` is in the update whitelist, so this is correctable later without
+re-creating the row.
+
+**Duplicate check ran live**, `/api/select/search/addr` at 05:19:57Z, exact
+`c_name_chn` match and period-overlap only: 0 rows for 真安州, 綏陽, 仁懷, and 0 for
+the 縣-suffixed spellings too. The snapshot agreed and was not allowed to be the
+answer. The 36-day-old snapshot supplied the code labels in the preview and the
+surrounding-row statistics quoted above — reference data, which is what it is for.

@@ -29,6 +29,7 @@ See AGENTS.md, "Where code goes", for the rule that separates a case from a tool
 | [yuan-text-codes](yuan-text-codes/) | 1 (2026-08-18) | not submitted — reported as a finding (rule 12) | `docs/02` §*text-codes support* |
 | [tang-zhi-mou-zhou-shi](tang-zhi-mou-zhou-shi/) | 1 (2026-09-04) | submitted — production, verified | `docs/10` |
 | [salt-administration](salt-administration/) | 6 (2026-09-10 … 2026-09-19) | **complete** — all 118 rows in production | `docs/11` |
+| [zhenanzhou-renhuai-suiyang](zhenanzhou-renhuai-suiyang/) | 1 (2026-09-21) | staged, not submitted — 1 unresolved conflict | `cases/zhenanzhou-renhuai-suiyang/README.md` |
 
 ## Writing a case README
 
