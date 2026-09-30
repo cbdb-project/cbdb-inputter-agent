@@ -2826,6 +2826,11 @@ back through `GET /cbdbapi/person`, where 安陽 remains the index address. Gate
 re-locked. All eighteen people of the source are now in CBDB, and the user's
 spreadsheet carries an id on every row.
 
-Still open with the user: the stamp in 72220's `c_notes` (read again after they
-reported clearing it — still present), and whether the server's 説 → 說 on
-朱象先's `c_notes` is acceptable.
+The server's 説 → 說 on 朱象先's `c_notes`: accepted by the user — the two are
+variant forms, and the change is the server's variant normalisation.
+
+The stamp in 72220's `c_notes` was still present when read again. The bare
+`text-codes` update takes only `c_title`, but the `text-entity` aggregate takes
+`notes` (API.md §13.4), and that is what the web edit page
+`/app/text/{id}/edit` writes through — so the user can clear it there. The other
+page, `/app/codes/TEXT_CODES/{id}/edit`, is the bare table and cannot.

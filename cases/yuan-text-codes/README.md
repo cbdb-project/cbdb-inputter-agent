@@ -29,8 +29,9 @@ the person holding the decision made it, in the way they chose.
 
 One loose end, and it is not something this client can tie off: the new row's
 `c_notes` holds an auto-generated bracketed stamp, and the user does not want it
-kept. A `TEXT_CODES` `update` accepts only `c_title` (`API.md` §13.3), so clearing
-it has to be done in the web interface or by someone with database access.
+kept. The bare `TEXT_CODES` `update` this client models accepts only `c_title`
+(`API.md` §13.3), but the `text-entity` aggregate takes `notes` (§13.4) and backs
+the web edit page `/app/text/72220/edit`, which is where it can be cleared.
 
 ## What was checked before concluding the title was missing
 
