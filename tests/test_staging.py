@@ -89,6 +89,10 @@ def test_unresolved_conflict_reported_but_not_error_severity():
 
 def test_resolved_conflict_allows_submit():
     p1 = make_person_create()
+    # The payload has to carry what the conflict was resolved to: without this
+    # line the batch would submit a person with no death year, which is what
+    # validate now refuses (docs/03 section 2.2).
+    p1.changes["c_deathyear"] = 819
     p1.conflicts.append(
         Conflict(id="c1", field="c_deathyear", description="x", options=[], resolution=819)
     )

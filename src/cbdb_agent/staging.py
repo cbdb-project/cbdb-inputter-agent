@@ -68,6 +68,14 @@ class Conflict(BaseModel):
     agent_suggestion: Any = None
     agent_reasoning: str | None = None
     resolution: Any = None  # None = unresolved, blocks submit
+    # Set by apply-review when a STRING resolution was recognised as a value of
+    # the column (see resolution_is_value). Recorded rather than re-derived,
+    # because the recognition reads the payload, and a later edit of the payload
+    # to something outside the options would otherwise turn the resolution back
+    # into an unchecked "decision". Omitted from the YAML while unset. `true` or
+    # absent only: a hand-written `false` would re-open exactly that hole, so a
+    # file carrying one fails to load.
+    resolution_is_value: Literal[True] | None = None
 
 
 class Proposal(BaseModel):
@@ -204,6 +212,10 @@ def save_staging_file(batch: StagingBatch, path: str) -> None:
     # exclude_none=False is deliberate: `resolution: null` MUST stay visible, since
     # it is the submission blocker a human is meant to see and fill in.
     data = batch.model_dump(exclude_none=False)
+    for proposal in data.get("proposals", []):
+        for conflict in proposal.get("conflicts") or []:
+            if conflict.get("resolution_is_value") is None:
+                conflict.pop("resolution_is_value", None)
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
 
@@ -218,6 +230,12 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
     issues: list[Issue] = []
     seen_ids: set[str] = set()
     by_id = {p.id: p for p in batch.proposals}
+    # Proposals a "defer" holds out, directly or through what they depend on. They
+    # are never sent, so a resolution their payload does not carry is not a risk.
+    try:
+        held_out_ids = by_id.keys() - {q.id for q in submittable_proposals(batch)}
+    except (StagingError, KeyError, TypeError):   # malformed; reported below
+        held_out_ids = set()
 
     for p in batch.proposals:
         if p.id in seen_ids:
@@ -305,6 +323,28 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
             spec.resolve_alias(p.resource, p.operation)
         except FieldWhitelistError as exc:
             issues.append(Issue(proposal_id=p.id, severity="error", message=str(exc)))
+
+        # A resolution is only a record of what the reviewer chose; `submit` sends
+        # `changes` and `target_pk`. Resolved as 61989 with c_office_id absent is a
+        # posting without an office - caught on 2026-09-30 just before a
+        # production run, for four postings, an address list and a texts key.
+        # `apply-review` now writes value resolutions through; this catches a
+        # file edited by hand, or one applied before that.
+        held_out = p.id in held_out_ids
+        for conflict in p.conflicts:
+            if held_out:
+                continue
+            for slot in resolution_slots(p, conflict, spec):
+                if not resolution_is_value(p, conflict, slot):
+                    continue
+                actual = (getattr(p, slot) or {}).get(conflict.field, "<absent>")
+                if not _same_value(actual, conflict.resolution):
+                    issues.append(Issue(
+                        proposal_id=p.id, severity="error",
+                        message=(f"conflict {conflict.id!r} is resolved as "
+                                 f"{conflict.resolution!r}, but {slot}."
+                                 f"{conflict.field} is {actual!r} - what is sent is "
+                                 f"the payload, not the resolution. Make them agree.")))
 
         # NOTE: until 2026-09-14 this is where a missing `approved_by` made a
         # global-reference-data batch structurally invalid. That gate is gone — it
@@ -628,6 +668,110 @@ def _pk_ref_issues(batch: "StagingBatch", by_id: dict) -> list["Issue"]:
                             f"so there is no unambiguous value to substitute"))
     return issues
 
+def is_field_value_resolution(value: Any) -> bool:
+    """Whether a conflict's resolution is a value to WRITE rather than a decision.
+
+    Integers, floats and lists are values: every CBDB code, year and address list
+    is one, and those are what a reviewer is choosing between when a conflict is
+    about c_office_id or c_addr. A string is never treated as one, because options
+    use strings for decisions - "defer", "whole", "confirmed", "new_office_code",
+    "1324-1328" - and a string that happens to be a real value (a character in a
+    name) cannot be told apart from one of those by looking at it. The review
+    round trip reports such a string instead of guessing.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    return isinstance(value, list) and all(
+        isinstance(v, (int, float, str)) and not isinstance(v, bool) for v in value)
+
+
+def resolution_is_value(proposal: Proposal, conflict: Conflict, slot: str) -> bool:
+    """Whether `conflict.resolution` is a value for `slot`'s column, to be written.
+
+    Numbers and lists always are (`is_field_value_resolution`). A string is one
+    when the options are alternative values OF that column - recognisable because
+    what the column holds now is itself one of them. 蕭𣂏's name conflict offered
+    𣃏 and 㪺 with the payload holding 𣃏: those are two spellings, and choosing 㪺
+    means writing it. 八元凱's offered `split` and `whole` with the payload holding
+    八: those are decisions, and writing "whole" into a surname would be absurd.
+    Evaluated against the payload before anything is written.
+    """
+    value = conflict.resolution
+    if value is None or value == "defer":
+        return False
+    if conflict.resolution_is_value:
+        return True
+    return value_is_candidate(proposal, conflict, value, slot)
+
+
+def value_is_candidate(proposal: Proposal, conflict: Conflict, value: Any,
+                       slot: str) -> bool:
+    """`resolution_is_value` for a `value` not yet recorded as the resolution -
+    what apply-review asks before it records one."""
+    if value is None or value == "defer":
+        return False
+    if is_field_value_resolution(value):
+        return True
+    if not isinstance(value, str):
+        return False
+    current = (getattr(proposal, slot) or {}).get(conflict.field)
+    return current is not None and any(
+        o.value != "defer" and _same_value(o.value, current) for o in conflict.options)
+
+
+def resolution_slots(proposal: Proposal, conflict: Conflict, spec: Any) -> list[str]:
+    """Where a field-value resolution belongs in `proposal`: "target_pk",
+    "changes", both, or nowhere (the conflict is not about a column).
+
+    A column already present is written where it is - both places when it is in
+    both, as an address row's c_addr_id is. An absent column goes where this
+    operation takes it: `changes` if the spec lets the operation write it, else
+    the key if it is a (client-supplied) key field.
+    """
+    field_name = conflict.field
+    if field_name == "c_personid" or proposal.operation == "delete":
+        return []           # a delete writes no values; its key names what goes
+    # On an update or a delete, target_pk names the row AS IT IS NOW and a
+    # resolution is about the value it should have - so the key is never written.
+    # Renaming an alias's type from 0 to 4 puts 4 in `changes`; putting it in the
+    # key as well would address a row that does not exist. On a create the key IS
+    # the new row, so it is written like any other column.
+    key_is_the_new_row = proposal.operation == "create"
+    slots = [slot for slot, mapping in (("target_pk", proposal.target_pk),
+                                         ("changes", proposal.changes))
+             if mapping and field_name in mapping
+             and (slot == "changes" or key_is_the_new_row)]
+    if slots:
+        return slots
+    if not key_is_the_new_row and proposal.target_pk and field_name in proposal.target_pk:
+        return []           # key or new value? ambiguous - apply-review says so
+    writable = (spec.create_fields if proposal.operation == "create"
+                else spec.update_fields) | spec.pseudo_fields
+    if field_name in writable:
+        return ["changes"]
+    if (key_is_the_new_row and field_name in spec.pk_fields
+            and field_name not in spec.server_assigned_pk_fields
+            and proposal.target_pk is not None):
+        return ["target_pk"]
+    return []
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    """Equal as values, not as Python types - YAML hands back 64813 where a
+    response or an older file may carry "64813"."""
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_same_value(x, y) for x, y in zip(a, b))
+    if isinstance(a, list) or isinstance(b, list) or a is None or b is None:
+        return a == b
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return a == b
+    return str(a) == str(b)
+
+
 def _sibling_dependency(proposal: Proposal, by_id: dict[str, Proposal]) -> str | None:
     """Return the sibling proposal id `proposal.person_id` depends on, or None if
     `person_id` is "NEW", a real (numeric) c_personid, or not a recognized sibling.
@@ -716,8 +860,8 @@ def validate_for_submit(batch: StagingBatch) -> None:
 
 def submittable_proposals(batch: StagingBatch) -> list[Proposal]:
     """Proposals to actually submit: excludes any proposal with a conflict
-    resolved as "defer" (docs/03 section 2.2: "'defer' (skip this one field/row
-    for now, submit the rest of the batch)") - AND, transitively, any proposal
+    resolved as "defer" (docs/03 section 2.2: the whole proposal, never just the
+    conflict's field) - AND, transitively, any proposal
     that (directly or indirectly) depends on a deferred proposal - by person_id
     OR by a `{"ref": ...}` primary-key reference.
 

@@ -588,3 +588,356 @@ def test_a_decisions_file_with_no_content_hash_is_refused():
     with pytest.raises(StagingError, match="before this check existed"):
         apply_decisions(b, _decisions(
             {"proposal_id": "p1", "field": "c_dy", "value": 19}, stamp=False))
+
+
+# --- a resolution reaches the payload ------------------------------------------
+#
+# The real case: 2026-08-18-yuan-18-persons, reviewed 2026-09-30. Four postings
+# were resolved to an office code while `changes` had no c_office_id at all, a
+# texts row was resolved to c_textid 72220 while its key still said 0, and five
+# index-year conflicts were resolved "defer" meaning "leave the year empty".
+# `submit` sends the payload, never the resolution.
+
+
+def _bare_posting(conflicts):
+    p = posting(conflicts=conflicts)
+    del p.changes["c_office_id"]
+    return p
+
+
+def test_a_code_resolution_is_written_into_an_absent_column():
+    b = batch(person(), _bare_posting([a_conflict("c1", options=(63111, "defer"))]))
+    applied = apply_decisions(
+        b, _decisions({"proposal_id": "p1o1", "conflict_id": "c1", "resolution": 61989}))
+    assert b.proposals[1].changes["c_office_id"] == 61989
+    assert [c.kind for c in applied] == ["resolution", "field"]
+    assert find_issues(b) == []
+
+
+def test_a_code_resolution_replaces_the_value_already_there():
+    b = batch(person(), posting(conflicts=[a_conflict("c1")]))
+    apply_decisions(
+        b, _decisions({"proposal_id": "p1o1", "conflict_id": "c1", "resolution": 63111}))
+    assert b.proposals[1].changes["c_office_id"] == 63111
+
+
+def test_a_key_field_resolution_is_written_into_the_key():
+    """The texts case: c_textid lives in target_pk, and 0 there is 未詳."""
+    t = Proposal(id="p1t1", resource="texts", operation="create", person_id="p1",
+                 target_pk={"c_textid": 0, "c_role_id": 1}, changes={"c_role_id": 1},
+                 source_quote="著", confidence="high",
+                 conflicts=[Conflict(id="c1", field="c_textid", description="d",
+                                     options=[ConflictOption(value="defer", rationale="r")])])
+    b = batch(person(), t)
+    apply_decisions(
+        b, _decisions({"proposal_id": "p1t1", "conflict_id": "c1", "resolution": 72220}))
+    assert b.proposals[1].target_pk["c_textid"] == 72220
+
+
+def test_a_list_resolution_is_written_as_a_list():
+    c = Conflict(id="c1", field="c_addr", description="d", options=[])
+    b = batch(person(), posting(conflicts=[c]))
+    apply_decisions(
+        b, _decisions({"proposal_id": "p1o1", "conflict_id": "c1", "resolution": [18379]}))
+    assert b.proposals[1].changes["c_addr"] == [18379]
+
+
+def test_a_field_edit_in_the_same_file_wins_over_the_resolution():
+    """Whichever order the page wrote them in, the value typed into the field is
+    the more specific instruction."""
+    b = batch(person(), posting(conflicts=[a_conflict("c1")]))
+    apply_decisions(b, _decisions(
+        {"proposal_id": "p1o1", "field": "c_office_id", "value": 64813},
+        {"proposal_id": "p1o1", "conflict_id": "c1", "resolution": 63111}))
+    assert b.proposals[1].changes["c_office_id"] == 64813
+
+
+def test_a_string_resolution_is_not_written_and_is_reported():
+    c = Conflict(id="c1", field="c_surname_chn", description="d",
+                 options=[ConflictOption(value="split", rationale="r"),
+                          ConflictOption(value="whole", rationale="r")])
+    p = person()
+    p.changes["c_surname_chn"] = "八"
+    p.conflicts = [c]
+    b = batch(p)
+    applied = apply_decisions(
+        b, _decisions({"proposal_id": "p1", "conflict_id": "c1", "resolution": "whole"}))
+    assert b.proposals[0].changes["c_surname_chn"] == "八"
+    assert [c.kind for c in applied] == ["resolution", "note"]
+
+
+def test_no_note_once_the_field_edit_makes_them_agree():
+    c = Conflict(id="c1", field="c_mingzi_chn", description="d", options=[])
+    p = person()
+    p.changes["c_mingzi_chn"] = "𣃏"
+    p.conflicts = [c]
+    b = batch(p)
+    applied = apply_decisions(b, _decisions(
+        {"proposal_id": "p1", "conflict_id": "c1", "resolution": "㪺"},
+        {"proposal_id": "p1", "field": "c_mingzi_chn", "value": "㪺"}))
+    assert "note" not in [c.kind for c in applied]
+
+
+def test_a_resolution_about_no_column_touches_nothing():
+    c = Conflict(id="c1", field="resource", description="d", options=[])
+    b = batch(person(), posting(conflicts=[c]))
+    before = dict(b.proposals[1].changes)
+    apply_decisions(
+        b, _decisions({"proposal_id": "p1o1", "conflict_id": "c1", "resolution": 12}))
+    assert b.proposals[1].changes == before
+
+
+def test_defer_writes_nothing():
+    b = batch(person(), posting(conflicts=[a_conflict("c1")]))
+    apply_decisions(
+        b, _decisions({"proposal_id": "p1o1", "conflict_id": "c1", "resolution": "defer"}))
+    assert b.proposals[1].changes["c_office_id"] == 65759
+
+
+def test_reapplying_the_same_file_changes_nothing():
+    b = batch(person(), _bare_posting([a_conflict("c1")]))
+    d = _decisions({"proposal_id": "p1o1", "conflict_id": "c1", "resolution": 61989})
+    apply_decisions(b, d)
+    assert apply_decisions(b, d) == []
+
+
+def test_validate_refuses_a_resolution_the_payload_does_not_carry():
+    """A file edited by hand, or applied before apply-review wrote values through."""
+    c = a_conflict("c1")
+    c.resolution = 61989
+    b = batch(person(), _bare_posting([c]))
+    issues = find_issues(b)
+    assert any("resolved as 61989" in i.message and i.severity == "error"
+               for i in issues)
+
+
+def test_validate_ignores_a_deferred_proposal():
+    c1, c2 = a_conflict("c1"), a_conflict("c2", field="c_addr")
+    c1.resolution, c2.resolution = 63111, "defer"
+    b = batch(person(), posting(conflicts=[c1, c2]))
+    assert not any("resolved as" in i.message for i in find_issues(b))
+
+
+def test_an_update_resolution_never_rewrites_the_key_that_finds_the_row():
+    """x2 in the real batch: an alias of type 0 becomes type 4. The 0 in target_pk
+    is how the server finds the existing row; a 4 there addresses nothing."""
+    a = Proposal(id="x2", resource="altnames", operation="update", person_id=35442,
+                 target_pk={"c_alt_name_chn": "惟斗", "c_alt_name_type_code": 0},
+                 changes={"c_alt_name_type_code": 4}, source_quote="字惟斗",
+                 confidence="high",
+                 conflicts=[Conflict(id="c1", field="c_alt_name_type_code",
+                                     description="d", options=[])])
+    b = batch(a)
+    apply_decisions(
+        b, _decisions({"proposal_id": "x2", "conflict_id": "c1", "resolution": 4}))
+    assert b.proposals[0].target_pk["c_alt_name_type_code"] == 0
+    assert b.proposals[0].changes["c_alt_name_type_code"] == 4
+    assert find_issues(b) == []
+
+
+def test_a_field_edit_on_a_create_follows_through_to_the_key():
+    """p02d2 in the real batch: c_sequence edited to 1 in changes stayed 2 in the
+    key, and a create whose two copies of a column disagree is refused."""
+    a = Proposal(id="p1d1", resource="addresses", operation="create", person_id="p1",
+                 target_pk={"c_addr_id": 211049, "c_addr_type": 12, "c_sequence": 2},
+                 changes={"c_addr_id": 211049, "c_addr_type": 12, "c_sequence": 2},
+                 source_quote="往江東", confidence="high")
+    b = batch(person(), a)
+    apply_decisions(b, _decisions({"proposal_id": "p1d1", "field": "c_sequence", "value": 1}))
+    assert b.proposals[1].target_pk["c_sequence"] == 1
+    assert b.proposals[1].changes["c_sequence"] == 1
+
+
+def test_a_field_edit_beats_a_resolution_in_both_copies_of_a_create_key():
+    c = Conflict(id="c1", field="c_addr_type", description="d", options=[])
+    a = Proposal(id="p1d1", resource="addresses", operation="create", person_id="p1",
+                 target_pk={"c_addr_id": 211049, "c_addr_type": 1, "c_sequence": 1},
+                 changes={"c_addr_id": 211049, "c_addr_type": 1, "c_sequence": 1},
+                 source_quote="q", confidence="high", conflicts=[c])
+    b = batch(person(), a)
+    apply_decisions(b, _decisions(
+        {"proposal_id": "p1d1", "conflict_id": "c1", "resolution": 6},
+        {"proposal_id": "p1d1", "field": "c_addr_type", "value": 12}))
+    assert b.proposals[1].target_pk["c_addr_type"] == 12
+    assert b.proposals[1].changes["c_addr_type"] == 12
+
+
+def test_an_update_field_edit_leaves_the_key_alone():
+    a = Proposal(id="x2", resource="altnames", operation="update", person_id=35442,
+                 target_pk={"c_alt_name_chn": "惟斗", "c_alt_name_type_code": 0},
+                 changes={"c_alt_name_type_code": 0}, source_quote="q", confidence="high")
+    b = batch(a)
+    apply_decisions(b, _decisions(
+        {"proposal_id": "x2", "field": "c_alt_name_type_code", "value": 4}))
+    assert b.proposals[0].target_pk["c_alt_name_type_code"] == 0
+
+
+def test_validate_ignores_a_proposal_held_out_through_its_person():
+    p = person()
+    p.conflicts = [Conflict(id="c0", field="c_index_year", description="d",
+                            options=[], resolution="defer")]
+    c = a_conflict("c1")
+    c.resolution = 61989
+    b = batch(p, _bare_posting([c]))
+    assert not any("resolved as" in i.message for i in find_issues(b))
+
+
+def test_a_hand_edit_after_apply_is_not_silently_undone_by_a_rerun():
+    """Re-running a stale decisions file must not put the old option back over a
+    value someone has since corrected by hand."""
+    b = batch(person(), _bare_posting([a_conflict("c1")]))
+    d = _decisions({"proposal_id": "p1o1", "conflict_id": "c1", "resolution": 63111})
+    apply_decisions(b, d)
+    b.proposals[1].changes["c_office_id"] = 99999
+    with pytest.raises(StagingError):
+        apply_decisions(b, d)
+    assert b.proposals[1].changes["c_office_id"] == 99999
+
+
+def test_an_update_resolution_on_a_key_only_column_is_reported_not_written():
+    """Is 200 the row to change or the value to give it? On an update that decides
+    which row is touched, so nothing is guessed."""
+    a = Proposal(id="d1", resource="addresses", operation="update", person_id=1,
+                 target_pk={"c_addr_id": 100, "c_addr_type": 1, "c_sequence": 1},
+                 changes={"c_notes": "n"}, source_quote="q", confidence="high",
+                 conflicts=[Conflict(id="c1", field="c_addr_id", description="d",
+                                     options=[])])
+    b = batch(a)
+    applied = apply_decisions(
+        b, _decisions({"proposal_id": "d1", "conflict_id": "c1", "resolution": 200}))
+    assert "c_addr_id" not in b.proposals[0].changes
+    assert b.proposals[0].target_pk["c_addr_id"] == 100
+    assert "note" in [c.kind for c in applied]
+
+
+def test_a_typed_value_becomes_the_resolution_and_validates():
+    b = batch(person(), posting(conflicts=[a_conflict("c1")]))
+    d = _decisions(
+        {"proposal_id": "p1o1", "field": "c_office_id", "value": 64813},
+        {"proposal_id": "p1o1", "conflict_id": "c1", "resolution": 63111})
+    apply_decisions(b, d)
+    assert b.proposals[1].conflicts[0].resolution == 64813
+    assert b.proposals[1].changes["c_office_id"] == 64813
+    assert find_issues(b) == []
+    # Re-running changes nothing; it only repeats the note about the typed value.
+    assert [c.kind for c in apply_decisions(b, d)] == ["note"]
+
+
+def test_numbers_compare_as_numbers():
+    from cbdb_agent.staging import _same_value
+    assert _same_value(1, 1.0)
+    assert not _same_value(True, "True")
+    assert _same_value(64813, "64813")
+
+
+def test_choosing_a_value_and_emptying_the_field_is_refused():
+    b = batch(person(), posting(conflicts=[a_conflict("c1")]))
+    with pytest.raises(StagingError, match="empties c_office_id"):
+        apply_decisions(b, _decisions(
+            {"proposal_id": "p1o1", "field": "c_office_id", "value": ""},
+            {"proposal_id": "p1o1", "conflict_id": "c1", "resolution": 63111}))
+
+
+def test_emptying_a_key_column_of_a_new_row_is_refused():
+    a = Proposal(id="p1d1", resource="addresses", operation="create", person_id="p1",
+                 target_pk={"c_addr_id": 211049, "c_addr_type": 12, "c_sequence": 2},
+                 changes={"c_addr_id": 211049, "c_addr_type": 12, "c_sequence": 2},
+                 source_quote="q", confidence="high")
+    b = batch(person(), a)
+    with pytest.raises(StagingError, match="cannot be emptied"):
+        apply_decisions(b, _decisions({"proposal_id": "p1d1", "field": "c_sequence",
+                                       "value": ""}))
+
+
+def test_a_stale_field_edit_cannot_ride_on_a_fresh_conflict_decision():
+    b = batch(person(), posting(conflicts=[a_conflict("c1")]))
+    d = _decisions({"proposal_id": "p1o1", "conflict_id": "c1", "resolution": 63111})
+    d["decisions"].append({"proposal_id": "p1o1", "field": "c_office_id",
+                           "value": 64813, "content_hash": "stale"})
+    with pytest.raises(StagingError):
+        apply_decisions(b, d)
+    assert b.proposals[1].changes["c_office_id"] == 65759
+
+
+def _name_conflict_person():
+    """x1 in the real batch: the options are two spellings of the same column."""
+    c = Conflict(id="c1", field="c_mingzi_chn", description="d",
+                 options=[ConflictOption(value="𣃏", rationale="r"),
+                          ConflictOption(value="㪺", rationale="r"),
+                          ConflictOption(value="defer", rationale="r")])
+    p = Proposal(id="x1", resource="basicinformation", operation="update",
+                 person_id=35442, changes={"c_mingzi_chn": "𣃏"},
+                 source_quote="q", confidence="low", conflicts=[c])
+    return p
+
+
+def test_a_string_chosen_among_alternative_values_is_written():
+    b = batch(_name_conflict_person())
+    applied = apply_decisions(
+        b, _decisions({"proposal_id": "x1", "conflict_id": "c1", "resolution": "㪺"}))
+    assert b.proposals[0].changes["c_mingzi_chn"] == "㪺"
+    assert "note" not in [c.kind for c in applied]
+    assert find_issues(b) == []
+
+
+def test_validate_refuses_a_string_alternative_the_payload_does_not_carry():
+    p = _name_conflict_person()
+    p.conflicts[0].resolution = "㪺"
+    issues = find_issues(batch(p))
+    assert any("resolved as '㪺'" in i.message and i.severity == "error"
+               for i in issues)
+
+
+def test_a_decision_string_is_still_not_validated_as_a_value():
+    c = Conflict(id="c1", field="c_surname_chn", description="d",
+                 options=[ConflictOption(value="split", rationale="r"),
+                          ConflictOption(value="whole", rationale="r")],
+                 resolution="whole")
+    p = person()
+    p.changes["c_surname_chn"] = "八"
+    p.conflicts = [c]
+    assert not any("resolved as" in i.message for i in find_issues(batch(p)))
+
+
+def test_a_typed_value_overrides_a_string_alternative_and_is_checked():
+    b = batch(_name_conflict_person())
+    apply_decisions(b, _decisions(
+        {"proposal_id": "x1", "conflict_id": "c1", "resolution": "㪺"},
+        {"proposal_id": "x1", "field": "c_mingzi_chn", "value": "斗"}))
+    c = b.proposals[0].conflicts[0]
+    assert c.resolution == "斗" and c.resolution_is_value is True
+    assert b.proposals[0].changes["c_mingzi_chn"] == "斗"
+    assert find_issues(b) == []
+
+
+def test_a_later_hand_edit_outside_the_options_is_still_caught():
+    """The classification is recorded, so editing the payload to something that
+    is not an option cannot turn the resolution back into an unchecked decision."""
+    b = batch(_name_conflict_person())
+    d = _decisions({"proposal_id": "x1", "conflict_id": "c1", "resolution": "㪺"})
+    apply_decisions(b, d)
+    b.proposals[0].changes["c_mingzi_chn"] = "X"
+    assert any("resolved as '㪺'" in i.message for i in find_issues(b))
+    with pytest.raises(StagingError):
+        apply_decisions(b, d)       # and a re-run does not paper over it
+    assert b.proposals[0].conflicts[0].resolution_is_value is True
+
+
+def test_the_classification_survives_the_yaml_and_is_omitted_when_unset(tmp_path):
+    from cbdb_agent.staging import load_staging_file, save_staging_file
+    b = batch(_name_conflict_person(), person())
+    apply_decisions(b, _decisions(
+        {"proposal_id": "x1", "conflict_id": "c1", "resolution": "㪺"}))
+    path = tmp_path / "proposal.yaml"
+    save_staging_file(b, str(path))
+    text = path.read_text(encoding="utf-8")
+    assert text.count("resolution_is_value") == 1
+    again = load_staging_file(str(path))
+    assert again.proposals[0].conflicts[0].resolution_is_value is True
+
+
+def test_a_false_classification_marker_is_refused():
+    import pydantic
+    with pytest.raises(pydantic.ValidationError):
+        Conflict(id="c1", field="c_mingzi_chn", description="d", options=[],
+                 resolution="㪺", resolution_is_value=False)

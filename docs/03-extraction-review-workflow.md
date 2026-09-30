@@ -150,8 +150,25 @@ Design points:
 - `conflicts: []` is required (even if empty) on every proposal, so validation has a
   single place to check "any unresolved conflicts anywhere in this batch?"
 - `resolution: null` blocks submission. `resolution` can be set to one of the
-  `options[].value`s, a free-text override, or `"defer"` (skip this one field/row for
-  now, submit the rest of the batch).
+  `options[].value`s, a free-text override, or `"defer"`.
+- **`"defer"` holds the whole proposal out of the submit — and, transitively,
+  every proposal that depends on it** (`staging.submittable_proposals`). It does
+  *not* mean "leave this field empty": deferring a `basicinformation` conflict drops
+  that person and all of their rows. When the honest answer is "leave the field
+  NULL", offer that as its own option (e.g. `value: leave-null`) instead of routing
+  it through `defer`. Until 2026-09-30 this bullet said "skip this one field/row",
+  and five index-year conflicts written in that spirit would have dropped five
+  people. `apply-review` now lists every proposal a `defer` holds out.
+- **A resolution is not what gets sent; `changes` and `target_pk` are.** When a
+  conflict is about a column and its resolution is a number or a list (a code, a
+  year, an address list), `apply-review` writes it into that column, and
+  `validate` refuses a batch where the two disagree. A *string* resolution is
+  written, and checked, only when the options are alternative values of the column
+  — which shows in the payload currently holding one of them (a name offered as
+  𣃏 or 㪺, holding 𣃏). Otherwise it is a decision (`whole`, `confirmed`,
+  `1324-1328`): it is not written, `apply-review` reports any such resolution the
+  payload does not match, and the field is edited explicitly. So write a
+  conflict's options as the column's candidate values whenever they are values.
 - Local `id`s (`p1`, `p2`, `c3`) let the human and the agent refer to specific rows
   precisely in follow-up chat ("resolve c3 as 820") without needing full JSON paths.
 - `person_id: NEW` / `person_id: p1` (referencing a sibling proposal) defers real

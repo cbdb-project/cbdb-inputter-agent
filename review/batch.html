@@ -507,8 +507,12 @@ function conflictNode(p, c){
     b.onclick = () => setConflict(p.id, c.id, o.value);
     opts.appendChild(b);
   }
-  const defer = el("button", "opt" + (chosen && chosen.value === "defer" ? " sel" : ""), "defer");
-  defer.title = "Skip this row/field for now; submit the rest of the batch.";
+  const defer = el("button", "opt" + (chosen && chosen.value === "defer" ? " sel" : ""), "defer (whole row)");
+  // Not "skip this field": a "defer" holds the WHOLE proposal out of the submit,
+  // and every proposal that depends on it (a person's deferral drops all of their
+  // rows). To leave one field empty, pick or type an explicit value instead.
+  defer.title = "Hold this whole proposal - and everything that depends on it - "
+              + "out of this submit. Not for leaving one field empty.";
   defer.onclick = () => setConflict(p.id, c.id, "defer");
   opts.appendChild(defer);
   if (chosen && chosen.mine){

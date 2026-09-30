@@ -57,6 +57,7 @@ from .staging import (
     load_staging_file,
     render_preview_markdown,
     save_staging_file,
+    submittable_proposals,
     validate_for_submit,
 )
 
@@ -337,20 +338,38 @@ def cmd_apply_review(args: argparse.Namespace) -> int:
         print(f"Refusing to apply: {exc}", file=sys.stderr)
         return EXIT_VALIDATION_ERROR
 
-    if not applied:
-        print("No changes - every decision already matched the staging file.")
-        return EXIT_OK
-
     for change in applied:
         print(f"  [{change.proposal_id}] {change.kind}: {change.detail}")
+    _print_held_out(batch)
+
+    changes = [c for c in applied if c.kind != "note"]
+    if not changes:
+        print("No changes - every decision already matched the staging file.")
+        return EXIT_OK
     try:
         save_staging_file(batch, args.staging)
     except OSError as exc:
         print(f"Applied nothing - could not write {args.staging}: {exc}", file=sys.stderr)
         return EXIT_LOAD_ERROR
-    print(f"{len(applied)} change(s) written to {args.staging}")
+    print(f"{len(changes)} change(s) written to {args.staging}")
     print("Next: python -m cbdb_agent validate --staging " + args.staging)
     return EXIT_OK
+
+
+def _print_held_out(batch) -> None:
+    """Say what "defer" will keep out, because it is a whole proposal - and every
+    proposal depending on it - not a field. On 2026-09-30 five index-year
+    conflicts resolved "defer" (meaning "leave the year empty") would have held
+    five people and all their rows out of the batch without a word."""
+    submittable = {p.id for p in submittable_proposals(batch)}
+    held = [p.id for p in batch.proposals if p.id not in submittable]
+    if not held:
+        return
+    print(f"\n  {len(held)} proposal(s) will NOT be submitted, because a conflict on "
+          f"them or on something they depend on is resolved \"defer\":")
+    print("    " + ", ".join(held))
+    print("  If a \"defer\" meant \"leave this field empty\", resolve that conflict "
+          "with an explicit option instead.\n")
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
