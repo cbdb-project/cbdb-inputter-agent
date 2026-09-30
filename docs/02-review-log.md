@@ -2661,3 +2661,155 @@ recovering from the audit log.
 **Still owed on the server:** `php artisan cbdb:regenerate-addresses-table`, as after
 the salt import. `ADDRESSES` is a derived cache, so until it is rebuilt these three
 places are invisible to posting autofill and dynasty homonym disambiguation.
+
+## Yuan 18 persons: reviewed, submitted, and three defects in the review round trip — 2026-09-30
+
+The `2026-08-18-yuan-18-persons` batch (78 proposals, 41 conflicts) was reviewed by
+the user on 2026-09-30 in `review/batch.html` and submitted the same day. Outcome
+first, then what the review exposed.
+
+**Outcome.** 76 of 78 proposals are in production; the other two were resolved
+`defer` and deliberately not sent. Sixteen people created, `c_personid`
+705002–705017; the existing 35442 corrected (given name 㪺, two 字 retyped from 未詳
+to 字, a stray alias `勤齋\` deleted, a citation and a 著述 note added). 張好古 was
+not entered — the identification question from 2026-08-18 is still open. The first
+run stopped at proposal 57 (`p13src`, a `sources` create) on `ConnectionResetError
+10054` after 56 successes — the same mid-batch write drop as the salt runs
+(AGENTS.md rule 2), on the direct path. Reconciled as not landed, with evidence:
+`GET /api/v2/get` for that key 404s while a `sources` row that did land in the
+same run (`p12src`) is returned by the same call, and `GET /cbdbapi/person` for
+705014 shows no sources beside the posting that landed just before it. Resumed as
+`2026-09-30-yuan-18-persons-resume`: **20/20 landed** in one run. `operations`
+368912–368984.
+
+Read back (rule 11): every returned `result.row` compared with what was sent. One
+difference — 朱象先's `c_notes`, where the server's variant normalisation wrote 說
+(U+8AAA) for 説 (U+8AAC). Not a client error; recorded so nobody reads it as one.
+35442's corrections confirmed through `GET /cbdbapi/person`, the 著述 note through
+`GET /api/v2/get`. Production gates re-locked afterwards.
+
+The book title the batch needed (《聽雪先生集》, the `yuan-text-codes` finding) was
+created by the user by hand as `c_textid` 72220 before submission, so that batch is
+superseded and must not be sent.
+
+### Defect 1 — a resolution never reached the payload
+
+`apply_decisions` set `conflict.resolution` and nothing else; `submit` sends
+`changes` and `target_pk`. Replaying the user's decisions against the pre-review
+file showed what would have gone out: four postings with no `c_office_id` (a 422 on
+create), 丁元善's posting with no `c_addr`, and 王寔's 著述 row with `c_textid` 0 —
+the 未詳 sentinel, i.e. a `BIOG_TEXT_DATA` row pointing at nothing. Caught before
+submission and patched in the batch by a one-off script that printed every edit.
+
+Fixed in the tool: a resolution that is a **number or a list** (a code, a year, an
+address list) is written into the column the conflict names — both places when a
+create carries it in both `target_pk` and `changes`, and **never** into the key of
+an update or a delete, where the key names the row as it is now (the replay caught
+the first draft of this fix writing an alias's new type into the key that finds
+it). A **string** resolution is never written: options use strings for decisions
+(`whole`, `confirmed`, `1324-1328`) and a character in a name looks exactly like
+one. `apply-review` instead prints a note when a string resolution and the payload
+disagree. Conflicts are applied before field edits, so a value the reviewer typed
+into the field wins. And `find_issues` now refuses a batch in which a number/list
+resolution and its column disagree, which covers a file edited by hand.
+`test_staging.py::test_resolved_conflict_allows_submit` had been asserting exactly
+the defect — a death year resolved as 819 with no `c_deathyear` in the payload —
+and now carries the value.
+
+### Defect 2 — `defer` meant two things
+
+The code has always read `defer` as "hold this proposal, and everything that depends
+on it, out of the submit" (`submittable_proposals`). docs/03 §2.2 and the review
+page's button said "skip this one field/row", and the batch's own index-year
+options offered `defer` as "leave c_index_year null". The user chose it five times
+in that sense; submitted as it stood, five people and every row they owned would
+have silently not been sent. docs/03 now says what `defer` does and that a "leave
+it NULL" answer needs its own option; the button reads "defer (whole row)"; and
+`apply-review` lists every proposal a `defer` holds out.
+
+### Defect 3 — `resume` could not resume a person batch
+
+Built for the salt batches, which had no people. Two gaps, both hit mid-submission:
+it refused because the two deferred proposals had no entry in `results.json`
+(`batch_runner` never sends or records them, by design), and it did not rewrite a
+sub-resource's `person_id: p13` — a sibling reference, not a `{"ref": ...}`, so
+`iter_pk_refs` never saw it — into the `c_personid` the first run allocated.
+Deferred proposals are now carried unsent and still deferred, and a landed person's
+id is read from both `resolved_person_id` and `result.pk`, refusing if they differ.
+
+### Also recorded
+
+* The 2026-08 draft carried the wrong character for 蕭𣂏: U+230CF instead of the
+  source's U+2308F, in the option value and in the prose naming its code point. A
+  transcription slip by the agent; the reviewer chose 㪺 (U+3ABA), so it never
+  reached the data. Corrected in the batch file.
+* x6's key said `c_role_id: 1` and its conflict claimed that had been "verified
+  live". 35442's 著述 row is role 0 (未詳); the fetch of its current value had been
+  404ing all along. Corrected to 0 before submission.
+* `cases/yuan-18-persons/README.md` named a `python -m cbdb_agent lookup` command;
+  the CLI has no such subcommand. Corrected.
+* 72220's `c_notes` holds an auto-generated bracketed stamp the user does not want.
+  `TEXT_CODES` update takes only `c_title`, so this client cannot clear it.
+* A field edit to a create's `changes` did not propagate to the same column in its
+  `target_pk` (`p02d2`'s `c_sequence` was edited to 1 in `changes` and stayed 2 in
+  the key; patched by hand). Fixed in the same change, after review — below.
+
+### Review passes
+
+Read-the-diff agent and `codex exec`, run in parallel on the first draft. Both
+found serious issues; all fixed:
+
+* **codex, serious** — a field edit on a create updated only `changes`, leaving a
+  resolution written into `target_pk` disagreeing with it (a refused create). Field
+  edits on a create now follow through to the key.
+* **codex, serious** — `_landed_person_id` coerced with `int()`, so `True`, `0` or a
+  negative id in a response would re-home every remaining row. Now refused unless a
+  positive, non-bool integer.
+* **agent, serious** — the write-through bypassed the `content_hash` guard, so
+  re-running a stale decisions file silently undid a later hand correction. It is
+  now checked like a field edit.
+* **agent, serious** — on an update, a resolution about a column only in the key
+  was routed into `changes`, re-keying the row. It is now reported as ambiguous and
+  nothing is written.
+* **both, minor** — the new validate check skipped only directly deferred proposals,
+  not those held out through a dependency; it now uses `submittable_proposals`.
+* **agent, minor** — a typed field value plus a conflict resolution on the same
+  field left them disagreeing (validate refused) and made re-runs non-idempotent.
+  The typed value now becomes the resolution, with a note.
+* **agent, minor** — a reconciled person id was not cross-checked against the id
+  actually sent; now refused on disagreement.
+* **agent, nits** — numbers compare as numbers (`1 == 1.0`, `True != "True"`); a
+  docstring corrected.
+* **Not changed (codex, minor):** an unresolved conflict on a proposal that is held
+  out only through a deferred parent still blocks `validate_for_submit`. That is
+  pre-existing and errs on the blocking side; left as is.
+
+Replaying the user's real `decisions.json` against the pre-review file now yields
+every value that had to be patched by hand, including the `p02d2` key.
+
+**Second pass.** Agent: no serious issues; two minors fixed — choosing a value
+while emptying the same field is now refused (it had silently reopened the
+conflict), and emptying a key column of a new row is refused. codex: two serious
+guard bypasses, both fixed — a typed value used as a conflict override now passes
+its *own* decision's `content_hash` check (it had borrowed the conflict's, so a
+stale edit could ride on a fresh decision), and the reconciled-person path now
+rejects a `resolved_person_id` of `True`/`1.0`/`0` before comparing, since
+`True == 1` in Python.
+
+**Passes three to six (codex).** Three: a string resolution was never written or
+checked, so 蕭𣂏's wrong character would have been sent had the reviewer not
+caught it by eye — the x1 case exactly. Fixed by `resolution_is_value`: a string
+counts as a value when the options are alternative values of the column, which
+shows in the payload currently holding one of them (𣃏/㪺 holding 𣃏, as against
+`split`/`whole` holding 八). Four: that recognition read the payload, so a typed
+override or a later hand edit outside the options turned the resolution back into
+an unchecked decision. Fixed by recording it — `Conflict.resolution_is_value`,
+set when the resolution is set, kept on re-runs, omitted from the YAML while
+unset. Five: a hand-written `false` re-opened it; the field is now
+`Literal[True] | None`. Six: **pass**, no serious or minor findings. Its one nit —
+pydantic also coerces a YAML `1` to `True` — was left: it only ever turns the
+check on.
+
+Final suite: 813 passed. Replaying the user's `decisions.json` against the
+pre-review file now produces all eight payload values that had to be patched by
+hand on the day, including 㪺 and the `p02d2` key.

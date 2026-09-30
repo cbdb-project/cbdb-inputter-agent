@@ -43,10 +43,12 @@ from .models import find_spec_by_alias
 from .staging import (
     Proposal,
     StagingBatch,
+    _sibling_dependency,
     is_pk_ref,
     iter_pk_refs,
     load_staging_file,
     pk_ref_target,
+    submittable_proposals,
 )
 
 
@@ -76,6 +78,10 @@ class ResumePlan:
 
     reconciled: dict[str, Any] = field(default_factory=dict)
     """proposal id -> None (absent) or the pk it turned out to have."""
+
+    persons: dict[str, int] = field(default_factory=dict)
+    """landed person-create id -> its c_personid, for each one a remaining
+    proposal names as its `person_id`."""
 
     notes: list[str] = field(default_factory=list)
     """What a reader of the new batch needs to know about where it came from."""
@@ -182,7 +188,14 @@ def plan(
                 f"reconcile it by hand.")
         status[pid] = entry
 
-    missing = [p.id for p in batch.proposals if p.id not in status]
+    # A "defer" resolution keeps a proposal - and everything depending on it - out
+    # of every submit, so `batch_runner` never sends it and never records it. Its
+    # absence from results.json is by design, not a gap: it is carried into the
+    # resumed batch unsent, where the same resolution keeps it out again.
+    deferred = ({p.id for p in batch.proposals}
+                - {p.id for p in submittable_proposals(batch)})
+    missing = [p.id for p in batch.proposals
+               if p.id not in status and p.id not in deferred]
     if missing:
         raise ResumeError(
             f"{len(missing)} proposal(s) have no entry in results.json "
@@ -240,22 +253,100 @@ def plan(
                 raise
             plan_.landed[pid] = None
 
+    # --- 3b. people who landed, where something left still names them ------
+    # A sub-resource's `person_id: p13` is a sibling reference, not a
+    # `{"ref": ...}`, so iter_pk_refs does not see it. Left as it is, it names a
+    # proposal the resumed batch no longer has - and the person it meant is
+    # already in CBDB under the c_personid the first run allocated.
+    for proposal in outstanding:
+        target = _sibling_dependency(proposal, by_id)
+        if target is None or target not in landed_ids or target in plan_.persons:
+            continue
+        plan_.persons[target] = _landed_person_id(
+            target, status[target], plan_.reconciled.get(target))
+
     # --- 4. what is left, with references to landed rows resolved -----------
     resolvable = {k: v for k, v in plan_.landed.items() if v is not None}
     for proposal in outstanding:
-        plan_.outstanding.append(_rewrite_refs(proposal, resolvable, by_id))
+        plan_.outstanding.append(
+            _rewrite_refs(proposal, resolvable, by_id, plan_.persons))
 
     plan_.notes = _notes(batch, status, plan_)
     return plan_
 
 
+def _landed_person_id(pid: str, entry: dict, reconciled: Any) -> int:
+    """The c_personid a landed person create was given.
+
+    `resolved_person_id` is the id `batch_runner` allocated and sent; the
+    response's `result.pk` is what the server says it wrote. Both are read, and a
+    disagreement is refused rather than settled by picking one - every row still
+    to be sent for this person would land under whichever was picked.
+    """
+    if reconciled is not None:
+        value = reconciled.get("c_personid") if isinstance(reconciled, dict) else reconciled
+        sent = entry.get("resolved_person_id")
+        # True == 1 and 1.0 == 1 in Python, so the id that was sent is checked
+        # for what it is before it is compared with anything.
+        if sent is not None and not _is_personid(sent):
+            raise ResumeError(
+                f"{pid}: results.json records resolved_person_id {sent!r}, which "
+                f"is not a positive integer. Read the person back by hand.")
+        if _is_personid(value) and sent is not None and sent != value:
+            raise ResumeError(
+                f"{pid} was reconciled as c_personid {value}, but results.json says "
+                f"{sent!r} was sent. Every remaining row for this person would land "
+                f"under the reconciled id; check which is right.")
+        if _is_personid(value):
+            return value
+        raise ResumeError(
+            f"{pid} was reconciled as landed with pk {reconciled!r}, which is not "
+            f"a c_personid; the rows that reference this person need one")
+    sent = entry.get("resolved_person_id")
+    response = entry.get("response")
+    result = response.get("result") if isinstance(response, dict) else None
+    written = None
+    for container in ((result or {}).get("pk"), (result or {}).get("row")):
+        if isinstance(container, dict) and container.get("c_personid") is not None:
+            written = container["c_personid"]
+            break
+    # Not coerced: int(True) is 1 and int("0") is 0, and either would put every
+    # remaining row for this person under someone else - or under nobody.
+    if written is not None and not _is_personid(written):
+        raise ResumeError(
+            f"{pid}: the server answered c_personid {written!r}, which is not a "
+            f"positive integer. Read the person back by hand before resuming.")
+    if sent is not None and not _is_personid(sent):
+        raise ResumeError(
+            f"{pid}: results.json records resolved_person_id {sent!r}, which is not "
+            f"a positive integer. Read the person back by hand before resuming.")
+    if written is None and sent is None:
+        raise ResumeError(
+            f"{pid} is recorded as {LANDED!r} but neither its response nor "
+            f"results.json says which c_personid it was created as. Rows that "
+            f"reference it cannot be resumed - read it back by hand.")
+    if written is not None and sent is not None and sent != written:
+        raise ResumeError(
+            f"{pid}: results.json says c_personid {sent} was sent but the server "
+            f"answered {written}. Which one the person is under is not something "
+            f"this can pick.")
+    return written if written is not None else sent
+
+
+def _is_personid(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def _rewrite_refs(proposal: Proposal, landed: dict[str, Any],
-                  by_id: dict[str, Proposal]) -> Proposal:
-    """A copy of `proposal` with references to landed rows replaced by their ids.
+                  by_id: dict[str, Proposal],
+                  persons: dict[str, int] | None = None) -> Proposal:
+    """A copy of `proposal` with references to landed rows replaced by their ids -
+    both `{"ref": ...}` keys and a `person_id` naming a landed person create.
 
     References to proposals still in the batch are left alone - `batch_runner`
     resolves those at submit time, as it always has.
     """
+    persons = persons or {}
     for _where, fieldname, target in iter_pk_refs(proposal):
         if target in landed or target in by_id:
             continue
@@ -272,6 +363,8 @@ def _rewrite_refs(proposal: Proposal, landed: dict[str, Any],
         return landed[target] if target in landed else value
 
     data = proposal.model_dump()
+    if isinstance(proposal.person_id, str) and proposal.person_id in persons:
+        data["person_id"] = persons[proposal.person_id]
     for slot in ("target_pk", "changes"):
         if data.get(slot):
             data[slot] = {k: walk(v) for k, v in data[slot].items()}
@@ -294,6 +387,11 @@ def _notes(batch: StagingBatch, status: dict[str, dict],
     lines += [f"  {pid} -> {pk}" if pk is not None
               else f"  {pid} (nothing references it, so its id was not needed)"
               for pid, pk in sorted(plan_.landed.items())]
+    if plan_.persons:
+        lines += ["", "People already created; the rows below that belong to them "
+                      "now name their c_personid instead of the proposal id:"]
+        lines += [f"  {pid} -> c_personid {cid}"
+                  for pid, cid in sorted(plan_.persons.items())]
     if plan_.reconciled:
         lines += ["", "Reconciled by hand after the interruption:"]
         lines += [f"  {pid}: "

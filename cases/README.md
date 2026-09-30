@@ -3,7 +3,7 @@
 A **case** is one body of data work: a contribution to enter, a correction to make, a
 question to settle. A **batch** is one `proposal.yaml` — one set of proposals meant to
 go in together. One case produces one or more batches, and a batch that is never
-submitted is still a batch: three of the seven below were stopped deliberately, and
+submitted is still a batch: `yuan-text-codes` below was stopped deliberately, and
 that is a result, not an absence of one.
 
 This directory is the index of everything this repo has been used for. Each case has
@@ -25,8 +25,8 @@ See AGENTS.md, "Where code goes", for the rule that separates a case from a tool
 | Case | Batches | Outcome | Design |
 |---|---|---|---|
 | [chen-junqing-chen-wenlong-kinship](chen-junqing-chen-wenlong-kinship/) | 3 (2026-07-17) | 2 local, then 1 to production | `docs/02` §*kinship/associations c_notes mirror-sync* |
-| [yuan-18-persons](yuan-18-persons/) | 1 (2026-08-18) | not submitted — 41 unresolved conflicts | `docs/03` |
-| [yuan-text-codes](yuan-text-codes/) | 1 (2026-08-18) | not submitted — reported as a finding (rule 12) | `docs/02` §*text-codes support* |
+| [yuan-18-persons](yuan-18-persons/) | 2 (2026-08-18, 2026-09-30) | **complete** — 76/78 in production, 2 deferred; 16 people created | `docs/02` §*Yuan 18 persons* |
+| [yuan-text-codes](yuan-text-codes/) | 1 (2026-08-18) | superseded — the user created the title by hand as 72220 (rule 12) | `docs/02` §*text-codes support* |
 | [tang-zhi-mou-zhou-shi](tang-zhi-mou-zhou-shi/) | 1 (2026-09-04) | submitted — production, verified | `docs/10` |
 | [salt-administration](salt-administration/) | 6 (2026-09-10 … 2026-09-19) | **complete** — all 118 rows in production | `docs/11` |
 | [zhenanzhou-renhuai-suiyang](zhenanzhou-renhuai-suiyang/) | 1 (2026-09-21) | **complete** — all 6 rows in production, verified | `cases/zhenanzhou-renhuai-suiyang/README.md` |

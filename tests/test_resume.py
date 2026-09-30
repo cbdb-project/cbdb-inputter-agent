@@ -610,3 +610,165 @@ class TestWhatTheResumedBatchInherits:
                    _result("a2", resume.NOT_ATTEMPTED[0])]
         resumed, _plan = resume.resume_batch(batch, results, "b2")
         assert resumed.batch_notes == "check the 治所 coordinates before approving"
+
+
+# --- person batches: sibling person_id references and deferred rows ----------
+#
+# The real case: 2026-08-18-yuan-18-persons, 76 of 78 proposals submitted
+# 2026-09-30, stopped at the 57th (a sources row) on a connection reset. Every
+# row after it names its person as `person_id: pXX`, a sibling reference that
+# iter_pk_refs does not see, and two rows were resolved "defer" and so were
+# never sent or recorded.
+
+
+def _person(pid):
+    return Proposal(
+        id=pid, resource="basicinformation", operation="create", person_id="NEW",
+        changes={"c_name_chn": "周芳", "c_surname_chn": "周", "c_mingzi_chn": "芳",
+                 "c_female": 0, "c_dy": 18},
+        source_quote="周芳", confidence="high",
+    )
+
+
+def _source(pid, person, pages="卷一"):
+    return Proposal(
+        id=pid, resource="sources", operation="create", person_id=person,
+        target_pk={"c_textid": 27144, "c_pages": pages},
+        changes={"c_main_source": 1},
+        source_quote="《全元文》", confidence="high",
+    )
+
+
+def _deferred_status(pid, person):
+    return Proposal(
+        id=pid, resource="statuses", operation="create", person_id=person,
+        target_pk={"c_status_code": 83, "c_sequence": 1},
+        changes={"c_status_code": 83, "c_sequence": 1},
+        source_quote="縣庠", confidence="low",
+        conflicts=[{"id": "c1", "field": "c_status_code", "description": "d",
+                    "options": [{"value": 83, "rationale": "r"},
+                                {"value": "defer", "rationale": "r"}],
+                    "resolution": "defer"}],
+    )
+
+
+def _person_result(pid, status, personid=None):
+    entry = {"proposal_id": pid, "status": status, "response": None, "error": None,
+             "resolved_person_id": personid, "resolved_target_pk": None}
+    if status == resume.LANDED and personid is not None:
+        entry["response"] = {"ok": True, "result": {"pk": {"c_personid": personid}}}
+    return entry
+
+
+class TestPersonReferences:
+    def test_a_row_naming_a_landed_person_gets_its_c_personid(self):
+        """Kills leaving `person_id: p13` in a batch that no longer has p13 -
+        validate refuses it, and nothing could resolve it at submit time."""
+        batch = _batch([_person("p13"), _source("p13src", "p13")])
+        results = [_person_result("p13", resume.LANDED, 705014),
+                   _person_result("p13src", resume.NOT_ATTEMPTED[0])]
+        plan = resume.plan(batch, results)
+        assert plan.persons == {"p13": 705014}
+        assert [p.person_id for p in plan.outstanding] == [705014]
+
+    def test_a_row_naming_a_person_still_in_the_batch_is_left_alone(self):
+        batch = _batch([_person("p14"), _source("p14src", "p14")])
+        results = [_person_result("p14", resume.NOT_ATTEMPTED[0]),
+                   _person_result("p14src", resume.NOT_ATTEMPTED[0])]
+        plan = resume.plan(batch, results)
+        assert plan.persons == {}
+        assert [p.person_id for p in plan.outstanding] == ["NEW", "p14"]
+
+    def test_the_sent_and_the_written_id_must_agree(self):
+        batch = _batch([_person("p13"), _source("p13src", "p13")])
+        landed = _person_result("p13", resume.LANDED, 705014)
+        landed["resolved_person_id"] = 705015
+        results = [landed, _person_result("p13src", resume.NOT_ATTEMPTED[0])]
+        with pytest.raises(resume.ResumeError, match="not something"):
+            resume.plan(batch, results)
+
+    def test_a_landed_person_with_no_recorded_id_is_refused(self):
+        batch = _batch([_person("p13"), _source("p13src", "p13")])
+        landed = _person_result("p13", resume.LANDED)
+        results = [landed, _person_result("p13src", resume.NOT_ATTEMPTED[0])]
+        with pytest.raises(resume.ResumeError, match="which c_personid"):
+            resume.plan(batch, results)
+
+    def test_the_notes_say_which_people_were_already_created(self):
+        batch = _batch([_person("p13"), _source("p13src", "p13")])
+        results = [_person_result("p13", resume.LANDED, 705014),
+                   _person_result("p13src", resume.NOT_ATTEMPTED[0])]
+        resumed, _ = resume.resume_batch(batch, results, "b2")
+        assert "p13 -> c_personid 705014" in resumed.source_excerpt
+
+
+class TestDeferredRows:
+    def test_a_deferred_row_absent_from_results_is_not_missing(self):
+        """Kills refusing every batch that had a "defer" in it: batch_runner never
+        sends or records such a row, by design."""
+        batch = _batch([_person("p06"), _deferred_status("p06s1", "p06"),
+                        _source("p06src", "p06")])
+        results = [_person_result("p06", resume.LANDED, 705007),
+                   _person_result("p06src", resume.INDETERMINATE)]
+        plan = resume.plan(batch, results, reconciled={"p06src": None})
+        assert [p.id for p in plan.outstanding] == ["p06s1", "p06src"]
+
+    def test_the_deferred_row_is_carried_still_deferred(self):
+        batch = _batch([_person("p06"), _deferred_status("p06s1", "p06"),
+                        _source("p06src", "p06")])
+        results = [_person_result("p06", resume.LANDED, 705007),
+                   _person_result("p06src", resume.NOT_ATTEMPTED[0])]
+        resumed, _ = resume.resume_batch(batch, results, "b2")
+        from cbdb_agent.staging import submittable_proposals
+        assert [p.id for p in submittable_proposals(resumed)] == ["p06src"]
+        carried = next(p for p in resumed.proposals if p.id == "p06s1")
+        assert carried.person_id == 705007
+
+    def test_a_row_not_deferred_and_not_recorded_is_still_refused(self):
+        batch = _batch([_person("p06"), _source("p06src", "p06")])
+        results = [_person_result("p06", resume.LANDED, 705007)]
+        with pytest.raises(resume.ResumeError, match="no entry in results.json"):
+            resume.plan(batch, results)
+
+
+class TestALandedPersonIdMustBeReal:
+    """int(True) is 1 and 0 is 未詳: coerced, either would put every remaining row
+    for this person under someone else, or under nobody."""
+
+    @pytest.mark.parametrize("bad", [0, -1, True, "705014", "abc"])
+    def test_a_malformed_id_in_the_response_is_refused(self, bad):
+        batch = _batch([_person("p13"), _source("p13src", "p13")])
+        landed = _person_result("p13", resume.LANDED, 705014)
+        landed["response"]["result"]["pk"]["c_personid"] = bad
+        results = [landed, _person_result("p13src", resume.NOT_ATTEMPTED[0])]
+        with pytest.raises(resume.ResumeError, match="positive integer"):
+            resume.plan(batch, results)
+
+    @pytest.mark.parametrize("bad", [0, -1, True])
+    def test_a_malformed_recorded_id_is_refused(self, bad):
+        batch = _batch([_person("p13"), _source("p13src", "p13")])
+        landed = _person_result("p13", resume.LANDED, 705014)
+        landed["resolved_person_id"] = bad
+        results = [landed, _person_result("p13src", resume.NOT_ATTEMPTED[0])]
+        with pytest.raises(resume.ResumeError, match="positive integer"):
+            resume.plan(batch, results)
+
+
+def test_a_reconciled_person_id_must_match_the_id_that_was_sent():
+    batch = _batch([_person("p13"), _source("p13src", "p13")])
+    indeterminate = _person_result("p13", resume.INDETERMINATE, 705014)
+    results = [indeterminate, _person_result("p13src", resume.NOT_ATTEMPTED[0])]
+    with pytest.raises(resume.ResumeError, match="was reconciled as"):
+        resume.plan(batch, results, reconciled={"p13": {"c_personid": 705041}})
+    plan = resume.plan(batch, results, reconciled={"p13": {"c_personid": 705014}})
+    assert [p.person_id for p in plan.outstanding] == [705014]
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, 0])
+def test_a_malformed_sent_id_is_refused_on_the_reconciled_path(bad):
+    batch = _batch([_person("p13"), _source("p13src", "p13")])
+    indeterminate = _person_result("p13", resume.INDETERMINATE)
+    indeterminate["resolved_person_id"] = bad
+    results = [indeterminate, _person_result("p13src", resume.NOT_ATTEMPTED[0])]
+    with pytest.raises(resume.ResumeError, match="positive integer"):
+        resume.plan(batch, results, reconciled={"p13": {"c_personid": 1}})

@@ -35,7 +35,17 @@ from typing import Any
 
 from .code_lookup import FIELD_CODE_TABLES, LIST_VALUED_FIELDS, code_table_names
 from .models import FieldWhitelistError, find_spec_by_alias
-from .staging import Issue, ProposalCurrentState, StagingBatch, StagingError
+from .staging import (
+    Issue,
+    ProposalCurrentState,
+    StagingBatch,
+    StagingError,
+    _same_value,
+    is_field_value_resolution,
+    resolution_is_value,
+    resolution_slots,
+    value_is_candidate,
+)
 
 # Bumped when the JSON contract changes in a way the page must know about. The page
 # checks it and refuses to load an export it does not understand, rather than
@@ -274,7 +284,7 @@ def export_review_json(
 
 @dataclass
 class AppliedChange:
-    kind: str  # "resolution" | "field" | "drop"
+    kind: str  # "resolution" | "field" | "drop" | "note"
     proposal_id: str
     detail: str
 
@@ -345,6 +355,102 @@ def _empty_string_as_null(value: Any) -> Any:
     return value
 
 
+_NO_EDIT = object()
+
+
+def _slots_for(proposal, conflict):
+    """resolution_slots, for a conflict whose resolution may not be set yet."""
+    try:
+        spec = find_spec_by_alias(proposal.resource)
+    except FieldWhitelistError:
+        return []
+    return resolution_slots(proposal, conflict, spec)
+
+
+def _resolution_target(proposal, conflict):
+    """The slots ("target_pk"/"changes") a resolution could touch, or [] when it
+    touches none: unresolved, "defer", an unknown resource, or a conflict that is
+    not about a column."""
+    value = conflict.resolution
+    if value is None or value == "defer":
+        return []
+    try:
+        spec = find_spec_by_alias(proposal.resource)
+    except FieldWhitelistError:
+        return []           # validate reports the unknown resource
+    return resolution_slots(proposal, conflict, spec)
+
+
+def _write_resolution_through(proposal, conflict, raw=None,
+                              reviewed_hash=None) -> list[AppliedChange]:
+    """Put a value resolution into the payload it is about, and say so.
+
+    `submit` sends `changes` and `target_pk` and never reads a resolution. Until
+    2026-09-30 nothing carried one across, so choosing 61989 for a posting's
+    c_office_id recorded the choice and sent a posting with no office at all.
+
+    What is written is decided per slot by `resolution_is_value`: numbers and
+    lists, and a string when the options are alternative values of the column. A
+    string that is a decision is reported by `_undecided_string_notes` instead.
+    "defer" is neither: it holds the whole proposal out of the submit.
+    """
+    value = conflict.resolution
+    if value is None or value == "defer":
+        return []
+    out: list[AppliedChange] = []
+    slots = [s for s in _resolution_target(proposal, conflict)
+             if resolution_is_value(proposal, conflict, s)]
+    if (not slots and is_field_value_resolution(value)
+            and proposal.operation == "update" and proposal.target_pk
+            and conflict.field in proposal.target_pk):
+        # Is 200 the row to update, or the value to give it? On an update the
+        # key names the existing row, so the answer changes what is touched.
+        return [AppliedChange(
+            "note", proposal.id,
+            f"conflict {conflict.id} resolved as {value!r} names a column that is "
+            f"only in this update's key. Nothing was written: edit target_pk if "
+            f"it is the row, or add {conflict.field} to the changes if it is the "
+            f"new value.")]
+    for slot in slots:
+        if getattr(proposal, slot) is None:
+            setattr(proposal, slot, {})
+        mapping = getattr(proposal, slot)
+        old = mapping.get(conflict.field, "<absent>")
+        if not _same_value(old, value):
+            # The same guard as a field edit: a payload that has moved since the
+            # review - edited by hand, or regenerated - is not overwritten from a
+            # decision made about a different version of it.
+            if raw is not None:
+                _check_reviewed_version(raw, proposal.id, reviewed_hash)
+            mapping[conflict.field] = value
+            out.append(AppliedChange(
+                "field", proposal.id,
+                f"{slot}.{conflict.field}: {old!r} -> {value!r} "
+                f"(from conflict {conflict.id})"))
+    return out
+
+
+def _undecided_string_notes(proposal, conflict) -> list[AppliedChange]:
+    """A string resolution that is a decision ("whole", "confirmed",
+    "1324-1328") is not written - see `resolution_is_value` for how one is told
+    from a string value. When it differs from what the field now holds, say so,
+    so the reviewer can see the payload and the choice have not been reconciled."""
+    value = conflict.resolution
+    if is_field_value_resolution(value):
+        return []
+    out = []
+    for slot in _resolution_target(proposal, conflict):
+        current = (getattr(proposal, slot) or {}).get(conflict.field)
+        if not _same_value(current, value) and not resolution_is_value(
+                proposal, conflict, slot):
+            out.append(AppliedChange(
+                "note", proposal.id,
+                f"conflict {conflict.id} resolved as {value!r} is a decision, not a "
+                f"value, and was not written. {slot}.{conflict.field} is "
+                f"{current!r} - edit it if that is not what you meant."))
+    return out
+
+
 def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[AppliedChange]:
     """Apply a decisions.json produced by the review page onto `batch`, in place.
 
@@ -389,7 +495,24 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
     reviewed_hash = {p.id: proposal_content_hash(p) for p in batch.proposals}
     applied: list[AppliedChange] = []
 
-    for raw in decisions.get("decisions", []):
+    # Conflicts first, then field edits: a value the reviewer typed into a field
+    # is more specific than the option they picked, so it must be the one left
+    # standing when both touch the same column. sorted() is stable, so the
+    # file's own order is kept within each group.
+    ordered = sorted(decisions.get("decisions", []),
+                     key=lambda r: 0 if isinstance(r, dict) and "conflict_id" in r else 1)
+    settled: list[tuple[Any, Any]] = []
+    # The value typed into a field, per (proposal, field). When the same file also
+    # resolves a conflict on that field to a value, the typed one IS the decision:
+    # recording the option while sending the edit would leave the two disagreeing,
+    # which validate refuses, and a re-run would put the option back.
+    # Kept with the decision it came from: a typed value used as an override must
+    # pass that decision's own content_hash check, not borrow the conflict's.
+    typed = {(r.get("proposal_id"), r.get("field")): r
+             for r in ordered
+             if isinstance(r, dict) and "field" in r and not r.get("drop")}
+
+    for raw in ordered:
         proposal_id = raw.get("proposal_id")
         proposal = by_id.get(proposal_id)
         if proposal is None:
@@ -405,7 +528,35 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
                     f"proposal {proposal_id!r} has no conflict {conflict_id!r}"
                 )
             new_value = raw.get("resolution")
-            if conflict.resolution != new_value:
+            # Classified against the payload AS IT IS NOW, before any write -
+            # afterwards the payload no longer shows which options were values.
+            is_value = any(value_is_candidate(proposal, conflict, new_value, s)
+                           for s in _slots_for(proposal, conflict))
+            field_raw = typed.get((proposal_id, conflict.field))
+            override = (_empty_string_as_null(field_raw.get("value"))
+                        if field_raw is not None else _NO_EDIT)
+            # Only when it would change something - as for any field edit - so
+            # re-running a file that has already been applied stays a no-op.
+            if (field_raw is not None and is_value
+                    and not _same_value(override, conflict.resolution)):
+                _check_reviewed_version(field_raw, proposal_id, reviewed_hash)
+            if override is None and is_value:
+                # Chose a value and emptied the field: two opposite answers.
+                # Taking the empty one would quietly reopen the conflict.
+                raise StagingError(
+                    f"{proposal_id}: conflict {conflict_id} is resolved as "
+                    f"{new_value!r} but the same file empties {conflict.field}. "
+                    f"Pick one in the review page and export again.")
+            if (override is not _NO_EDIT and is_value
+                    and not _same_value(override, new_value)):
+                applied.append(AppliedChange(
+                    "note", proposal_id,
+                    f"conflict {conflict_id}: chose {new_value!r} but typed "
+                    f"{override!r} into {conflict.field}; the typed value is the one "
+                    f"recorded and sent"))
+                new_value = override
+            resolution_changed = conflict.resolution != new_value
+            if resolution_changed:
                 _check_reviewed_version(raw, proposal_id, reviewed_hash)
                 conflict.resolution = new_value
                 applied.append(
@@ -415,6 +566,18 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
                         f"conflict {conflict_id} resolved as {new_value!r}",
                     )
                 )
+            # Recorded once, when the resolution is set. Re-derived on a re-run it
+            # would read a payload edited since, and could quietly downgrade a
+            # value to an unchecked decision - so an unchanged resolution keeps
+            # the classification it was given.
+            string_value = is_value and not is_field_value_resolution(new_value)
+            if resolution_changed:
+                conflict.resolution_is_value = True if string_value else None
+            elif string_value:
+                conflict.resolution_is_value = True
+            applied.extend(_write_resolution_through(
+                proposal, conflict, raw, reviewed_hash))
+            settled.append((proposal, conflict))
             continue
 
         if "field" in raw:
@@ -439,6 +602,24 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
                         f"{field_name}: {old!r} -> {new_value!r}",
                     )
                 )
+            # On a create the key IS the new row, and a column carried in both
+            # places must say the same thing in both, or the create is refused.
+            # An address row's c_sequence edited to 1 stayed 2 in its key on
+            # 2026-09-30; this is the edit following through.
+            if (proposal.operation == "create" and proposal.target_pk
+                    and field_name in proposal.target_pk
+                    and not _same_value(proposal.target_pk[field_name], new_value)):
+                if new_value is None:
+                    raise StagingError(
+                        f"{proposal_id}: {field_name} is part of this new row's key "
+                        f"and cannot be emptied. Give it a value, or defer the row.")
+                _check_reviewed_version(raw, proposal_id, reviewed_hash)
+                old_key = proposal.target_pk[field_name]
+                proposal.target_pk[field_name] = new_value
+                applied.append(AppliedChange(
+                    "field", proposal_id,
+                    f"target_pk.{field_name}: {old_key!r} -> {new_value!r} "
+                    f"(following the field edit)"))
             continue
 
         raise StagingError(
@@ -446,4 +627,8 @@ def apply_decisions(batch: StagingBatch, decisions: dict[str, Any]) -> list[Appl
             "don't know what it is asking for"
         )
 
+    # Only now, with every field edit in place, is it known which string
+    # resolutions the payload still disagrees with.
+    for proposal, conflict in settled:
+        applied.extend(_undecided_string_notes(proposal, conflict))
     return applied
