@@ -14,6 +14,7 @@ lookups behind every numeric value are `coding-worksheet.md` beside it.
 |---|---|---|
 | `2026-08-18-yuan-18-persons` | 78 | reviewed 2026-09-30; submitted — 56 landed, then stopped on a connection reset at proposal 57 |
 | `2026-09-30-yuan-18-persons-resume` | 22 (20 to send, 2 held out) | submitted — **20/20 landed** |
+| `2026-09-30-yuan-18-persons-zhang-haogu` | 3 | submitted — **3/3 landed**: 張好古 entered as the existing 106999 |
 
 What the 78 proposals cover:
 
@@ -30,7 +31,8 @@ What the 78 proposals cover:
 
 ## State — complete
 
-**76 of 78 proposals are in production**, verified. The other two (a `statuses` row
+**All eighteen people are now in CBDB**: 76 of 78 proposals of the first batch
+landed, verified, plus the three rows for 張好古 below. The other two (a `statuses` row
 for 陳元弼 and one for 朱象先) were resolved `defer` in review and deliberately not
 sent; they are still in the resume batch, still deferred.
 
@@ -45,8 +47,13 @@ Of the other two:
   㪺 (U+3ABA), 字 惟斗 / 維斗 retyped from 未詳 to 字, a stray alias `勤齋\` (with a
   trailing backslash) deleted, a 《全元文》 citation added, and a note added to his
   著述 row. 690674 is a duplicate of him; this batch did not touch it.
-* **張好古 was not entered.** Whether he is the existing 106999, 106998 or a third
-  person is still open (`coding-worksheet.md` §A2), so nothing was written for him.
+* **張好古 is the existing 106999**, by the user's decision on 2026-09-30
+  (`coding-worksheet.md` §A2, option a; 106998 is a military officer and was ruled
+  out). A third batch added the 《全元文》 citation, 建安 as a second 籍貫 — coded to
+  the Jin-period 建安 under 蓋州 (2873), the one that is 今屬遼寧 — and his
+  講經師 post in `c_notes`, since it has no office code and the 宮 no institution
+  code (the same treatment as 朱象先's). 106999's 安陽 籍貫 is unchanged and stays
+  the index address.
 
 Read back after submission (AGENTS.md rule 11): every returned `result.row` was
 compared with what was sent — one difference, on 朱象先's `c_notes`, where the

@@ -25,7 +25,7 @@ See AGENTS.md, "Where code goes", for the rule that separates a case from a tool
 | Case | Batches | Outcome | Design |
 |---|---|---|---|
 | [chen-junqing-chen-wenlong-kinship](chen-junqing-chen-wenlong-kinship/) | 3 (2026-07-17) | 2 local, then 1 to production | `docs/02` §*kinship/associations c_notes mirror-sync* |
-| [yuan-18-persons](yuan-18-persons/) | 2 (2026-08-18, 2026-09-30) | **complete** — 76/78 in production, 2 deferred; 16 people created | `docs/02` §*Yuan 18 persons* |
+| [yuan-18-persons](yuan-18-persons/) | 3 (2026-08-18 … 2026-09-30) | **complete** — 16 people created, 35442 and 106999 extended; 2 rows deferred | `docs/02` §*Yuan 18 persons* |
 | [yuan-text-codes](yuan-text-codes/) | 1 (2026-08-18) | superseded — the user created the title by hand as 72220 (rule 12) | `docs/02` §*text-codes support* |
 | [tang-zhi-mou-zhou-shi](tang-zhi-mou-zhou-shi/) | 1 (2026-09-04) | submitted — production, verified | `docs/10` |
 | [salt-administration](salt-administration/) | 6 (2026-09-10 … 2026-09-19) | **complete** — all 118 rows in production | `docs/11` |

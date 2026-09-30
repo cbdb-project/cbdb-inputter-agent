@@ -2813,3 +2813,19 @@ check on.
 Final suite: 813 passed. Replaying the user's `decisions.json` against the
 pre-review file now produces all eight payload values that had to be patched by
 hand on the day, including 㪺 and the `p02d2` key.
+
+### 2026-09-30, later — 張好古 entered as 106999
+
+The user settled the open identification (worksheet §A2): 張好古 is the existing
+106999. `2026-09-30-yuan-18-persons-zhang-haogu`, 3 proposals, **3/3 landed**: a
+《全元文》 卷六九七 source, a second 籍貫 at 2873 (the Jin 建安 under 蓋州, 1116–1234,
+the user's choice among 2873, the Yuan 蓋州 17313, or no address — the only Yuan
+建安 is 18451 in 建寧路, which contradicts 今屬遼寧), and his 講經師 post in
+`c_notes`, which had been empty. Every returned row matched what was sent; read
+back through `GET /cbdbapi/person`, where 安陽 remains the index address. Gates
+re-locked. All eighteen people of the source are now in CBDB, and the user's
+spreadsheet carries an id on every row.
+
+Still open with the user: the stamp in 72220's `c_notes` (read again after they
+reported clearing it — still present), and whether the server's 説 → 說 on
+朱象先's `c_notes` is acceptable.
