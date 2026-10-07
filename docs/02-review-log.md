@@ -3074,3 +3074,23 @@ paired posting results with the wrong request, because posting creates return no
 through `/cbdbapi/person`: the new people's reverse kinship and association rows
 exist; the three association year updates reached 770, 1384 and 5305; 28196 now
 ends 1076; 1762 cites 72223. Gates re-locked.
+
+### 2026-10-07, later — ids written back; the institution alias has no write path
+
+The user's workbook (outside the repo) got the three new ids in place of TMP-001/
+002/003 — 10 id cells in 基本資料/別名/官名/親屬/社會關係 and their 8 人物ID狀態 cells
+(需新建 → 已對應); backed up first, only that file touched. The 修正記錄 sheet holds
+the consolidation's history with an older TMP numbering (it names a TMP-004 that no
+longer exists) and was left alone.
+
+**The 報寧 alias for institution 945 cannot be written through the API, and this
+corrects what the agent told the user earlier.** It had said the alias needed the
+`social-institution` aggregate modelled first. Read on `origin/develop`: CBDB stores
+institution aliases in `SOCIAL_INSTITUTION_ALTNAME_DATA`, which no handler, code-table
+registry or controller writes; the aggregate's fields (name, type, years, dynasties,
+source, pages, notes, addresses) have no alias; and upstream's
+`docs/CODE_TABLE_MUTATION_API_PLAN.md` D-1 skips the table deliberately — it has no
+primary key and no edit entry point. Modelling the aggregate here would not have
+reached it. User's decision: open a write path upstream; the alias waits for it.
+Lesson: before promising to "model" a write, find the upstream handler that would
+receive it.
