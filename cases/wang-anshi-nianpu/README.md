@@ -52,8 +52,17 @@ array key); the client now sends `c_pages: null`, which lands as the documented
 empty page. The second was the known refused-connection drop on sustained writes
 (AGENTS.md rule 2). Neither wrote anything.
 
-Still to do: the alias 報寧 for social institution 945 (needs the
-`social-institution` aggregate modelled first).
+The workbook's temporary ids were written back on 2026-10-07: TMP-001/002/003 became
+705348/705349/705350 in every data sheet, with their 人物ID狀態 set to 已對應 (the
+修正記錄 sheet, a history of the consolidation, was left as it was).
+
+**Not done, and not doable through this client: the alias 報寧 for institution 945
+(半山寺).** CBDB keeps institution aliases in `SOCIAL_INSTITUTION_ALTNAME_DATA`, and
+upstream has no write path to it at all — no API resource, no code-table registry
+entry, no edit page, and no alias field in the `social-institution` aggregate.
+Upstream's own `docs/CODE_TABLE_MUTATION_API_PLAN.md` (D-1) skips the table on purpose
+(it has no primary key). The user's decision, 2026-10-07: open a write path upstream;
+until then the alias waits.
 
 ## Decisions taken before staging (the user, 2026-10-06)
 
