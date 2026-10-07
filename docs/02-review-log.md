@@ -3143,3 +3143,40 @@ gates opened in `.env` for the one run and closed in the same command. Operation
 945 afterwards matches every non-alias field sent. The derived pinyin is
 `bao ning si`, lowercase — upstream's `buildPinyin` style for this column, not
 CBDB's `Banshan Si` convention; reported, not changed.
+
+### 2026-10-07, later — 945 was the wrong anchor: create and alias removal modelled
+
+The user judged 945's address problem real (its ADDR row is 7537 荊溪 with another
+temple's notes) and asked to undo the 945 changes and make a new institution instead,
+then a new BIOG_INST_DATA row for 王安石. Checked first, at the user's question: the
+年譜 quotes name the temple only as 報寧 (「有旨賜名報寧」) and say 王安石 lived at 鍾山;
+「半山」 appears only in the workbook coder's note and in 945's own `c_notes` (from
+27842《中国の寺院》). Decided with the user: name 報寧寺, no 半山寺 alias; address 上元
+12829, its row sourced to 27842 with a note saying why; institution and BIOG_INST_DATA
+sourced to 72223.
+
+Client changes: `social-institution` create (exactly the six keys `validateCreate()`
+reads; a live same-name-same-address duplicate check), `alt_names_removed` (a
+client-only, declared removal list matched exactly before and after the write),
+`default_alias()` for a spec whose key is not a server spelling, and the alias read
+now replays the operations log (insert/delete/update with `resource_data` /
+`resource_original`) instead of refusing on any change.
+
+The alias row 945/報寧寺 (written by operation 371832) was deleted by the user
+directly, outside the API, before this client's revert ran. No operations row records
+it, so the replayed alias list for 945 still shows 報寧寺 until the next weekly
+snapshot: **do not send an `alt_names` update for 945 before a build later than
+2026-10-07** — the list would carry the alias back. The revert proposal for 945 was
+dropped from the batch accordingly; 945 is otherwise as it was before today.
+
+Review of the create/removal change: review agent — no serious; minors fixed (PHP
+`trim` character set; hyphenated names refused by the duplicate check, since the
+lookup splits on "-"; a duplicate baseline row refuses; post-write error wording
+covers "fewer than declared"; stale docs) and the count-not-set residual of the
+post-write check documented in docs/12 §5.
+
+codex on the same change: one SERIOUS — the snapshot boundary is a date, so a
+build-day operation may or may not be in the build. Fixed by refusing any alias
+operation for the institution dated on the build day (tested). Re-review: no serious;
+one minor (the comment's timezone reasoning — both sides are UTC; the issue is the
+dropped time of day) fixed.

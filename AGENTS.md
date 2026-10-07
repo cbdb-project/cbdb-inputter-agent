@@ -21,7 +21,7 @@ touching `ADDR_CODES`/`ADDR_BELONGS_DATA`. Its §4 records the gap as it stood b
 2026-09-11, when neither table had a create; that gap is closed, and the header says
 which of its sections that supersedes),
 `docs/12-social-institution-aggregate.md` (the `social-institution` aggregate, modelled
-update-only for writing institution aliases — read before touching
+create and update, for institutions and their aliases — read before touching
 `SOCIAL_INSTITUTION_*` or sending `alt_names`, which deletes every alias it does not
 list and has no read endpoint).
 
@@ -331,8 +331,8 @@ user how old the build is instead of quietly trusting it.
     and **the server has no duplicate-name guard on create**, so
     `preflight.assert_office_create_is_not_a_duplicate()` runs a *live* check before any
     office create and must never be replaced by a snapshot lookup.
-    The sixth, modelled 2026-10-07, is **`social-institution`** — **update only**, to
-    write institution aliases (`alt_names`, opened upstream that day; see
+    The sixth, modelled 2026-10-07, is **`social-institution`** — **create and
+    update**, no delete, to write institution aliases (`alt_names`, opened upstream that day; see
     `docs/12-social-institution-aggregate.md` and `docs/04-field-whitelists.md` §19).
     Its update is a full-row overwrite like `office`'s, **except `alt_names`**: absent
     = the aliases are untouched; present = the alias table is reconciled to exactly
@@ -340,17 +340,20 @@ user how old the build is instead of quietly trusting it.
     payload is built from a live read (`social_institution_aggregate.read_institution`,
     aliases from snapshot + operations log), and `MutationApi.update()` re-checks
     immediately before sending that the list deletes no existing alias, and afterwards
-    that the server's `alt_names_removed` is 0 — a nonzero count (an alias added by
-    someone else in between, which upstream cannot refuse) stops the batch as an
-    indeterminate outcome. Removing an alias is not modelled. Never send `alt_names` from memory or a hand-typed list.
+    that the server's `alt_names_removed` equals the declared removals — any other
+    count (e.g. an alias added by someone else in between, which upstream cannot
+    refuse) stops the batch as an indeterminate outcome. Removing an alias must be declared in the client-only `alt_names_removed`, and
+    both checks match it exactly. Its create takes only the six keys the server reads
+    (the rest is ignored server-side, so it follows as an update) and runs a live
+    same-name-same-address check first. Never send `alt_names` from memory or a
+    hand-typed list.
     The rest (`char-variant-map`, `office-type-tree`,
     `text-entity`, `merged-person`) are still unmodelled, so a staging file naming one
     is rejected as an unknown alias — a safe outcome, but by absence rather than by
     design — **and by absence only here**: upstream accepts writes for all four
     (`char_variant_map` create and update, `office-type-tree` create and update,
     `text-entity` create/update/delete, `merged-person`
-    create and delete), and for `social-institution` create and delete, which are not
-    modelled either. So if a task needs one of them, modelling it is the work;
+    create and delete), and `social-institution` delete, which is not modelled either. So if a task needs one of them, modelling it is the work;
     routing around `models.py` is not.
     **The creatable set grew and is now six tables** (upstream commits dated
     2026-09-10; pulled here 2026-09-11).

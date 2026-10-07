@@ -82,11 +82,11 @@ def test_only_the_hyphenated_alias_reaches_the_aggregate():
             find_spec_by_alias(unregistered)
 
 
-def test_update_only():
+def test_create_and_update_but_no_delete():
     SPEC.resolve_alias("social-institution", "update")
-    for operation in ("create", "delete"):
-        with pytest.raises(FieldWhitelistError):
-            SPEC.resolve_alias("social-institution", operation)
+    SPEC.resolve_alias("social-institution", "create")
+    with pytest.raises(FieldWhitelistError):
+        SPEC.resolve_alias("social-institution", "delete")
 
 
 def test_a_complete_update_validates_with_and_without_alt_names():
@@ -319,10 +319,9 @@ def test_an_alias_operation_on_another_institution_does_not_matter(snapshot):
     assert sia.read_alt_names(client, snapshot, 945)["operations_seen"] == 1
 
 
-@pytest.mark.parametrize("owner", [945, "945", None])
-def test_an_alias_operation_on_this_institution_or_an_unknown_one_refuses(snapshot, owner):
-    with pytest.raises(sia.InstitutionReadError, match="not current"):
-        sia.read_alt_names(FakeClient(operations(_op(1, owner))), snapshot, 945)
+def test_an_unattributable_alias_operation_refuses(snapshot):
+    with pytest.raises(sia.InstitutionReadError, match="cannot be attributed"):
+        sia.read_alt_names(FakeClient(operations(_op(1, None))), snapshot, 945)
 
 
 def test_no_snapshot_refuses(snapshot):
@@ -356,9 +355,10 @@ def test_the_guard_skips_null_names_the_server_keeps_anyway(snapshot):
 
 def test_the_guard_reads_live_so_a_stale_list_cannot_slip_through(snapshot):
     """Someone adds an alias between the review and the submit: refuse."""
-    with pytest.raises(sia.InstitutionReadError):
+    added = _row_op(9, 1, 945, "他名")
+    with pytest.raises(sia.InstitutionReadError, match="他名"):
         sia.assert_alt_names_update_deletes_nothing(
-            FakeClient(operations(_op(9, 945))), snapshot, 945, [alias()])
+            FakeClient(operations(added)), snapshot, 945, [alias()])
 
 
 # --- mutation_api wiring --------------------------------------------------------------
@@ -375,7 +375,7 @@ def make_api(tmp_path, *, dry_run):
 def test_update_envelope_and_the_guard_runs_before_the_write(tmp_path, monkeypatch):
     seen = {}
 
-    def guard(client, snapshot, inst_code, alt_names):
+    def guard(client, snapshot, inst_code, alt_names, removed):
         seen["guard"] = (inst_code, alt_names, len(responses.calls))
 
     monkeypatch.setattr("cbdb_agent.mutation_api.assert_alt_names_update_deletes_nothing", guard)
@@ -597,3 +597,285 @@ def test_no_alt_names_no_counter_check(tmp_path):
     make_api(tmp_path, dry_run=False).update(
         "social_institution_aggregate", resource_string="social-institution",
         person_id=0, target_pk={"c_inst_code": 945}, changes=full_changes())
+
+
+# --- replaying the operations log ------------------------------------------------------
+
+
+def _row_op(op_id, op_type, inst_code, name, *, before_name=None, type_code=0,
+            at="2026-10-07 10:00:00"):  # the fixture snapshot is built 2026-10-03
+    def row(n):
+        return {"c_inst_name_code": 1, "c_inst_code": inst_code,
+                "c_inst_altname_type": type_code, "c_inst_altname_hz": n,
+                "c_inst_altname_py": None, "c_source": 72223, "c_pages": None,
+                "c_notes": None}
+    op = {"id": op_id, "resource": sia.ALTNAME_TABLE, "updated_at": at,
+          "op_type": op_type, "resource_data": row(name)}
+    if op_type == 3:
+        op["resource_original"] = row(before_name)
+    elif op_type == 4:
+        op["resource_original"] = row(name)
+    return op
+
+
+def _ops_newest_first(*ops):
+    # operations_since returns newest first; give each a distinct time.
+    stamped = [dict(op, updated_at=f"2026-10-07 10:00:{i:02d}") for i, op in enumerate(ops)]
+    return list(reversed(stamped))
+
+
+def test_an_insert_since_the_snapshot_is_replayed(snapshot):
+    client = FakeClient(operations(*_ops_newest_first(_row_op(1, 1, 945, "報寧寺"))))
+    result = sia.read_alt_names(client, snapshot, 945)
+    assert [r["name"] for r in result["rows"]] == ["報寧寺"]
+    assert result["operations_replayed"] == 1
+
+
+def test_insert_then_delete_replays_to_nothing(snapshot):
+    ops = _ops_newest_first(_row_op(1, 1, 945, "報寧寺"), _row_op(2, 4, 945, "報寧寺"))
+    assert sia.read_alt_names(FakeClient(operations(*ops)), snapshot, 945)["rows"] == []
+
+
+def test_an_update_replaces_the_row(snapshot):
+    ops = _ops_newest_first(_row_op(1, 3, 77, "新名", before_name="舊名"))
+    rows = sia.read_alt_names(FakeClient(operations(*ops)), snapshot, 77)["rows"]
+    assert [r["name"] for r in rows] == ["新名"]
+
+
+@pytest.mark.parametrize("ops", [
+    [_row_op(1, 4, 945, "不在")],                       # delete of a row not there
+    [_row_op(1, 1, 77, "舊名")],                        # insert of a row already there
+    [_row_op(1, 3, 945, "新", before_name="不在")],      # update of a row not there
+    [_row_op(1, 2, 945, "報寧寺")],                      # an op type the replay cannot apply
+])
+def test_a_replay_that_does_not_fit_refuses(snapshot, ops):
+    inst = ops[0]["resource_data"]["c_inst_code"]
+    with pytest.raises(sia.InstitutionReadError):
+        sia.read_alt_names(FakeClient(operations(*_ops_newest_first(*ops))), snapshot, inst)
+
+
+def test_operations_on_other_institutions_are_skipped(snapshot):
+    ops = _ops_newest_first(_row_op(1, 1, 12, "別名"), _row_op(2, 4, 12, "別名"))
+    assert sia.read_alt_names(FakeClient(operations(*ops)), snapshot, 945)["rows"] == []
+
+
+# --- declared removals --------------------------------------------------------------------
+
+
+def test_removal_must_be_declared_and_declared_removal_passes(snapshot):
+    client = FakeClient(operations(*_ops_newest_first(_row_op(1, 1, 945, "報寧寺"))))
+    with pytest.raises(sia.InstitutionReadError, match="not listed"):
+        sia.assert_alt_names_update_deletes_nothing(client, snapshot, 945, [])
+    sia.assert_alt_names_update_deletes_nothing(
+        client, snapshot, 945, [], [{"type_code": 0, "name": "報寧寺"}])
+
+
+def test_a_declared_removal_that_is_not_there_refuses(snapshot):
+    client = FakeClient(operations())
+    with pytest.raises(sia.InstitutionReadError, match="would not delete"):
+        sia.assert_alt_names_update_deletes_nothing(
+            client, snapshot, 945, [], [{"type_code": 0, "name": "報寧寺"}])
+
+
+def test_a_declared_removal_still_in_the_list_refuses(snapshot):
+    client = FakeClient(operations(*_ops_newest_first(_row_op(1, 1, 945, "報寧寺"))))
+    with pytest.raises(sia.InstitutionReadError, match="would not delete"):
+        sia.assert_alt_names_update_deletes_nothing(
+            client, snapshot, 945, [alias()], [{"type_code": 0, "name": "報寧寺"}])
+
+
+def test_removal_list_needs_alt_names_and_rows():
+    with pytest.raises(FieldWhitelistError, match="alongside"):
+        SPEC.validate_changes("update", full_changes(
+            alt_names_removed=[{"type_code": 0, "name": "報寧寺"}]))
+    with pytest.raises(FieldWhitelistError):
+        SPEC.validate_changes("update", full_changes(alt_names=[], alt_names_removed=[]))
+
+
+@responses.activate
+def test_declared_removal_is_stripped_from_the_wire_and_counted(tmp_path, monkeypatch):
+    seen = {}
+
+    def guard(client, snapshot, inst_code, alt_names, removed):
+        seen["removed"] = removed
+
+    monkeypatch.setattr("cbdb_agent.mutation_api.assert_alt_names_update_deletes_nothing", guard)
+    monkeypatch.setattr("cbdb_agent.mutation_api.ensure_snapshot", lambda **kw: None)
+    responses.add(responses.POST, "http://localhost:8000/api/v2/mutate",
+                  json={"ok": True, "result": {"alt_names_removed": 1}})
+    removal = [{"type_code": 0, "name": "報寧寺"}]
+    make_api(tmp_path, dry_run=False).update(
+        "social_institution_aggregate", resource_string="social-institution",
+        person_id=0, target_pk={"c_inst_code": 945},
+        changes=full_changes(alt_names=[], alt_names_removed=removal))
+    body = json.loads(responses.calls[0].request.body)
+    assert "alt_names_removed" not in body["changes"]
+    assert body["changes"]["alt_names"] == []
+    assert seen["removed"] == removal
+
+
+@responses.activate
+def test_a_removal_count_other_than_declared_stops(tmp_path, monkeypatch):
+    monkeypatch.setattr("cbdb_agent.mutation_api.assert_alt_names_update_deletes_nothing",
+                        lambda *a: None)
+    monkeypatch.setattr("cbdb_agent.mutation_api.ensure_snapshot", lambda **kw: None)
+    responses.add(responses.POST, "http://localhost:8000/api/v2/mutate",
+                  json={"ok": True, "result": {"alt_names_removed": 2}})
+    with pytest.raises(sia.AliasesDeletedError):
+        make_api(tmp_path, dry_run=False).update(
+            "social_institution_aggregate", resource_string="social-institution",
+            person_id=0, target_pk={"c_inst_code": 945},
+            changes=full_changes(alt_names=[],
+                                 alt_names_removed=[{"type_code": 0, "name": "報寧寺"}]))
+
+
+# --- create ---------------------------------------------------------------------------
+
+
+def create_changes(**overrides):
+    changes = {"name": "報寧寺", "type_code": 2, "dynasty_code": 15, "addr_id": 12829,
+               "source_id": 72223}
+    changes.update(overrides)
+    return changes
+
+
+def test_create_takes_exactly_what_the_server_reads():
+    SPEC.validate_changes("create", create_changes())
+    SPEC.validate_changes("create", create_changes(alt_names=[alias("半山寺")]))
+    for ignored_by_server in ("begin_year", "notes", "pages", "addresses"):
+        with pytest.raises(FieldWhitelistError, match=ignored_by_server):
+            SPEC.validate_changes("create", create_changes(**{ignored_by_server: 1}))
+    for required in ("name", "type_code", "dynasty_code", "addr_id", "source_id"):
+        changes = create_changes()
+        del changes[required]
+        with pytest.raises(FieldWhitelistError, match=required):
+            SPEC.validate_changes("create", changes)
+
+
+def _dup_routes(addr_id):
+    def names(params):
+        return paginator([{"c_inst_name_code": 900, "c_inst_name_hz": "報寧寺"},
+                          {"c_inst_name_code": 901, "c_inst_name_hz": "報寧寺院"}])
+
+    def codes(params):
+        return paginator([dict(_CODES_ROW, c_inst_code=5000, c_inst_name_code=900),
+                          dict(_CODES_ROW, c_inst_code=5001, c_inst_name_code=901)])
+
+    def addrs(params):
+        return paginator([dict(_ADDR_ROW, c_inst_code=5000, c_inst_name_code=900,
+                               c_inst_addr_id=addr_id)])
+    return {"/api/select/search/socialinst": names,
+            "/api/select/search/socialinstcode": codes,
+            "/api/select/search/socialinstaddr": addrs}
+
+
+def test_same_name_same_place_is_a_duplicate():
+    with pytest.raises(sia.InstitutionReadError, match="second institution"):
+        sia.assert_institution_create_is_not_a_duplicate(
+            FakeClient(_dup_routes(12829)), name="報寧寺", addr_id=12829)
+
+
+def test_same_name_elsewhere_is_a_homonym_not_a_duplicate():
+    sia.assert_institution_create_is_not_a_duplicate(
+        FakeClient(_dup_routes(7537)), name="報寧寺", addr_id=12829)
+
+
+@responses.activate
+def test_create_runs_the_duplicate_check_first(tmp_path, monkeypatch):
+    seen = {}
+
+    def check(client, *, name, addr_id):
+        seen["args"] = (name, addr_id, len(responses.calls))
+
+    monkeypatch.setattr("cbdb_agent.mutation_api.assert_institution_create_is_not_a_duplicate",
+                        check)
+    responses.add(responses.POST, "http://localhost:8000/api/v2/create",
+                  json={"ok": True, "result": {"pk": {"c_inst_code": 5002,
+                                                      "c_inst_name_code": 902}}})
+    make_api(tmp_path, dry_run=False).create(
+        "social_institution_aggregate", person_id=0, target_pk={},
+        changes=create_changes())
+    assert seen["args"] == ("報寧寺", 12829, 0)
+    body = json.loads(responses.calls[0].request.body)
+    assert body["resource"] == "social-institution"      # the default alias
+    assert body["operation"] == "create"
+    assert body["target"]["pk"] == {}
+
+
+# --- review round 2 ------------------------------------------------------------------
+
+
+def test_a_rename_replays_as_the_same_alias(snapshot):
+    """renameAltNames: op 3, same key, only c_inst_name_code changes."""
+    op = _row_op(1, 3, 77, "舊名", before_name="舊名")
+    op["resource_data"]["c_inst_name_code"] = 2
+    rows = sia.read_alt_names(FakeClient(operations(op)), snapshot, 77)["rows"]
+    assert [r["name"] for r in rows] == ["舊名"]
+
+
+def test_an_op_naming_two_institutions_refuses(snapshot):
+    op = _row_op(1, 3, 77, "新名", before_name="舊名")
+    op["resource_original"]["c_inst_code"] = 78
+    with pytest.raises(sia.InstitutionReadError, match="between institutions"):
+        sia.read_alt_names(FakeClient(operations(op)), snapshot, 77)
+
+
+def test_a_string_type_in_the_log_matches_an_int_in_the_snapshot(snapshot):
+    op = _row_op(1, 4, 77, "舊名", type_code="0")
+    assert sia.read_alt_names(FakeClient(operations(op)), snapshot, 77)["rows"] == []
+
+
+def test_a_duplicate_baseline_row_refuses(snapshot):
+    con = sqlite3.connect(snapshot)
+    con.execute("insert into SOCIAL_INSTITUTION_ALTNAME_DATA values "
+                "(1, 77, 0, '舊名', null, null, null, null)")
+    con.commit()
+    con.close()
+    with pytest.raises(sia.InstitutionReadError, match="twice"):
+        sia.read_alt_names(FakeClient(operations()), snapshot, 77)
+
+
+def test_a_full_width_space_is_not_trimmed_as_the_server_would_not(snapshot):
+    """PHP trim() keeps U+3000: sending '舊名\u3000' is a different alias, so the
+    existing 舊名 would be deleted - refuse before the write."""
+    with pytest.raises(sia.InstitutionReadError, match="舊名"):
+        sia.assert_alt_names_update_deletes_nothing(
+            FakeClient(operations()), snapshot, 77, [alias("舊名\u3000")])
+
+
+def test_a_hyphenated_name_cannot_be_checked_for_duplicates():
+    with pytest.raises(sia.InstitutionReadError, match="'-'"):
+        sia.assert_institution_create_is_not_a_duplicate(
+            FakeClient({}), name="甲-乙寺", addr_id=1)
+
+
+def test_the_duplicate_check_ignores_substring_institution_codes():
+    """`q=5000` on socialinstaddr is LIKE %5000%: 15000's row at the same address is
+    not institution 5000's."""
+    routes_ = _dup_routes(7537)
+
+    def addrs(params):
+        return paginator([dict(_ADDR_ROW, c_inst_code=15000, c_inst_addr_id=12829),
+                          dict(_ADDR_ROW, c_inst_code=5000, c_inst_addr_id=7537)])
+    routes_["/api/select/search/socialinstaddr"] = addrs
+    sia.assert_institution_create_is_not_a_duplicate(
+        FakeClient(routes_), name="報寧寺", addr_id=12829)
+
+
+def test_an_operation_on_the_build_day_refuses(snapshot):
+    """The build date is a day; whether a same-day operation is in the build cannot
+    be told, so neither applying it nor skipping it is safe."""
+    op = _row_op(1, 1, 945, "報寧寺", at="2026-10-03 23:59:59")
+    with pytest.raises(sia.InstitutionReadError, match="build day"):
+        sia.read_alt_names(FakeClient(operations(op)), snapshot, 945)
+
+
+def test_a_build_day_operation_on_another_institution_does_not_matter(snapshot):
+    op = _row_op(1, 1, 12, "別名", at="2026-10-03 10:00:00")
+    assert sia.read_alt_names(FakeClient(operations(op)), snapshot, 945)["rows"] == []
+
+
+def test_the_day_after_the_build_is_replayed(snapshot):
+    op = _row_op(1, 1, 945, "報寧寺", at="2026-10-04 00:00:00")
+    rows = sia.read_alt_names(FakeClient(operations(op)), snapshot, 945)["rows"]
+    assert [r["name"] for r in rows] == ["報寧寺"]
