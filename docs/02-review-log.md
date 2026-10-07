@@ -3180,3 +3180,12 @@ build-day operation may or may not be in the build. Fixed by refusing any alias
 operation for the institution dated on the build day (tested). Re-review: no serious;
 one minor (the comment's timezone reasoning — both sides are UTC; the issue is the
 dropped time of day) fixed.
+
+Submitted, gates opened per run and closed in the same command:
+`2026-10-07-wang-anshi-nianpu-inst-redo` — 王安石's BIOG_INST_DATA row to 945 deleted
+(371873); institution 4012 報寧寺 created, name code 2640 (371875; the live duplicate
+check found no 報寧寺 anywhere). `2026-10-07-wang-anshi-nianpu-inst-baoning` — 4012's
+start year 1084 and its 上元 12829 address row sourced to 27842 (371877;
+`alt_names_removed` 0, no notices); 王安石 → 4012 role 6 (371879). Read back: 4012
+equals what was sent field by field; `/api/v2/get` finds 1762 → 4012 and 404s on
+1762 → 945.
