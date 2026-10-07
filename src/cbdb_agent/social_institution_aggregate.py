@@ -21,12 +21,13 @@ a partial answer: a missed address row would be DELETED by the update built from
 lookup. They are composed the way `places_and_offices.live_state` composes
 ADMIN_CAT_CODES: the weekly snapshot's rows at its build date, plus every
 `operations` row for SOCIAL_INSTITUTION_ALTNAME_DATA since. That is not the snapshot
-deciding on its own (AGENTS.md): the live, authoritative log covers the gap. But
-instead of replaying the log, this refuses if any alias operation in the window
-touches the institution (or cannot be attributed): the table had no write path at all
-before 2026-10-07, so a replay would be machinery for a case that does not arise, and
-a wrong replay is a deleted alias. The consequence: after an alias write to an
-institution, the next `alt_names` update to it waits for the following weekly build.
+deciding on its own (AGENTS.md): the live, authoritative log covers the gap. The log
+is REPLAYED, oldest first: every alias write records the whole row - `resource_data`
+after, `resource_original` before (`SharesImportHelpers::record*`) - so an insert
+adds a row, a delete removes one, an update replaces one. Anything the replay cannot
+apply exactly (an operation type it does not know, a delete of a row it does not
+have, an insert of one it already has, an operation it cannot attribute to an
+institution) is a refusal, not a guess: a wrong replay is a deleted alias.
 
 What nothing here can see: a write made directly against the database.
 """
@@ -264,14 +265,32 @@ def alt_names_at_baseline(snapshot: Path, inst_code: int) -> list[dict[str, Any]
     return out
 
 
+# What PHP `trim()` strips - and therefore what the server strips from a name it is
+# sent. Python's bare `.strip()` also strips U+3000/U+00A0, which the server keeps.
+_PHP_TRIM = " \t\n\r\0\x0b"
+
+
+def _alias_key(type_code: Any, name: Any) -> tuple:
+    """How the server tells two alias rows apart: type, and the name with trailing
+    spaces ignored (utf8mb4_bin is PAD SPACE). Types compare as text so a JSON "0"
+    and a SQLite 0 are the same type."""
+    return (None if type_code is None else str(type_code).strip(),
+            None if name is None else str(name).rstrip(" "))
+
+
+def _alias_row(data: dict) -> dict[str, Any]:
+    return {key: data.get(col) for col, key in ALTNAME_COLUMNS.items()}
+
+
 def read_alt_names(client: HttpClient, snapshot: Path | None,
                    inst_code: int) -> dict[str, Any]:
-    """The institution's aliases now: the snapshot's, provided nothing has touched
-    them since. Returns `{"rows", "as_of", "operations_seen"}`.
+    """The institution's aliases now: the snapshot's, with every alias operation
+    since replayed onto them. Returns `{"rows", "as_of", "operations_seen",
+    "operations_replayed"}`.
 
     Refuses (InstitutionReadError) rather than guess when there is no snapshot, the
-    operations window cannot be read completely, or any alias operation since the
-    build belongs to this institution or cannot be attributed to another one.
+    operations window cannot be read completely, or an operation cannot be applied
+    exactly.
     """
     if snapshot is None:
         raise InstitutionReadError(
@@ -282,53 +301,121 @@ def read_alt_names(client: HttpClient, snapshot: Path | None,
         ops = operations_since(client, as_of, tables={ALTNAME_TABLE})
     except LiveStateError as exc:
         raise InstitutionReadError(f"alias operations since the snapshot: {exc}") from exc
-    for op in ops:
-        data = op.get("resource_data")
-        owner = data.get("c_inst_code") if isinstance(data, dict) else None
-        if owner is None or _same_code(owner, inst_code):
+
+    rows: dict[tuple, dict] = {}
+    for r in alt_names_at_baseline(snapshot, inst_code):
+        key = _alias_key(r["type_code"], r["name"])
+        if key in rows:
+            # The table has no primary key, so two identical rows can exist; the
+            # server 409s any alt_names write to such an institution
+            # (existing_duplicate_rows). Say so here rather than hide one.
             raise InstitutionReadError(
-                f"{ALTNAME_TABLE} has changed since the snapshot ({as_of}) for this "
-                f"institution, or in a way that cannot be attributed (operation "
-                f"{op.get('id')}); the snapshot's alias list is not current. Wait "
-                "for a snapshot built after that operation (weekly) - this client "
-                "will not build an alias list from anything else.")
-    return {"rows": alt_names_at_baseline(snapshot, inst_code),
-            "as_of": as_of, "operations_seen": len(ops)}
+                f"the snapshot holds {key} twice for institution {inst_code}; the "
+                "server refuses alias writes there until an administrator fixes it")
+        rows[key] = r
+    replayed = 0
+    for op in reversed(ops):                    # operations_since is newest first
+        after = op.get("resource_data")
+        before = op.get("resource_original")
+        after = after if isinstance(after, dict) else None
+        before = before if isinstance(before, dict) else None
+        owners = {str(d.get("c_inst_code")).strip() for d in (after, before)
+                  if d is not None and d.get("c_inst_code") is not None}
+        if not owners:
+            raise InstitutionReadError(
+                f"{ALTNAME_TABLE} operation {op.get('id')} cannot be attributed to an "
+                "institution; the alias list cannot be replayed past it")
+        if str(inst_code) not in owners:
+            continue
+        if len(owners) > 1:
+            raise InstitutionReadError(
+                f"operation {op.get('id')} moves an alias between institutions {sorted(owners)}")
+        if str(op.get("updated_at") or "")[:10] <= as_of:
+            # Both sides are UTC (`updated_at` serializes as ISO-8601 Z), but the
+            # build is known only to the DAY here (snapshot_build_date), so an
+            # operation on that day may or may not be in it. Replaying it could apply
+            # a change twice, or not at all. Refuse; the next weekly build settles it.
+            raise InstitutionReadError(
+                f"{ALTNAME_TABLE} operation {op.get('id')} for institution "
+                f"{inst_code} is dated {op.get('updated_at')}, the snapshot's build "
+                f"day ({as_of}); whether the build includes it cannot be told. Wait "
+                "for the next weekly snapshot.")
+        op_type = op.get("op_type")
+        where = f"{ALTNAME_TABLE} operation {op.get('id')} (op_type {op_type})"
+        if op_type == 1 and after is not None:
+            key = _alias_key(after.get("c_inst_altname_type"), after.get("c_inst_altname_hz"))
+            if key in rows:
+                raise InstitutionReadError(f"{where} inserts {key}, which is already there")
+            rows[key] = _alias_row(after)
+        elif op_type == 4 and after is not None:
+            # A delete's resource_data is the row as it was (recordDelete).
+            key = _alias_key(after.get("c_inst_altname_type"), after.get("c_inst_altname_hz"))
+            if key not in rows:
+                raise InstitutionReadError(f"{where} deletes {key}, which is not there")
+            del rows[key]
+        elif op_type == 3 and after is not None and before is not None:
+            old = _alias_key(before.get("c_inst_altname_type"), before.get("c_inst_altname_hz"))
+            new = _alias_key(after.get("c_inst_altname_type"), after.get("c_inst_altname_hz"))
+            if old not in rows:
+                raise InstitutionReadError(f"{where} updates {old}, which is not there")
+            del rows[old]
+            if new in rows:
+                raise InstitutionReadError(f"{where} updates onto {new}, which is already there")
+            rows[new] = _alias_row(after)
+        else:
+            raise InstitutionReadError(f"{where} is not an operation this replay can apply")
+        replayed += 1
+
+    out = sorted(rows.values(), key=lambda r: (str(r["type_code"]), str(r["name"])))
+    return {"rows": out, "as_of": as_of, "operations_seen": len(ops),
+            "operations_replayed": replayed}
+
+
+def _removal_keys(removed: list | None) -> set[tuple]:
+    return {_alias_key(r.get("type_code"), str(r.get("name") or "").strip(_PHP_TRIM))
+            for r in (removed or []) if isinstance(r, dict)}
 
 
 def assert_alt_names_update_deletes_nothing(client: HttpClient, snapshot: Path | None,
-                                            inst_code: int, alt_names: list) -> None:
-    """Refuse an `alt_names` update that would delete an existing alias.
+                                            inst_code: int, alt_names: list,
+                                            removed: list | None = None) -> None:
+    """Refuse an `alt_names` update whose deletions are not exactly the declared ones.
 
     `alt_names` is reconciled to exactly the list sent: an existing alias missing
-    from it is deleted, and with no read endpoint nobody would have seen it go. This
-    client does not model removing an alias (a narrower surface for global reference
-    data, as with `delete`), so any such loss is a stale or incomplete list, never
-    the intent. Run immediately before the request, not only when the batch was
-    built: the review sits between the two and is meant to take time.
+    from it is deleted, and with no read endpoint nobody would see it go. So a
+    deletion has to be said - `removed` (the proposal's client-only
+    `alt_names_removed`) - and this checks, against the current list, that what the
+    update would delete is precisely that: no undeclared deletion (a stale or
+    incomplete list), and no declared one that is not there (a typo, or a list that
+    was already changed). Run immediately before the request, not only when the batch
+    was built: the review sits between the two and is meant to take time.
 
     Rows with a NULL name are skipped - the server cannot address them and keeps them
     as they are (API.md 13.4). Matching is exact on (type, name); a variant spelling
     of an existing alias is reported as a deletion, which is the conservative error.
     """
     current = read_alt_names(client, snapshot, inst_code)["rows"]
-    # The server trims what it is sent, and compares existing names with only
-    # trailing spaces ignored (utf8mb4_bin is PAD SPACE): mirror both, so a stored
-    # name with a leading space counts as dropped, as it would be.
-    sent = {(r.get("type_code"), str(r.get("name") or "").strip())
+    sent = {_alias_key(r.get("type_code"), str(r.get("name") or "").strip(_PHP_TRIM))
             for r in alt_names if isinstance(r, dict)}
-    dropped = [r for r in current
-               if r["name"] is not None
-               and (r["type_code"], str(r["name"]).rstrip(" ")) not in sent]
-    if dropped:
+    declared = _removal_keys(removed)
+    existing = {_alias_key(r["type_code"], r["name"]) for r in current
+                if r["name"] is not None}
+    dropped = existing - sent
+    undeclared = sorted(dropped - declared, key=str)
+    if undeclared:
         raise InstitutionReadError(
             f"this `alt_names` list would delete existing alias(es) of institution "
-            f"{inst_code}: {[(r['type_code'], r['name']) for r in dropped]}. "
-            "Removing an alias is not modelled here; carry each existing row across.")
+            f"{inst_code} not listed in `alt_names_removed`: {undeclared}. Carry each "
+            "across, or declare the deletion.")
+    phantom = sorted(declared - dropped, key=str)
+    if phantom:
+        raise InstitutionReadError(
+            f"`alt_names_removed` names {phantom} for institution {inst_code}, but "
+            "the update would not delete them (not there now, or still in `alt_names`)")
 
 
 class AliasesDeletedError(CbdbApiError):
-    """The write LANDED, and it deleted alias rows this client never meant to delete.
+    """The write LANDED, and the number of aliases it deleted is not the declared one.
 
     `indeterminate` so that batch_runner stops the batch (rule 11): not because the
     row's existence is unknown, but because the outcome needs a human before anything
@@ -338,8 +425,10 @@ class AliasesDeletedError(CbdbApiError):
     indeterminate = True
 
 
-def assert_alt_names_write_deleted_nothing(response: Any, inst_code: int) -> None:
-    """After an `alt_names` update: the server must report `alt_names_removed == 0`.
+def assert_alt_names_write_deleted_nothing(response: Any, inst_code: int,
+                                           expected_removed: int = 0) -> None:
+    """After an `alt_names` update: the server's `alt_names_removed` must be exactly
+    the number of declared removals (0 unless `alt_names_removed` said otherwise).
 
     The guard above runs before the request, so it cannot see an alias someone else
     adds in the moment between its read and the server's reconciliation, which would
@@ -350,12 +439,59 @@ def assert_alt_names_write_deleted_nothing(response: Any, inst_code: int) -> Non
     """
     result = response.get("result") if isinstance(response, dict) else None
     removed = result.get("alt_names_removed") if isinstance(result, dict) else None
-    if isinstance(removed, int) and not isinstance(removed, bool) and removed == 0:
+    if (isinstance(removed, int) and not isinstance(removed, bool)
+            and removed == expected_removed):
         return
     raise AliasesDeletedError(
         f"the update to institution {inst_code} landed, but the server reports "
-        f"alt_names_removed={removed!r}. This client never removes an alias, so an "
-        "alias written concurrently was deleted (or the response cannot be checked). "
+        f"alt_names_removed={removed!r} where {expected_removed} were declared. More "
+        "than declared: an alias written concurrently was deleted. Fewer: a sent name "
+        "was merged with a variant spelling of an existing one, or a declared alias "
+        "was already gone. No count: the response cannot be checked. "
         f"Read GET /api/v2/operations for {ALTNAME_TABLE} op_type 4: each delete's "
         "resource_data is the removed row. Re-send the complete list to restore it.",
         body=response)
+
+
+def assert_institution_create_is_not_a_duplicate(client: HttpClient, *, name: Any,
+                                                 addr_id: Any) -> None:
+    """Refuse to create an institution that already exists: same name, same place.
+
+    The server allocates a new `c_inst_code` on every create (it reuses the NAME code,
+    not the institution), so a re-run mints a second institution. Homonyms are real -
+    保寧寺 is two different temples in CBDB, 56 and 57 - so the name alone is not a
+    duplicate; the same name at the same address is. Live, never the snapshot (the
+    AGENTS.md snapshot rule: "does this row already exist" is exactly what a weekly
+    build may not decide). Matching is exact after trimming; a variant spelling is not
+    seen, as for every other pre-create check here.
+    """
+    wanted = str(name or "").strip(_PHP_TRIM)
+    if not wanted:
+        raise InstitutionReadError("cannot check for duplicates of an empty name")
+    if "-" in wanted:
+        # `socialinstcode` splits its query on "-" into code and name code, so a
+        # hyphenated name would come back empty and read as "no duplicate".
+        raise InstitutionReadError(
+            f"{wanted!r} contains '-', which the institution lookup cannot search for; "
+            "check for a duplicate by hand")
+    names = [r for r in _search_all(client, "/api/select/search/socialinst", wanted,
+                                    row_key=lambda r: str(r.get("c_inst_name_code")))
+             if str(r.get("c_inst_name_hz") or "").strip(_PHP_TRIM) == wanted]
+    for name_row in names:
+        name_code = name_row.get("c_inst_name_code")
+        institutions = _search_exact(
+            client, "/api/select/search/socialinstcode", wanted,
+            code_field="c_inst_name_code", code=name_code,
+            row_key=lambda r: (str(r.get("c_inst_code")), str(r.get("c_inst_name_code"))))
+        for inst in institutions:
+            code = inst.get("c_inst_code")
+            addrs = _search_exact(
+                client, "/api/select/search/socialinstaddr", str(code),
+                code_field="c_inst_code", code=code,
+                row_key=lambda r: tuple(str(r.get(c)) for c in (
+                    "c_inst_code", "c_inst_name_code", "c_inst_addr_id",
+                    "c_inst_addr_type_code", "inst_xcoord", "inst_ycoord")))
+            if any(_same_code(a.get("c_inst_addr_id"), addr_id) for a in addrs):
+                raise InstitutionReadError(
+                    f"institution {code} is already {wanted!r} at address {addr_id}; "
+                    "creating it again would make a second institution")

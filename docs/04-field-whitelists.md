@@ -572,10 +572,13 @@ The way to write an institution's aliases (`alt_names`, opened upstream 2026-10-
 Design, traps and the live read: **`docs/12-social-institution-aggregate.md`**. What
 `models.py` encodes:
 
-- **Resource string `social-institution` (hyphen), update only.** The underscore
+- **Resource string `social-institution` (hyphen), create and update.** The underscore
   spellings `social_institution`/`social_institutions` and `socialinst` are §12's
   person sub-resource `BIOG_INST_DATA`; the server's other aggregate spellings are
-  unregistered. Create and delete are not modelled.
+  unregistered. Delete is not modelled. **Create** takes only `name`, `type_code`,
+  `dynasty_code`, `addr_id`, `source_id` (all required) and `alt_names` — the server
+  ignores any other key on create, so fill the rest with an update; a live
+  same-name-same-address check runs first.
 - **PK `c_inst_code`**, in `server_assigned_pk_fields` (present on update, never
   invented). `person_id: 0`.
 - **Fields** (semantic names; the server also takes column names, unregistered here):
@@ -603,9 +606,12 @@ Design, traps and the live read: **`docs/12-social-institution-aggregate.md`**. 
   current row from `/api/select/search/socialinstcode`, `socialinst` and
   `socialinstaddr`; `read_alt_names()` composes the aliases from snapshot + operations
   log. `fetch_current_values()` uses both, so the preview diffs this resource.
+- **`alt_names_removed`** (client-only, never sent): the aliases an update deletes,
+  `[{type_code, name}]`, required alongside `alt_names` for any deletion.
 - **Submit-time guard:** `MutationApi.update()` refuses an `alt_names` list that would
   delete an existing alias (`assert_alt_names_update_deletes_nothing`), and after
-  the write requires `result.alt_names_removed == 0`, stopping the batch otherwise
+  the write requires `result.alt_names_removed` to equal the declared removals,
+  stopping the batch otherwise
   (`assert_alt_names_write_deleted_nothing` — the window between the two it cannot
   close; docs/12 §5).
 - **`floruit_dy: null` is refused** (`null_falls_back_to`): the server stores

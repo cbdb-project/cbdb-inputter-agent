@@ -223,6 +223,13 @@ class ResourceSpec:
     # `c_inst_floruit_dy = floruit_dy ?? dynasty_code`; a quarter of all institutions
     # have floruit NULL, and an alias-only update would silently fill it.
     null_falls_back_to: dict[str, str] = field(default_factory=dict, hash=False)
+    # Keys a proposal may carry in `changes` that are instructions to THIS client and
+    # are never sent: MutationApi strips them from the request. The one so far is the
+    # aggregate's `alt_names_removed`, the explicit list of aliases an `alt_names`
+    # update is meant to delete - without it the guard refuses any deletion.
+    client_only_fields: frozenset[str] = field(default_factory=frozenset)
+    # {field: the field it only makes sense alongside}.
+    requires_field: dict[str, str] = field(default_factory=dict, hash=False)
     # Fields whose VALUE SHAPE is load-bearing: must be a non-empty list of non-empty
     # strings. `type_ids` is the first such field in this client. The generic whitelist
     # only ever checked KEYS, never values.
@@ -241,7 +248,8 @@ class ResourceSpec:
         # A typo here would silently exempt nothing (or demand a field that is not
         # writable), so the sets must agree.
         stray = (self.overwrite_exempt_fields | set(self.row_list_fields)
-                 | set(self.null_falls_back_to)) - self.create_fields - self.update_fields
+                 | set(self.null_falls_back_to) | self.client_only_fields
+                 | set(self.requires_field)) - self.create_fields - self.update_fields
         if stray:
             raise ValueError(f"{self.key}: {sorted(stray)} named in a field rule but not writable")
 
@@ -299,6 +307,13 @@ class ResourceSpec:
                     f"{self.key}: {list_field!r} must be a non-empty list of non-empty "
                     f"strings, got {value!r}. A bare scalar is not accepted here - the "
                     "server takes an array and a wrong shape is not reliably rejected."
+                )
+
+        for dependent, needed in sorted(self.requires_field.items()):
+            if dependent in changes and needed not in changes:
+                raise FieldWhitelistError(
+                    f"{self.key}: {dependent!r} only means something alongside "
+                    f"{needed!r}, which this change does not send"
                 )
 
         for null_field, fallback in sorted(self.null_falls_back_to.items()):
@@ -924,8 +939,16 @@ RESOURCE_SPECS["office"] = ResourceSpec(
 #     entirely different tables. The server's other aggregate spellings
 #     (`social-institutions`, `social-institution-load`, `socialinst-load`) are left
 #     out so there is one way to say it, and `socialinst` is the person spec again.
-#   - Create and delete are not modelled: nothing here needs a new institution or to
-#     remove one, and a narrower surface is the point for global reference data.
+#   - CREATE takes exactly what `validateCreate()` reads - name, type_code,
+#     dynasty_code, addr_id, source_id, alt_names - and nothing else: the server
+#     silently ignores every other key on create (begin year, notes, the address
+#     row's source...), so registering them would let a value vanish. Fill those with
+#     an update after the create. `mutation_api` runs a live duplicate check first
+#     (`assert_institution_create_is_not_a_duplicate`). Delete is not modelled.
+#   - Removing an alias must be SAID: `alt_names_removed` (client-only, never sent)
+#     lists each alias the update is meant to delete, and the guards match it
+#     exactly - before the write against the current list, after it against the
+#     server's `alt_names_removed` count.
 #   - `update` is a FULL-ROW OVERWRITE of SOCIAL_INSTITUTION_CODES and a set
 #     reconciliation of the addresses (at least one; each row rewritten whole). Read
 #     the current state first - `social_institution_aggregate.read_institution()` - and carry every
@@ -945,18 +968,27 @@ _SOCIAL_INSTITUTION_AGGREGATE_FIELDS = frozenset(
         "floruit_dy", "first_known_year",
         "end_year", "ey_nianhao_code", "ey_nianhao_year", "ey_year_range",
         "end_dy", "last_known_year",
-        "addresses", "alt_names",
+        "addresses", "alt_names", "alt_names_removed",
     }
+)
+
+# Exactly the keys `SocialInstitutionAggregateDefinition::validateCreate()` reads.
+_SOCIAL_INSTITUTION_CREATE_FIELDS = frozenset(
+    {"name", "type_code", "dynasty_code", "addr_id", "source_id", "alt_names"}
 )
 
 RESOURCE_SPECS["social_institution_aggregate"] = ResourceSpec(
     key="social_institution_aggregate",
-    create_aliases=frozenset(),   # not modelled - see the comment above
+    create_aliases=frozenset({"social-institution"}),
     update_aliases=frozenset({"social-institution"}),
     delete_aliases=frozenset(),   # not modelled
     pk_fields=("c_inst_code",),
     # Server-assigned on create; on update it must be present and is never invented.
     server_assigned_pk_fields=frozenset({"c_inst_code"}),
+    create_fields=_SOCIAL_INSTITUTION_CREATE_FIELDS,
+    required_create_fields=frozenset(
+        {"name", "type_code", "dynasty_code", "addr_id", "source_id"}
+    ),
     update_fields=_SOCIAL_INSTITUTION_AGGREGATE_FIELDS,
     is_global_reference_data=True,
     # ResolvesSocialInstituteAggregateInput: required on update.
@@ -964,8 +996,10 @@ RESOURCE_SPECS["social_institution_aggregate"] = ResourceSpec(
         {"name", "type_code", "dynasty_code", "source_id", "addresses"}
     ),
     full_overwrite_update=True,
-    overwrite_exempt_fields=frozenset({"alt_names"}),
+    overwrite_exempt_fields=frozenset({"alt_names", "alt_names_removed"}),
     null_falls_back_to={"floruit_dy": "dynasty_code"},
+    client_only_fields=frozenset({"alt_names_removed"}),
+    requires_field={"alt_names_removed": "alt_names"},
     row_list_fields={
         # The reconcile key is (addr_id, addr_type_code, xcoord, ycoord); a matched
         # row has begin/end year, source, pages and notes rewritten from the request.
@@ -992,6 +1026,14 @@ RESOURCE_SPECS["social_institution_aggregate"] = ResourceSpec(
             fields=frozenset({"type_code", "name", "pinyin", "source_id", "pages", "notes"}),
             required=frozenset({"name"}),
             integer_fields=frozenset({"type_code", "source_id"}),
+            unique_by=("type_code", "name"),
+        ),
+        # Which existing aliases this update deletes, by their key.
+        "alt_names_removed": RowListShape(
+            fields=frozenset({"type_code", "name"}),
+            required=frozenset({"name"}),
+            integer_fields=frozenset({"type_code"}),
+            min_rows=1,
             unique_by=("type_code", "name"),
         ),
     },

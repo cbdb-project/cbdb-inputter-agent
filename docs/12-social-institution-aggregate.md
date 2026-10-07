@@ -1,7 +1,8 @@
 # 12 — The `social-institution` aggregate, and institution aliases
 
-**Status:** modelled 2026-10-07, update only. First use: the alias 報寧寺 on
-institution 945 半山寺 (`cases/wang-anshi-nianpu/`).
+**Status:** modelled 2026-10-07 — update, then create and declared alias removal the
+same day. Uses: the alias 報寧寺 on institution 945 半山寺, then its reversal and a new
+institution 報寧寺 (`cases/wang-anshi-nianpu/`).
 
 ## 1. Why this exists
 
@@ -19,7 +20,7 @@ client therefore had to model the aggregate, not just "an alias".
 ## 2. What is modelled (`models.py`)
 
 `RESOURCE_SPECS["social_institution_aggregate"]`, alias **`social-institution`**
-only, **update only**.
+only, **create and update**, no delete.
 
 | | |
 |---|---|
@@ -32,8 +33,21 @@ only, **update only**.
 | row lists | `addresses` and `alt_names` are `RowListShape`s: every row carries every key, scalar values only, integer columns are ints, no duplicate rows |
 | global reference data | yes (AGENTS.md rule 12) |
 
-Create and delete are not modelled — nothing needs them, and a narrower surface is
-the point for global reference data.
+**Create** takes exactly the six keys `validateCreate()` reads — `name`, `type_code`,
+`dynasty_code`, `addr_id`, `source_id`, `alt_names` — because the server silently
+ignores every other key on create (start year, notes, the address row's source…).
+Those are filled by an update afterwards, built from a live read of the new row. The
+address row create writes is type 1 at `addr_id`, coordinates 0, with the
+institution's `source_id`. Before the request, `assert_institution_create_is_not_a_duplicate`
+asks live whether an institution of the same name already has that address (same
+name elsewhere is a homonym — 保寧寺 is two temples, 56 and 57). The response's
+`result.pk` has two keys, `c_inst_code` and `c_inst_name_code`.
+
+The spec key `social_institution_aggregate` is not a server spelling, so
+`mutation_api.default_alias()` sends the resource's only alias when a caller names
+none.
+
+Delete is not modelled.
 
 ## 3. The traps, and what answers each
 
@@ -92,15 +106,16 @@ the build ages, and per proposal.
 
 `read_alt_names(client, snapshot, inst_code)` composes the aliases the way
 `places_and_offices.live_state` composes `ADMIN_CAT_CODES`: the snapshot's rows at its
-build date, plus the `operations` log since. It does **not** replay the log. It
-refuses if any `SOCIAL_INSTITUTION_ALTNAME_DATA` operation since the build belongs to
-this institution or cannot be attributed (every alias operation's `resource_data`
-carries `c_inst_code`). Before 2026-10-07 the table had no write path at all, so a
-replay would be machinery for a case that does not arise yet, and a wrong replay is a
-deleted alias. The consequence: after an alias write to an institution, the next
-`alt_names` update to it waits for the following weekly snapshot. This client does not
-build the list from a previous response's `row.alt_names` — that is upstream's advice,
-but it would make a hand-carried list the thing that decides what gets deleted.
+build date, with every `SOCIAL_INSTITUTION_ALTNAME_DATA` operation since **replayed**
+onto them (§7 has the rules). Every alias operation's `resource_data` carries
+`c_inst_code`; one that does not, or that does not apply exactly, is a refusal.
+**The boundary is a date**: the snapshot's `generated_at_utc` is truncated to its day,
+and an operation on that same day may or may not be in the build (both are UTC —
+`updated_at` arrives as ISO-8601 `Z` — but the build's time of day is dropped). So an alias
+operation for the institution dated on the build day is a refusal too — wait for
+the next build. Operations on other institutions that day are irrelevant.
+A write made directly in the database leaves no operation, and the replay cannot see
+it until the next weekly build — this happened on 2026-10-07 (docs/02).
 
 `batch_runner.fetch_current_values()` uses both for the preview's current-vs-proposed
 diff (the aliases only when the proposal sends `alt_names`; an unreadable alias list
@@ -113,19 +128,23 @@ before the request, when `alt_names` is sent and not under dry-run. It re-reads 
 aliases (§4, local snapshot only, never a download) and refuses if the list would
 delete any existing alias with a name. The review sits between staging and submit and
 is meant to take time; anything written in that window would otherwise be deleted
-silently. Removing an alias is not modelled, so a drop is always a stale list.
+silently. An undeclared drop is always a stale list; a deliberate one is declared (§7).
 
 **The window it cannot close.** The guard reads before the request; the server
 locks and reads the aliases only when it reconciles. An alias someone else adds in
 between would be deleted, and upstream has no precondition (no compare-and-swap on
 the alias set) to turn that into a conflict. So the client checks afterwards too:
 `assert_alt_names_write_deleted_nothing()` requires the response's
-`alt_names_removed` to be `0` (this client never removes an alias) and otherwise
+`alt_names_removed` to equal the declared removals (0 unless §7 says otherwise) and otherwise
 raises `AliasesDeletedError`, which is `indeterminate`, so `batch_runner` stops the
 batch. The deleted rows are in `GET /api/v2/operations` (`SOCIAL_INSTITUTION_ALTNAME_DATA`,
 op_type 4, `resource_data` = the row); restoring means re-sending the complete list.
 Detection, not prevention: closing the window needs an upstream precondition, worth
-adding if alias writes ever become frequent. Today the table has had no write at all
+adding if alias writes ever become frequent. With declared removals the check is a
+count, not a set: if, in that window, someone else deletes the declared alias and adds
+another, the server deletes the newcomer and the count still matches. Rare (two
+writers on one institution's aliases within seconds) and recoverable from the log, but
+not detected. Today the table has had no write at all
 before 2026-10-07, and the window is the length of one request.
 
 What neither check can see: a write made directly against the database.
@@ -141,3 +160,20 @@ changes["alt_names"] = [{"type_code": 0, "name": "報寧寺", "pinyin": None,
 then `validate --staging` (the preview shows every field current = proposed except
 `alt_names`), and `submit`. After a real write, `result.row.alt_names` is the only
 read-back the server gives — keep it (rule 11).
+
+## 7. Removing an alias (added 2026-10-07)
+
+Removal has to be said. A proposal lists each alias it deletes in
+`alt_names_removed` (`[{type_code, name}]`), a **client-only** key: validated like a
+row list, only allowed alongside `alt_names`, and stripped before the request. The
+pre-write guard then requires the deletions the update would make to equal that list
+exactly (nothing undeclared, nothing declared that is not there or is still listed),
+and the post-write check requires `result.alt_names_removed` to equal its length.
+
+To know what is there, the alias read now **replays** the operations log onto the
+snapshot instead of refusing on any change (§4 was the first version): insert (op 1)
+adds the row in `resource_data`, delete (op 4) removes the row in `resource_data`, update
+(op 3) replaces `resource_original` by `resource_data`. An operation that does not fit
+exactly — a delete of a missing row, an insert of an existing one, any other op type,
+one with no `c_inst_code` — is a refusal. Keys compare as (type as text, name with
+trailing spaces stripped), the way the server does.

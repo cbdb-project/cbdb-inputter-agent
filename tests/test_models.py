@@ -193,18 +193,26 @@ def test_text_codes_create_aliases():
     assert get_resource_spec("text_codes") is spec
 
 
-def test_every_spec_key_is_one_of_its_own_create_aliases():
+def test_every_spec_has_a_usable_default_alias():
     """MutationApi.create() defaults `alias = spec.key` when no resource_string is
     passed, so a key that is not its own alias makes the generic API unusable for
     that resource - a trap that cost one review cycle."""
     from cbdb_agent.models import RESOURCE_SPECS
 
+    from cbdb_agent.mutation_api import default_alias
+
     offenders = {
-        key
+        (key, operation)
         for key, spec in RESOURCE_SPECS.items()
-        if spec.create_aliases and key not in spec.create_aliases
+        for operation, aliases in (("create", spec.create_aliases),
+                                   ("update", spec.update_aliases),
+                                   ("delete", spec.delete_aliases))
+        if aliases and default_alias(spec, operation) not in aliases
     }
     assert offenders == set()
+    # The one spec whose key is not a server spelling, on purpose.
+    spec = RESOURCE_SPECS["social_institution_aggregate"]
+    assert default_alias(spec, "create") == "social-institution"
 
 
 def test_text_codes_create_whitelist_is_exactly_api_md_13_2():
@@ -248,6 +256,7 @@ def test_required_create_fields_is_only_set_where_intended():
         "office",
         "addr_codes",         # c_name_chn - a nameless place is unusable
         "admin_cat_codes",    # both name columns, and an FK target besides
+        "social_institution_aggregate",  # an institution with no name/place/source
     }
 
 

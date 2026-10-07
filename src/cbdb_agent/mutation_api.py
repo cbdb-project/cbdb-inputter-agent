@@ -33,7 +33,24 @@ from .snapshot import ensure_snapshot
 from .social_institution_aggregate import (
     assert_alt_names_update_deletes_nothing,
     assert_alt_names_write_deleted_nothing,
+    assert_institution_create_is_not_a_duplicate,
 )
+
+
+def default_alias(spec: Any, operation: str) -> str:
+    """The resource string to send when the caller names none.
+
+    The spec key, when it is one of the operation's aliases (true of almost every
+    resource). Otherwise the operation's only alias - `social_institution_aggregate`
+    is deliberately not a server spelling (the underscore form `social_institution`
+    is the PERSON sub-resource), so its key cannot double as its alias. With neither,
+    the key is returned and `resolve_alias` refuses it before anything is sent.
+    """
+    aliases = {"create": spec.create_aliases, "update": spec.update_aliases,
+               "delete": spec.delete_aliases}[operation]
+    if spec.key in aliases or len(aliases) != 1:
+        return spec.key
+    return next(iter(aliases))
 
 
 def _build_envelope(
@@ -97,7 +114,7 @@ class MutationApi:
         comment: str | None = None,
     ) -> dict[str, Any]:
         spec = get_resource_spec(resource_key)
-        alias = resource_string or spec.key
+        alias = resource_string or default_alias(spec, "create")
         spec.resolve_alias(alias, "create")
         spec.validate_target_pk_for_create(target_pk)
         if spec.key == "sources" and "c_pages" not in target_pk:
@@ -173,6 +190,14 @@ class MutationApi:
             elif spec.key == "text_codes":
                 assert_text_create_is_not_a_duplicate(
                     self._client, title=merged_changes.get("c_title_chn"))
+            elif spec.key == "social_institution_aggregate":
+                # The server mints a new c_inst_code on every create (it reuses
+                # only the name code), so a re-run is a second institution.
+                assert_institution_create_is_not_a_duplicate(
+                    self._client,
+                    name=merged_changes.get("name"),
+                    addr_id=merged_changes.get("addr_id"),
+                )
 
         envelope = _build_envelope(
             resource_string=alias,
@@ -203,7 +228,7 @@ class MutationApi:
         comment: str | None = None,
     ) -> dict[str, Any]:
         spec = get_resource_spec(resource_key)
-        alias = resource_string or spec.key
+        alias = resource_string or default_alias(spec, "update")
         spec.resolve_alias(alias, "update")
         spec.validate_target_pk_for_update_or_delete(target_pk)
         spec.validate_changes("update", changes)
@@ -218,13 +243,19 @@ class MutationApi:
         checks_aliases = (not self._client.dry_run
                           and spec.key == "social_institution_aggregate"
                           and "alt_names" in changes)
+        removed = changes.get("alt_names_removed") or []
         if checks_aliases:
             assert_alt_names_update_deletes_nothing(
                 self._client,
                 ensure_snapshot(allow_download=False),
                 int(target_pk["c_inst_code"]),
                 changes["alt_names"],
+                removed,
             )
+
+        # Instructions to this client (e.g. `alt_names_removed`) never go on the wire.
+        wire_changes = {k: v for k, v in changes.items()
+                        if k not in spec.client_only_fields}
 
         envelope = _build_envelope(
             resource_string=alias,
@@ -232,7 +263,7 @@ class MutationApi:
             operation="update",
             person_id=person_id,
             target_pk=target_pk,
-            changes=changes,
+            changes=wire_changes,
             comment=comment,
         )
         response = self._client.post(
@@ -246,8 +277,9 @@ class MutationApi:
         if checks_aliases:
             # The pre-flight cannot see an alias added between its read and the
             # server's reconcile; the server's own counter can. Raises (and stops
-            # the batch) if anything was removed.
-            assert_alt_names_write_deleted_nothing(response, int(target_pk["c_inst_code"]))
+            # the batch) unless exactly the declared aliases were removed.
+            assert_alt_names_write_deleted_nothing(
+                response, int(target_pk["c_inst_code"]), expected_removed=len(removed))
         return response
 
     def delete(
@@ -260,7 +292,7 @@ class MutationApi:
         comment: str | None = None,
     ) -> dict[str, Any]:
         spec = get_resource_spec(resource_key)
-        alias = resource_string or spec.key
+        alias = resource_string or default_alias(spec, "delete")
         spec.resolve_alias(alias, "delete")
         spec.validate_target_pk_for_update_or_delete(target_pk)
 
