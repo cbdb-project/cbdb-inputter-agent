@@ -524,7 +524,12 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
 # Deliberately narrow:
 #   * the target must be a `create` in the same batch;
 #   * that create's resource must have EXACTLY ONE server-assigned PK field, so
-#     "the key it was assigned" is unambiguous - no field name to get wrong;
+#     "the key it was assigned" is unambiguous - no field name to get wrong. The
+#     one other kind of key unknown when the file is written is a NEW person's
+#     c_personid, which batch_runner allocates at submit time; a reference to a
+#     `basicinformation` create with person_id "NEW" stands for that
+#     (models.ref_key_field). It is what lets a kinship or association row name a
+#     relative the same batch creates;
 #   * a reference is resolved at submit time by batch_runner, never by staging, and
 #     an unresolved one is a hard error rather than a silently-null column.
 PK_REF_KEY = "ref"
@@ -582,6 +587,7 @@ def _pk_ref_issues(batch: "StagingBatch", by_id: dict) -> list["Issue"]:
         FieldWhitelistError,
         find_spec_by_alias,
         pk_ref_target_resource,
+        ref_key_field,
     )
 
     issues: list[Issue] = []
@@ -658,14 +664,24 @@ def _pk_ref_issues(batch: "StagingBatch", by_id: dict) -> list["Issue"]:
                 pspec = find_spec_by_alias(parent.resource)
             except FieldWhitelistError:
                 continue          # the parent's own alias error is reported separately
-            assigned = sorted(pspec.server_assigned_pk_fields)
-            if len(assigned) != 1:
+            if ref_key_field(pspec) is None:
+                assigned = sorted(pspec.server_assigned_pk_fields)
                 issues.append(Issue(
                     proposal_id=p.id, severity="error",
                     message=f"{label} references {target!r} ({parent.resource}), "
                             f"whose server-assigned primary key fields are "
                             f"{assigned or 'none'} - a reference needs exactly one, "
                             f"so there is no unambiguous value to substitute"))
+                continue
+            if pspec.key == "basicinformation" and parent.person_id != "NEW":
+                # Only a new person is allocated an id at submit time. A create
+                # against a known c_personid has nothing to hand on that the file
+                # could not simply say.
+                issues.append(Issue(
+                    proposal_id=p.id, severity="error",
+                    message=f"{label} references {target!r}, a basicinformation "
+                            f"create for c_personid {parent.person_id!r} - write "
+                            f"that id here instead of a reference"))
     return issues
 
 def is_field_value_resolution(value: Any) -> bool:

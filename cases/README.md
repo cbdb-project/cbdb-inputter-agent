@@ -30,6 +30,7 @@ See AGENTS.md, "Where code goes", for the rule that separates a case from a tool
 | [tang-zhi-mou-zhou-shi](tang-zhi-mou-zhou-shi/) | 1 (2026-09-04) | submitted — production, verified | `docs/10` |
 | [salt-administration](salt-administration/) | 6 (2026-09-10 … 2026-09-19) | **complete** — all 118 rows in production | `docs/11` |
 | [zhenanzhou-renhuai-suiyang](zhenanzhou-renhuai-suiyang/) | 1 (2026-09-21) | **complete** — all 6 rows in production, verified | `cases/zhenanzhou-renhuai-suiyang/README.md` |
+| [wang-anshi-nianpu](wang-anshi-nianpu/) | 4 (2026-10-06 … 2026-10-07) | **complete** — titles 72223/72224, main batch 74/74 in production, verified; one alias still to add | `cases/wang-anshi-nianpu/README.md` |
 
 ## Writing a case README
 

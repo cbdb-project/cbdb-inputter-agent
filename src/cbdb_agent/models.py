@@ -894,11 +894,39 @@ PK_REF_TARGETS: dict[str, dict[str, str]] = {
         "c_admin_cat_code": "admin_cat_codes",
     },
     # The address pseudo-fields: lists of ADDR_CODES ids on a person's records.
-    "postings": {"c_addr": "addr_codes"},
-    "events": {"c_addr_id": "addr_codes"},
-    "possessions": {"c_addr_id": "addr_codes"},
-    "addresses": {"c_addr_id": "addr_codes"},
+    # `c_source` on every person resource that has one: a batch whose own source
+    # book is not in TEXT_CODES yet creates the title and cites it in the same run.
+    "postings": {"c_addr": "addr_codes", "c_source": "text_codes"},
+    "events": {"c_addr_id": "addr_codes", "c_source": "text_codes"},
+    "possessions": {"c_addr_id": "addr_codes", "c_source": "text_codes"},
+    "addresses": {"c_addr_id": "addr_codes", "c_source": "text_codes"},
+    "altnames": {"c_source": "text_codes"},
+    "entries": {"c_source": "text_codes"},
+    "statuses": {"c_source": "text_codes"},
+    "social_institutions": {"c_source": "text_codes"},
+    "texts": {"c_textid": "text_codes", "c_source": "text_codes"},
+    "sources": {"c_textid": "text_codes"},
+    # The other party of a mirrored pair, when that person is created in the same
+    # batch. Their c_personid is allocated by batch_runner at submit time, so it
+    # cannot be written down in advance any more than a server-assigned id can.
+    "kinship": {"c_kin_id": "basicinformation", "c_source": "text_codes"},
+    "associations": {"c_assoc_id": "basicinformation", "c_source": "text_codes"},
 }
+
+
+def ref_key_field(spec: ResourceSpec) -> str | None:
+    """The one column a `{"ref": ...}` to a create of this resource stands for, or
+    None if such a create has no single key to hand on.
+
+    A server-assigned key where the resource has exactly one. `basicinformation` has
+    none - its c_personid is client-assigned - but it is just as unknown when the
+    batch is written, because batch_runner allocates it at submit time; a reference
+    to a person create stands for that.
+    """
+    if spec.key == "basicinformation":
+        return "c_personid"
+    fields = sorted(spec.server_assigned_pk_fields)
+    return fields[0] if len(fields) == 1 else None
 
 
 def pk_ref_target_resource(spec_key: str, field: str) -> str | None:

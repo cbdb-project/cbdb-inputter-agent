@@ -1,6 +1,8 @@
 """Live pre-submission checks that the server does not perform for us.
 
-Right now this holds exactly one: the duplicate-name check for a new office code.
+It holds three duplicate checks, one for each create the server does not dedupe:
+an office name (described below, and the first one written), an `ADDR_CODES` place
+over a period, and a `TEXT_CODES` title.
 
 Why it has to exist at all. `OfficeImportService::create()` allocates
 `max(c_office_id) + 1` and inserts, with **no name lookup of any kind** (verified in the
@@ -136,11 +138,11 @@ def _spellings(canonical_name: str) -> list[str]:
             )
         if len(out) > _MAX_SPELLINGS:
             raise PreflightError(
-                f"office name {canonical_name!r} has more than {_MAX_SPELLINGS} "
+                f"name {canonical_name!r} has more than {_MAX_SPELLINGS} "
                 "byte-distinct spellings once CJK compatibility ideographs are "
                 "considered, so this check cannot search all of them. The search "
                 "endpoint matches bytes, so an unsearched spelling could be a "
-                "duplicate. Verify by hand before creating this office."
+                "duplicate. Verify by hand before creating it."
             )
     return out
 
@@ -164,7 +166,7 @@ def _rows(body: Any) -> list[dict[str, Any]]:
     treat anything unrecognized as "cannot tell", never as "no rows".
     """
     if not isinstance(body, dict):
-        raise PreflightError(f"office search returned {type(body).__name__}, not an object")
+        raise PreflightError(f"search returned {type(body).__name__}, not an object")
 
     if isinstance(body.get("data"), list):
         candidate = body["data"]
@@ -172,7 +174,7 @@ def _rows(body: Any) -> list[dict[str, Any]]:
         candidate = body["raw"]
     else:
         raise PreflightError(
-            "office search response had neither a `data` list nor a bare array "
+            "search response had neither a `data` list nor a bare array "
             f"(keys: {sorted(body)[:8]}) - the endpoint's shape is not guaranteed, so "
             "this is 'cannot tell', not 'no matches'"
         )
@@ -428,6 +430,89 @@ def find_addr_name_matches(client: HttpClient, name: str) -> list[dict[str, Any]
     return [r for r in rows
             if isinstance(r, dict)
             and str(r.get("c_name_chn", "")).strip() == str(name).strip()]
+
+
+_TEXT_SEARCH_PATH = "/api/select/search/text"
+
+
+def find_text_title_matches(client: HttpClient, title: str) -> list[dict[str, Any]]:
+    """Live TEXT_CODES rows whose `c_title_chn` is exactly `title`.
+
+    `/api/select/search/text` is a paginated substring search (20 rows a page:
+    `q=年譜` is 205 rows over 11 pages, measured 2026-10-06), so every page is read
+    and the match is exact. A short count, or more pages than the cap, is "cannot
+    tell", never "no duplicate": `TEXT_CODES` has no delete path and `c_title_chn`
+    is not editable afterwards (API.md 13.3).
+
+    So is a response without the paginator's `last_page` and `total`: without
+    them there is no telling whether page one was the whole answer. And every
+    byte-distinct spelling is searched (`_spellings`), because `LIKE` compares
+    bytes and a row stored in a compatibility form would not match the NFC query.
+    """
+    wanted = _canonical(str(title))
+    seen: dict[str, dict[str, Any]] = {}
+    for spelling in _spellings(wanted):
+        seen.update(_text_search_all_pages(client, spelling))
+    return [row for row in seen.values()
+            if _canonical(str(row.get("c_title_chn") or "")) == wanted]
+
+
+def _text_search_all_pages(client: HttpClient, query: str) -> dict[str, dict[str, Any]]:
+    seen: dict[str, dict[str, Any]] = {}
+    page = 1
+    while True:
+        params: dict[str, Any] = {"q": query}
+        if page > 1:
+            params["page"] = page
+        try:
+            body = client.get(_TEXT_SEARCH_PATH, params=params, public=True)
+        except (AuthenticationError, AuthorizationError, RateLimitedError):
+            raise                    # batch-wide, see _search_all_pages
+        except CbdbApiError as exc:
+            raise PreflightError(
+                f"text-title duplicate check failed on page {page} ({exc}) - "
+                "refusing to treat a failed check as a clean one") from exc
+        for row in _rows(body):
+            seen[str(row.get("c_textid"))] = row
+        last_page, total = body.get("last_page"), body.get("total")
+        if (not isinstance(last_page, int) or isinstance(last_page, bool)
+                or not isinstance(total, int) or isinstance(total, bool)):
+            raise PreflightError(
+                f"text search for {query!r} came back without the paginator's "
+                f"last_page/total (keys: {sorted(body)[:8]}), so whether page {page} "
+                "was the whole answer cannot be told")
+        if last_page > _PAGE_CAP:
+            raise PreflightError(
+                f"text title {query!r} matches {total} rows over {last_page} "
+                f"pages, past this check's {_PAGE_CAP}-page cap. Verify by hand "
+                "before creating the title.")
+        if last_page <= page:
+            if len(seen) != total:
+                raise PreflightError(
+                    f"text search for {query!r} reported {total} rows but "
+                    f"{len(seen)} distinct ones came back; an exact match could be "
+                    "the one skipped")
+            return seen
+        page += 1
+
+
+def assert_text_create_is_not_a_duplicate(client: HttpClient, *, title: str) -> None:
+    """Raise if a live TEXT_CODES row already has this `c_title_chn`.
+
+    The server does not dedupe titles, and a second row for one book splits every
+    citation of it between two ids for good. Live, never from the snapshot, for the
+    same reason as the other two checks here.
+    """
+    if not str(title or "").strip():
+        raise PreflightError(
+            "cannot check a TEXT_CODES create for duplicates without a c_title_chn")
+    matches = find_text_title_matches(client, title)
+    if matches:
+        ids = ", ".join(str(m.get("c_textid")) for m in matches)
+        raise PreflightError(
+            f"a text titled {title!r} is already in TEXT_CODES [{ids}]. Creating it "
+            "again would make a second permanent row for the same book; cite the "
+            "existing c_textid instead.")
 
 
 def periods_overlap(a_first, a_last, b_first, b_last) -> bool:

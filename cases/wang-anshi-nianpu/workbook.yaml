@@ -1,0 +1,43 @@
+# Input to `python -m cbdb_agent from-workbook` for this case. See README.md.
+batch_id: 2026-10-06-wang-anshi-nianpu
+
+source_excerpt: >-
+  王安石 (1762) and the people around him, from 《王荊文公年譜》, as coded into a
+  人物資料標準化 template workbook (王荊文公年譜_結構化_標準化_20261006_153404.xlsx,
+  kept outside this repo).
+
+# The book every row cites. Not in TEXT_CODES when the workbook arrived (live search,
+# 2026-10-06, for 王荊文公年譜, 荊文公年譜, 王荆文公年谱, 王荊公年譜); created on the
+# user's instruction the same day by batch 2026-10-06-wang-anshi-nianpu-titles.
+source_text:
+  textid: 72223      # 王荊文公年譜
+
+# 著述 rows whose text the workbook marks 需新建, and what became of them.
+new_texts:
+  著述-001:
+    textid: 72224    # 三經新義, created by the same batch (no row under that title before)
+
+# The existing CBDB row each `update` fills. Keys from the SQLite snapshot of
+# 2026-08-15; each is read back live by `validate`'s preview before anything is sent.
+update_targets:
+  官名-010: {c_office_id: 793, c_posting_id: 27835}    # 通判, 舒州
+  官名-026: {c_office_id: 2314, c_posting_id: 62109}   # 直集賢院
+  官名-027: {c_office_id: 1930, c_posting_id: 58804}   # 同修起居注
+  官名-038: {c_office_id: 149, c_posting_id: 5297}     # 參知政事, 1069-1070
+  官名-069: {c_office_id: 691, c_posting_id: 23600}    # 司空
+  官名-071: {c_office_id: 729, c_posting_id: 25252}    # 太傅 (贈)
+  入仕-001:
+    {c_entry_code: 36, c_sequence: 1, c_kin_code: 0, c_assoc_code: 0, c_kin_id: 0,
+     c_year: 1042, c_assoc_id: 0, c_inst_code: 0, c_inst_name_code: 0}
+  關係-003:
+    {c_assoc_code: 429, c_assoc_id: 770, c_kin_code: 0, c_kin_id: 0,
+     c_assoc_kin_code: 0, c_assoc_kin_id: 0, c_text_title: 上徐兵部書,
+     c_assoc_first_year: -1}
+  關係-011:
+    {c_assoc_code: 14, c_assoc_id: 1384, c_kin_code: 0, c_kin_id: 0,
+     c_assoc_kin_code: 0, c_assoc_kin_id: 0,
+     c_text_title: 蔗王安石劄子 / 歐陽文忠公集, c_assoc_first_year: 0}
+  關係-012:
+    {c_assoc_code: 44, c_assoc_id: 5305, c_kin_code: 0, c_kin_id: 0,
+     c_assoc_kin_code: 0, c_assoc_kin_id: 0,
+     c_text_title: 謝氏墓誌銘 / 元豐類稿, c_assoc_first_year: 0}
