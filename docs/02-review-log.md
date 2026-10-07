@@ -3135,3 +3135,11 @@ Not closable client-side; answered with detection — the response's
 `alt_names_removed` must be 0, else `AliasesDeletedError` (indeterminate) stops the
 batch with the restore path in the message. Prevention would need an upstream
 compare-and-swap on the alias set; recorded in docs/12 §5 as the known residual.
+
+Submitted: `2026-10-07-wang-anshi-nianpu-inst-alias`, rebuilt from a fresh live read
+just before; the preview's only difference was `alt_names` ([] → 報寧寺). Production
+gates opened in `.env` for the one run and closed in the same command. Operation
+371832, `alt_names_added` 1, `alt_names_removed` 0, no `notices`; a live re-read of
+945 afterwards matches every non-alias field sent. The derived pinyin is
+`bao ning si`, lowercase — upstream's `buildPinyin` style for this column, not
+CBDB's `Banshan Si` convention; reported, not changed.
