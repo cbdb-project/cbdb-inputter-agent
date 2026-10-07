@@ -114,6 +114,9 @@ GLOBAL_REFERENCE_TABLES = {
     "admin_cat_codes": "ADMIN_CAT_CODES",
     "text_codes": "TEXT_CODES",
     "office": "OFFICE_CODES (+ OFFICE_CODE_TYPE_REL)",
+    "social_institution_aggregate": (
+        "SOCIAL_INSTITUTION_CODES (+ _NAME_CODES, _ADDR, _ALTNAME_DATA)"
+    ),
 }
 
 

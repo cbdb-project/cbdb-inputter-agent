@@ -566,6 +566,57 @@ because a category with neither is unusable, undeletable, and the FK target of e
   server allocates `max+1`, so a new row appends. That is a display convention, not a
   constraint.
 
+## 19. social_institution_aggregate (`SOCIAL_INSTITUTION_CODES` + `_NAME_CODES` + `_ADDR` + `_ALTNAME_DATA`) — an entity aggregate ⚠️
+
+The way to write an institution's aliases (`alt_names`, opened upstream 2026-10-07).
+Design, traps and the live read: **`docs/12-social-institution-aggregate.md`**. What
+`models.py` encodes:
+
+- **Resource string `social-institution` (hyphen), update only.** The underscore
+  spellings `social_institution`/`social_institutions` and `socialinst` are §12's
+  person sub-resource `BIOG_INST_DATA`; the server's other aggregate spellings are
+  unregistered. Create and delete are not modelled.
+- **PK `c_inst_code`**, in `server_assigned_pk_fields` (present on update, never
+  invented). `person_id: 0`.
+- **Fields** (semantic names; the server also takes column names, unregistered here):
+  `name`, `type_code`, `dynasty_code`, `source_id`, `pages`, `notes`, `begin_year`,
+  `by_nianhao_code`, `by_nianhao_year`, `by_year_range`, `floruit_dy`,
+  `first_known_year`, `end_year`, `ey_nianhao_code`, `ey_nianhao_year`,
+  `ey_year_range`, `end_dy`, `last_known_year`, `addresses`, `alt_names`.
+  `type_label`/`dynasty_label` are not registered (send codes); `addr_id` is the
+  *create* field upstream, and update takes `addresses` instead.
+- **Required on update:** `name`, `type_code`, `dynasty_code`, `source_id`,
+  `addresses` (≥ 1 row).
+- **Full-row overwrite** (`full_overwrite_update`), with **`alt_names` exempt**
+  (`overwrite_exempt_fields`): absent = the aliases are untouched; present (even `[]`)
+  = reconciled to exactly that list. `alt_names: null` is refused (upstream 422s it).
+- **Row lists** (`RowListShape`): every row carries every key, scalars only.
+  - `addresses`: `addr_id`, `addr_type_code` (both required), `begin_year`,
+    `end_year`, `xcoord`, `ycoord`, `source_id`, `pages`, `notes`; ints are ints,
+    coordinates numbers; unique on `(addr_id, addr_type_code, xcoord, ycoord)` — the
+    server's reconcile key.
+  - `alt_names`: `type_code`, `name` (required), `pinyin`, `source_id`, `pages`,
+    `notes`; unique on `(type_code, name)`. The server additionally folds character
+    variants when matching; this client cannot, so a variant pair surfaces as the
+    server's `422 alt_names.N: duplicate`.
+- **No `/api/v2/get`.** `social_institution_aggregate.read_institution()` composes the
+  current row from `/api/select/search/socialinstcode`, `socialinst` and
+  `socialinstaddr`; `read_alt_names()` composes the aliases from snapshot + operations
+  log. `fetch_current_values()` uses both, so the preview diffs this resource.
+- **Submit-time guard:** `MutationApi.update()` refuses an `alt_names` list that would
+  delete an existing alias (`assert_alt_names_update_deletes_nothing`), and after
+  the write requires `result.alt_names_removed == 0`, stopping the batch otherwise
+  (`assert_alt_names_write_deleted_nothing` — the window between the two it cannot
+  close; docs/12 §5).
+- **`floruit_dy: null` is refused** (`null_falls_back_to`): the server stores
+  `dynasty_code` there instead, so a current NULL cannot be carried across unchanged.
+- **The name must resolve back to the institution's own name code** (checked in
+  `read_institution`): the server picks the smallest code carrying that name, so a
+  lower duplicate would turn a resend into a rename.
+- **`is_global_reference_data = True`** (rule 12). Like `office`, an institution is
+  deletable upstream while unreferenced; an alias row, once deleted, is recoverable
+  only by re-sending it.
+
 ## Source citations
 
 - `app/Support/CompositePrimaryKey.php` (`SCHEMAS` const) — authoritative PK schema

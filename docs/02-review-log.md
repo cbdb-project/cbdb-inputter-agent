@@ -3094,3 +3094,44 @@ primary key and no edit entry point. Modelling the aggregate here would not have
 reached it. User's decision: open a write path upstream; the alias waits for it.
 Lesson: before promising to "model" a write, find the upstream handler that would
 receive it.
+
+### 2026-10-07, later — the upstream alias write path, and `social-institution` modelled
+
+Upstream: cbdb-online-main-server #1335 (`82118559` + `df1495a7`) adds an optional
+`alt_names` list to the `social-institution` aggregate — the first write path to
+`SOCIAL_INSTITUTION_ALTNAME_DATA`. Reviewed there (review agents, then `codex exec`,
+until no serious issue), rebase-merged, and deployed to production the same day
+(`deploy.sh` exit 0; `version.txt` = `df1495a7`). No migration.
+
+This repo: `RESOURCE_SPECS["social_institution_aggregate"]`, alias `social-institution`,
+update only (docs/12). New in `models.py`: `overwrite_exempt_fields` (the aggregate's
+full-row overwrite, minus `alt_names`, whose absence means "untouched") and
+`RowListShape` for `addresses`/`alt_names` (every key on every row, scalars only). New
+module `social_institution_aggregate.py`: the current row composed from three public
+lookups with exact-code filtering and a distinct-count check against `total`; the
+aliases from snapshot + operations log, refusing on any alias operation for the
+institution since the build; and the submit-time guard against an `alt_names` list
+that would delete an alias. `fetch_current_values()` now diffs this resource. Staging
+no longer mistakes a row list's dicts for malformed `{"ref": ...}` values.
+
+API digest re-synced `76ac0a47` → `df1495a7` (docs/07 §1.10): besides `alt_names`, the
+unknown-person guards on kinship/associations and postings/possessions update, and the
+`ADDR_CODES` coordinate-pair rule. None changes a hard rule.
+
+Before staging 945, checked read-only on production (`artisan tinker`, a SELECT through
+`CharVariantMapService::replaceFor`) that resending its notes and address notes
+unchanged rewrites nothing: the map has 22 rows and none of their characters. The
+weekly snapshot was refreshed to the 2026-10-03 build for the alias baseline.
+
+Reviews of this change: the review agent found no serious issue; its minors were
+fixed (a `floruit_dy: null` resend writes the dynasty code — now refused via
+`null_falls_back_to`; a name held by a lower name code makes a resend a rename — now
+refused by `read_institution`; the refusal message no longer offers a hand-carried
+`row.alt_names` as a baseline; trailing-space comparison mirrors the server; a
+definition-time check that field rules name writable fields; tests for each). codex
+then raised one SERIOUS: an alias added by someone else between the pre-flight read
+and the server's reconcile would be deleted, and upstream offers no precondition.
+Not closable client-side; answered with detection — the response's
+`alt_names_removed` must be 0, else `AliasesDeletedError` (indeterminate) stops the
+batch with the restore path in the message. Prevention would need an upstream
+compare-and-swap on the alias set; recorded in docs/12 §5 as the known residual.

@@ -19,7 +19,11 @@ landed), `docs/08-review-interface-design.md` (the offline review page and the
 example of **place names and hierarchy edges going in through the API** — read before
 touching `ADDR_CODES`/`ADDR_BELONGS_DATA`. Its §4 records the gap as it stood before
 2026-09-11, when neither table had a create; that gap is closed, and the header says
-which of its sections that supersedes).
+which of its sections that supersedes),
+`docs/12-social-institution-aggregate.md` (the `social-institution` aggregate, modelled
+update-only for writing institution aliases — read before touching
+`SOCIAL_INSTITUTION_*` or sending `alt_names`, which deletes every alias it does not
+list and has no read endpoint).
 
 ## The target system's API contract — where it lives, and keeping it in sync
 
@@ -31,8 +35,8 @@ anything in this repo:
   see `.env.sample`; exposed as `Config.online_main_server_repo_dir`). That checkout
   is **read-only to us** — never modify the target repo.
 - Digested for this repo, with a sync stamp and a re-sync procedure:
-  **`docs/07-api-md-digest.md`** (last synced against `origin/develop` `76ac0a47`,
-  2026-09-11).
+  **`docs/07-api-md-digest.md`** (last synced against `origin/develop` `df1495a7`,
+  2026-10-07).
 
 `API.md` **is under active, continuing revision** (§1.3's write-throttling contract and
 the failed-auth rate cap were both added in the days before that sync). So:
@@ -313,7 +317,7 @@ user how old the build is instead of quietly trusting it.
     regardless — so it recorded nothing the operations log did not already have, in a
     place only this client could read. Do not reintroduce it; if you find a mention in
     an older document, it is stale.
-    Five such resources are modelled today:
+    Six such resources are modelled today:
     **`text-codes`** (create only; `update` is not modelled since the server only allows
     `c_title`, and `delete` is disabled server-side), the three place-name tables opened
     (committed upstream 2026-09-10, pulled and modelled here 2026-09-11) —
@@ -327,13 +331,26 @@ user how old the build is instead of quietly trusting it.
     and **the server has no duplicate-name guard on create**, so
     `preflight.assert_office_create_is_not_a_duplicate()` runs a *live* check before any
     office create and must never be replaced by a snapshot lookup.
-    The rest (`char-variant-map`, `office-type-tree`, `social-institution`,
+    The sixth, modelled 2026-10-07, is **`social-institution`** — **update only**, to
+    write institution aliases (`alt_names`, opened upstream that day; see
+    `docs/12-social-institution-aggregate.md` and `docs/04-field-whitelists.md` §19).
+    Its update is a full-row overwrite like `office`'s, **except `alt_names`**: absent
+    = the aliases are untouched; present = the alias table is reconciled to exactly
+    that list, deleting the rest — and the aliases have **no read endpoint**. So the
+    payload is built from a live read (`social_institution_aggregate.read_institution`,
+    aliases from snapshot + operations log), and `MutationApi.update()` re-checks
+    immediately before sending that the list deletes no existing alias, and afterwards
+    that the server's `alt_names_removed` is 0 — a nonzero count (an alias added by
+    someone else in between, which upstream cannot refuse) stops the batch as an
+    indeterminate outcome. Removing an alias is not modelled. Never send `alt_names` from memory or a hand-typed list.
+    The rest (`char-variant-map`, `office-type-tree`,
     `text-entity`, `merged-person`) are still unmodelled, so a staging file naming one
     is rejected as an unknown alias — a safe outcome, but by absence rather than by
-    design — **and by absence only here**: upstream accepts writes for all five
+    design — **and by absence only here**: upstream accepts writes for all four
     (`char_variant_map` create and update, `office-type-tree` create and update,
-    `social-institution` and `text-entity` create/update/delete, `merged-person`
-    create and delete). So if a task needs one of them, modelling it is the work;
+    `text-entity` create/update/delete, `merged-person`
+    create and delete), and for `social-institution` create and delete, which are not
+    modelled either. So if a task needs one of them, modelling it is the work;
     routing around `models.py` is not.
     **The creatable set grew and is now six tables** (upstream commits dated
     2026-09-10; pulled here 2026-09-11).

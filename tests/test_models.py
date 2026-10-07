@@ -256,7 +256,7 @@ def test_required_update_fields_is_only_set_where_intended():
     only they require fields on an update. A person resource must stay free to send a
     single-field PATCH."""
     assert {k for k, v in RESOURCE_SPECS.items() if v.required_update_fields} == {
-        "office"
+        "office", "social_institution_aggregate",
     }
 
 
@@ -264,7 +264,7 @@ def test_full_overwrite_update_is_only_set_where_intended():
     """Setting this on a PATCH-semantics resource would force every update to resend
     the whole row - and, worse, would train authors to believe silence means 'clear'."""
     assert {k for k, v in RESOURCE_SPECS.items() if v.full_overwrite_update} == {
-        "office"
+        "office", "social_institution_aggregate",
     }
 
 
@@ -299,6 +299,7 @@ def test_the_global_reference_data_inventory():
     assert marked == {
         "text_codes", "office",
         "addr_codes", "addr_belongs_data", "admin_cat_codes",
+        "social_institution_aggregate",
     }
 
 

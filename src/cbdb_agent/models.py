@@ -66,6 +66,97 @@ class FieldWhitelistError(ValueError):
 
 
 @dataclass(frozen=True)
+class RowListShape:
+    """The shape of a field whose value is a LIST OF ROWS, e.g. the
+    `social-institution` aggregate's `addresses` and `alt_names`.
+
+    Each such list is a set reconciliation server-side, and within a row the
+    server writes every column it knows about - an absent `notes` on a matched
+    row is written as NULL, an absent `type_code` on an alias row means type 0
+    (API.md 13.4). So the same reasoning as `full_overwrite_update` applies one
+    level down: every row must carry EVERY key in `fields`, with a value or an
+    explicit null, and deleting a key from a staging file becomes a validation
+    error instead of a cleared column.
+    """
+
+    fields: frozenset[str]
+    # Keys whose value must not be missing (is_missing_value).
+    required: frozenset[str] = field(default_factory=frozenset)
+    # Keys whose value, when not None, must be an int (never a bool or a string -
+    # "0950" and 950 are not the same thing to a reviewer).
+    integer_fields: frozenset[str] = field(default_factory=frozenset)
+    # Keys whose value, when not None, must be a number (int or float, not bool).
+    number_fields: frozenset[str] = field(default_factory=frozenset)
+    min_rows: int = 0
+    # Two rows with the same values for these keys are the same row to the server;
+    # sending both is a 422 at best. Caught offline. Exact match only - the server
+    # also folds character variants, which this client cannot do.
+    unique_by: tuple[str, ...] = ()
+
+    def validate(self, resource: str, field_name: str, value: object) -> None:
+        where = f"{resource}: {field_name!r}"
+        if not isinstance(value, list):
+            raise FieldWhitelistError(
+                f"{where} must be a list of rows, got {value!r}. (For "
+                "`alt_names`, null is not 'leave it alone' - omit the key for that.)"
+            )
+        if len(value) < self.min_rows:
+            raise FieldWhitelistError(
+                f"{where} needs at least {self.min_rows} row(s), got {len(value)}"
+            )
+        seen: dict[tuple, int] = {}
+        for i, row in enumerate(value):
+            if not isinstance(row, dict):
+                raise FieldWhitelistError(f"{where}[{i}] must be a mapping, got {row!r}")
+            unknown = sorted(set(row) - self.fields)
+            if unknown:
+                raise FieldWhitelistError(
+                    f"{where}[{i}] has key(s) not allowed in this row: {unknown}. "
+                    f"Allowed: {sorted(self.fields)}"
+                )
+            absent = sorted(self.fields - set(row))
+            if absent:
+                raise FieldWhitelistError(
+                    f"{where}[{i}] is missing {absent}. The server writes every "
+                    "column of a row it reconciles, so an absent key is not 'leave it "
+                    "alone' - carry the current value across, or write an explicit "
+                    "null to say you mean to clear it."
+                )
+            nested = sorted(k for k, v in row.items() if isinstance(v, (dict, list, tuple)))
+            if nested:
+                # Scalars only. In particular a `{"ref": ...}` cannot sit inside a
+                # row: nothing would order the proposal after its target or
+                # substitute the id, and it would reach the server as a dict.
+                raise FieldWhitelistError(
+                    f"{where}[{i}] has non-scalar value(s) in {nested}; row values "
+                    "are scalars, and a cross-proposal reference is not supported here"
+                )
+            missing = sorted(k for k in self.required if is_missing_value(row[k]))
+            if missing:
+                raise FieldWhitelistError(f"{where}[{i}] requires a value for {missing}")
+            for k in sorted(self.integer_fields):
+                v = row[k]
+                if v is not None and (isinstance(v, bool) or not isinstance(v, int)):
+                    raise FieldWhitelistError(
+                        f"{where}[{i}].{k} must be an integer or null, got {v!r}"
+                    )
+            for k in sorted(self.number_fields):
+                v = row[k]
+                if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))):
+                    raise FieldWhitelistError(
+                        f"{where}[{i}].{k} must be a number or null, got {v!r}"
+                    )
+            if self.unique_by:
+                key = tuple(row[k] for k in self.unique_by)
+                if key in seen:
+                    raise FieldWhitelistError(
+                        f"{where}[{i}] repeats row {seen[key]} on {list(self.unique_by)} "
+                        f"= {list(key)}; the server treats them as one row"
+                    )
+                seen[key] = i
+
+
+@dataclass(frozen=True)
 class ResourceSpec:
     key: str  # canonical internal key used by mutation_api.py, e.g. "basicinformation"
     create_aliases: frozenset[str]
@@ -115,6 +206,23 @@ class ResourceSpec:
     # loss. Do NOT set this for a PATCH-semantics resource; it would force every update
     # to resend the whole row.
     full_overwrite_update: bool = False
+    # The exceptions to `full_overwrite_update`: writable fields the server leaves
+    # UNTOUCHED when the key is absent, rather than writing NULL. The only one so far
+    # is the social-institution aggregate's `alt_names` (API.md 13.4: absent = aliases
+    # untouched; present, even `[]`, = reconcile to exactly this list). Requiring it
+    # would force every update to rewrite the alias table, which has no read endpoint
+    # to build the list from - so the safe default for it is the opposite of the rest.
+    overwrite_exempt_fields: frozenset[str] = field(default_factory=frozenset)
+    # Fields whose value is a list of rows, with a per-row shape. See RowListShape.
+    # Excluded from hashing: a frozen dataclass hashes its fields, and a dict cannot.
+    row_list_fields: dict[str, RowListShape] = field(default_factory=dict, hash=False)
+    # {field: other}: the server stores `other`'s value when `field` is null. Then a
+    # null here is not a null in the database, and carrying a current NULL across
+    # changes it - so the client refuses the null and asks for the value to be said.
+    # The social-institution aggregate's `codeColumns()` writes
+    # `c_inst_floruit_dy = floruit_dy ?? dynasty_code`; a quarter of all institutions
+    # have floruit NULL, and an alias-only update would silently fill it.
+    null_falls_back_to: dict[str, str] = field(default_factory=dict, hash=False)
     # Fields whose VALUE SHAPE is load-bearing: must be a non-empty list of non-empty
     # strings. `type_ids` is the first such field in this client. The generic whitelist
     # only ever checked KEYS, never values.
@@ -128,6 +236,14 @@ class ResourceSpec:
     # zero is significant** ("06", not 6), so pinning them to strings here is what stops
     # a YAML author writing `type_ids: [06]` and having it arrive as 6.
     list_fields: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        # A typo here would silently exempt nothing (or demand a field that is not
+        # writable), so the sets must agree.
+        stray = (self.overwrite_exempt_fields | set(self.row_list_fields)
+                 | set(self.null_falls_back_to)) - self.create_fields - self.update_fields
+        if stray:
+            raise ValueError(f"{self.key}: {sorted(stray)} named in a field rule but not writable")
 
     def resolve_alias(self, resource_string: str, operation: str) -> None:
         """Raise FieldWhitelistError if resource_string is not a valid alias for
@@ -185,11 +301,26 @@ class ResourceSpec:
                     "server takes an array and a wrong shape is not reliably rejected."
                 )
 
+        for null_field, fallback in sorted(self.null_falls_back_to.items()):
+            if (null_field in changes and changes[null_field] is None
+                    and not is_missing_value(changes.get(fallback))):
+                raise FieldWhitelistError(
+                    f"{self.key}: {null_field!r} is null, which the server does not "
+                    f"store - it writes {fallback!r} ({changes.get(fallback)!r}) there "
+                    "instead. If the row's current value is NULL, this write changes "
+                    f"it either way: send {null_field}: {changes.get(fallback)!r} to say "
+                    "so where a reviewer can see it, or leave this institution alone."
+                )
+
+        for row_field in sorted(set(self.row_list_fields) & set(changes)):
+            self.row_list_fields[row_field].validate(self.key, row_field, changes[row_field])
+
         if operation == "update" and self.full_overwrite_update:
             # Every writable field, present or explicitly null. See the field's comment:
             # an omitted field is written as NULL by the server, so silence is not
-            # "leave it alone".
-            absent = sorted(self.update_fields - set(changes))
+            # "leave it alone". `overwrite_exempt_fields` are the documented
+            # exceptions, where silence IS "leave it alone".
+            absent = sorted(self.update_fields - self.overwrite_exempt_fields - set(changes))
             if absent:
                 raise FieldWhitelistError(
                     f"{self.key}: update is a FULL-ROW OVERWRITE (API.md 13.4), so every "
@@ -778,6 +909,92 @@ RESOURCE_SPECS["office"] = ResourceSpec(
     # The aggregate update writes NULL over anything you omit.
     full_overwrite_update=True,
     list_fields=frozenset({"type_ids"}),
+)
+
+
+# `social-institution` spans SOCIAL_INSTITUTION_CODES + _NAME_CODES + _ADDR + the
+# alias table _ALTNAME_DATA, written only through the aggregate (API.md 13.4). The
+# alias write path was opened upstream for this client on 2026-10-07
+# (cbdb-online-main-server #1335); docs/12-social-institution-aggregate.md has the
+# design and the traps. What shapes this spec:
+#
+#   - ONLY `social-institution` (hyphen) is registered, and only for UPDATE. The
+#     underscore spelling `social_institution` is the PERSON sub-resource
+#     (BIOG_INST_DATA, the `social_institutions` spec above): one separator apart, two
+#     entirely different tables. The server's other aggregate spellings
+#     (`social-institutions`, `social-institution-load`, `socialinst-load`) are left
+#     out so there is one way to say it, and `socialinst` is the person spec again.
+#   - Create and delete are not modelled: nothing here needs a new institution or to
+#     remove one, and a narrower surface is the point for global reference data.
+#   - `update` is a FULL-ROW OVERWRITE of SOCIAL_INSTITUTION_CODES and a set
+#     reconciliation of the addresses (at least one; each row rewritten whole). Read
+#     the current state first - `social_institution_aggregate.read_institution()` - and carry every
+#     value across.
+#   - `alt_names` is the one exception: absent = the aliases are untouched; present
+#     (even `[]`) = the alias table is reconciled to exactly this list, deleting any
+#     row not in it. There is NO API read of the aliases, so the list has to be
+#     composed (snapshot + operations log) - see read_alt_names().
+#   - Semantic field names only, as for `office`. `type_label`/`dynasty_label` are not
+#     registered (they resolve through a label map that can collide; send codes).
+#   - Unlike `office`, the update address field is `addresses` (a list), not
+#     `addr_id` - `addr_id` is create-only upstream.
+_SOCIAL_INSTITUTION_AGGREGATE_FIELDS = frozenset(
+    {
+        "name", "type_code", "dynasty_code", "source_id", "pages", "notes",
+        "begin_year", "by_nianhao_code", "by_nianhao_year", "by_year_range",
+        "floruit_dy", "first_known_year",
+        "end_year", "ey_nianhao_code", "ey_nianhao_year", "ey_year_range",
+        "end_dy", "last_known_year",
+        "addresses", "alt_names",
+    }
+)
+
+RESOURCE_SPECS["social_institution_aggregate"] = ResourceSpec(
+    key="social_institution_aggregate",
+    create_aliases=frozenset(),   # not modelled - see the comment above
+    update_aliases=frozenset({"social-institution"}),
+    delete_aliases=frozenset(),   # not modelled
+    pk_fields=("c_inst_code",),
+    # Server-assigned on create; on update it must be present and is never invented.
+    server_assigned_pk_fields=frozenset({"c_inst_code"}),
+    update_fields=_SOCIAL_INSTITUTION_AGGREGATE_FIELDS,
+    is_global_reference_data=True,
+    # ResolvesSocialInstituteAggregateInput: required on update.
+    required_update_fields=frozenset(
+        {"name", "type_code", "dynasty_code", "source_id", "addresses"}
+    ),
+    full_overwrite_update=True,
+    overwrite_exempt_fields=frozenset({"alt_names"}),
+    null_falls_back_to={"floruit_dy": "dynasty_code"},
+    row_list_fields={
+        # The reconcile key is (addr_id, addr_type_code, xcoord, ycoord); a matched
+        # row has begin/end year, source, pages and notes rewritten from the request.
+        "addresses": RowListShape(
+            fields=frozenset(
+                {
+                    "addr_id", "addr_type_code", "begin_year", "end_year",
+                    "xcoord", "ycoord", "source_id", "pages", "notes",
+                }
+            ),
+            required=frozenset({"addr_id", "addr_type_code"}),
+            integer_fields=frozenset(
+                {"addr_id", "addr_type_code", "begin_year", "end_year", "source_id"}
+            ),
+            number_fields=frozenset({"xcoord", "ycoord"}),
+            min_rows=1,
+            unique_by=("addr_id", "addr_type_code", "xcoord", "ycoord"),
+        ),
+        # A matched alias has source/pages/notes rewritten (absent = NULL); `pinyin`
+        # null keeps the existing reading (or derives one for a new alias); an absent
+        # `type_code` would mean 0, and an existing row of type null would then be
+        # deleted and re-added as type 0 - so every key is required to be present.
+        "alt_names": RowListShape(
+            fields=frozenset({"type_code", "name", "pinyin", "source_id", "pages", "notes"}),
+            required=frozenset({"name"}),
+            integer_fields=frozenset({"type_code", "source_id"}),
+            unique_by=("type_code", "name"),
+        ),
+    },
 )
 
 

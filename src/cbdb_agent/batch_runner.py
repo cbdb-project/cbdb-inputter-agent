@@ -34,6 +34,8 @@ from .http_client import (
 from .models import FieldWhitelistError, find_spec_by_alias
 from .mutation_api import MutationApi
 from .person_id import PersonIdError, get_max_person_id, is_person_id_taken, validate_new_person_id
+from .snapshot import ensure_snapshot
+from .social_institution_aggregate import read_alt_names, read_institution
 from .staging import (
     StagingError,
     substitute_pk_refs,
@@ -470,6 +472,19 @@ def fetch_current_values(batch: StagingBatch, api: MutationApi) -> dict[str, Pro
             full_target_pk = resolve_target_pk(
                 proposal, resolved_person_id=resolved_pid, spec_key=spec.key
             )
+            if spec.key == "social_institution_aggregate":
+                # No /api/v2/get for the aggregate: compose it from the public
+                # lookups (and, for the aliases, snapshot + operations log). An
+                # unreadable alias list fails the whole fetch - "could not read" must
+                # not render like "no aliases".
+                inst_code = int(full_target_pk["c_inst_code"])
+                row = read_institution(api.client, inst_code)
+                if "alt_names" in proposal.changes:
+                    row["alt_names"] = read_alt_names(
+                        api.client, ensure_snapshot(allow_download=False), inst_code
+                    )["rows"]
+                results[proposal.id] = ProposalCurrentState(row=row)
+                continue
             body = api.get(spec.key, person_id=resolved_pid, target_pk=full_target_pk)
         except _ABORTING_ERRORS as exc:
             # Broken credentials are a batch-wide condition: stop probing rather
