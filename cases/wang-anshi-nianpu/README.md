@@ -18,7 +18,9 @@ consolidated from an earlier 汇总本 and checked against a collated copy of th
 | `2026-10-06-wang-anshi-nianpu` | 78 | reviewed 2026-10-07 (74 to send, 4 held out); submitted — 1 landed, then a 500 at proposal 2 |
 | `2026-10-07-wang-anshi-nianpu-resume` | 77 | submitted — 37 landed, then a refused connection at `post-052` |
 | `2026-10-07-wang-anshi-nianpu-resume-2` | 40 | submitted — **36/36 landed**; the main batch is complete, **74/74** |
-| `2026-10-07-wang-anshi-nianpu-inst-alias` | 1 | submitted — **1/1 landed**: alias 報寧寺 on institution 945 (operation 371832) |
+| `2026-10-07-wang-anshi-nianpu-inst-alias` | 1 | submitted — **1/1 landed**: alias 報寧寺 on institution 945 (operation 371832); later removed by the user, see below |
+| `2026-10-07-wang-anshi-nianpu-inst-redo` | 2 | submitted — **2/2**: 王安石's BIOG_INST_DATA row to 945 deleted (371873); institution **4012** 報寧寺 created, name code 2640 (371875) |
+| `2026-10-07-wang-anshi-nianpu-inst-baoning` | 2 | submitted — **2/2**: 4012 filled (start 1084, address row sourced) (371877); 王安石 → 4012 as 捐贈者 (371879) |
 
 What the 76 proposals of the main batch are (the two titles went first):
 
@@ -57,18 +59,26 @@ The workbook's temporary ids were written back on 2026-10-07: TMP-001/002/003 be
 705348/705349/705350 in every data sheet, with their 人物ID狀態 set to 已對應 (the
 修正記錄 sheet, a history of the consolidation, was left as it was).
 
-**The alias 報寧寺 for institution 945 (半山寺), done 2026-10-07.** CBDB keeps
-institution aliases in `SOCIAL_INSTITUTION_ALTNAME_DATA`, which had no write path at
-all upstream. The user chose to open one: cbdb-online-main-server #1335 added an
-`alt_names` list to the `social-institution` aggregate, deployed the same day, and
-this client modelled the aggregate for it (update only — `docs/12`). Batch
-`2026-10-07-wang-anshi-nianpu-inst-alias` sent the institution's live row unchanged
-plus `alt_names: [報寧寺, type 0, source 72223]`. Response: operation 371832,
-`alt_names_added` 1, `alt_names_removed` 0, no `notices`; a live re-read after the
-write showed every other field as before. The server derived the alias pinyin as
-`bao ning si` (lowercase), unlike CBDB's usual `Banshan Si` style — left as is.
-Not changed, and still CBDB's own: 945's address row is 7537 荊溪 with notes
-describing another temple, and its `c_inst_floruit_dy` is 20 (清).
+**報寧寺 is institution 4012, not 945 (2026-10-07).** The temple was first anchored to
+945 半山寺 and given the alias 報寧寺 there, through a write path the user had opened
+upstream for it (cbdb-online-main-server #1335; batch `…-inst-alias`). The user then
+judged 945 the wrong anchor: its only address row is 7537 荊溪, with notes describing
+another temple. And the 年譜 itself names the temple only as 報寧 (「有旨賜名報寧」):
+「半山」 came from the workbook coder's note and 945's own notes (27842《中国の寺院》),
+not from the source. So, decided with the user:
+
+* the alias on 945 was removed (by the user, directly — no operation row, see docs/02),
+  and 王安石's BIOG_INST_DATA row to 945 deleted; 945 is otherwise as before;
+* a new institution **4012 報寧寺** (name code 2640), type 2, dynasty 宋, start 1084
+  (元豐七年), source 72223 — no 半山寺 alias, since the source does not give it;
+* its address **上元 12829**, the row citing 27842 p. 194 with a note that the place
+  comes from Temple ID 138321 「上元縣東北」 — the source says only that 王安石 lived at
+  鍾山 and gave his house as a temple;
+* 王安石 → 4012 as 捐贈者 (role 6), the deleted row's content unchanged.
+
+All read back. Both new names carry the server-derived pinyin `bao ning si`
+(lowercase), unlike CBDB's `Banshan Si` style; left as is. 945's own problems (the
+荊溪 address row, `c_inst_floruit_dy` 20) are untouched.
 
 ## Decisions taken before staging (the user, 2026-10-06)
 
