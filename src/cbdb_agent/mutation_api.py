@@ -29,6 +29,11 @@ from .preflight import (
     assert_office_create_is_not_a_duplicate,
     assert_text_create_is_not_a_duplicate,
 )
+from .snapshot import ensure_snapshot
+from .social_institution_aggregate import (
+    assert_alt_names_update_deletes_nothing,
+    assert_alt_names_write_deleted_nothing,
+)
 
 
 def _build_envelope(
@@ -203,6 +208,24 @@ class MutationApi:
         spec.validate_target_pk_for_update_or_delete(target_pk)
         spec.validate_changes("update", changes)
 
+        # An `alt_names` list is reconciled server-side to exactly what is sent, and
+        # the aliases cannot be read back: check, against the live operations log,
+        # that this list drops none of them - here, at the layer that sends the
+        # request, for the same reasons as the create pre-flights above (a direct
+        # MutationApi call cannot walk past it, and the review window is closed).
+        # Skipped under dry-run, like those. Uses the local snapshot only, never a
+        # download: a write must not wait on 130 MB.
+        checks_aliases = (not self._client.dry_run
+                          and spec.key == "social_institution_aggregate"
+                          and "alt_names" in changes)
+        if checks_aliases:
+            assert_alt_names_update_deletes_nothing(
+                self._client,
+                ensure_snapshot(allow_download=False),
+                int(target_pk["c_inst_code"]),
+                changes["alt_names"],
+            )
+
         envelope = _build_envelope(
             resource_string=alias,
             mode="direct",
@@ -212,7 +235,7 @@ class MutationApi:
             changes=changes,
             comment=comment,
         )
-        return self._client.post(
+        response = self._client.post(
             "/api/v2/mutate",
             json_body=envelope,
             mutating=True,
@@ -220,6 +243,12 @@ class MutationApi:
             operation="update",
             mode="direct",
         )
+        if checks_aliases:
+            # The pre-flight cannot see an alias added between its read and the
+            # server's reconcile; the server's own counter can. Raises (and stops
+            # the batch) if anything was removed.
+            assert_alt_names_write_deleted_nothing(response, int(target_pk["c_inst_code"]))
+        return response
 
     def delete(
         self,

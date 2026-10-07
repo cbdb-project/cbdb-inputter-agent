@@ -7,16 +7,16 @@ is the target system's own `API.md`:
 |---|---|
 | Canonical URL | <https://github.com/cbdb-project/cbdb-online-main-server/blob/develop/API.md> |
 | Local path | `${CBDB_ONLINE_MAIN_SERVER_REPO_DIR}/API.md` (see `.env.sample`; `Config.online_main_server_repo_dir`) |
-| **Synced against** | `origin/develop` commit `76ac0a47` (commit date 2026-09-10 18:01:31 +0800), `API.md` blob `b847dc89` |
-| **Previous sync** | `b2df35f5` (2026-09-04), blob `ff842de6` — §2.2 below, and every claim about `API.md` §13.2/§13.3, were rewritten at the 2026-09-11 re-sync |
-| Upstream length at sync | 2748 lines (v2 chapters 1–14, plus a "舊版 API 文檔" v1 appendix from line 1698) |
-| Previous sync | `b2df35f5` (2026-09-04), blob `ff842de6`, 2701 lines — 10 commits and +65/−18 lines of `API.md` earlier; before that `fd747aba` (2026-08-18), blob `948585d1`, 2667 lines |
+| **Synced against** | `origin/develop` commit `df1495a7` (commit date 2026-10-07 18:45:51 +0800), `API.md` blob `6defc4f6` |
+| **Previous sync** | `76ac0a47` (2026-09-10), blob `b847dc89` — 7 commits and +41/−15 lines of `API.md` earlier; the 2026-10-07 re-sync is summarized in §1.10 and rewrote §2.3's `social-institution` entry |
+| Upstream length at sync | 2774 lines (v2 chapters 1–14, plus a "舊版 API 文檔" v1 appendix) |
+| Earlier syncs | `b2df35f5` (2026-09-04), blob `ff842de6`, 2701 lines; before that `fd747aba` (2026-08-18), blob `948585d1`, 2667 lines |
 | Stamp convention | **commit** date (`git log -1 --format=%ci`), not author date — they differ by minutes here and by a day for `fd747aba` |
 
 The user has stated `API.md` **will keep being updated**. Treat every claim below as
 carrying that sync stamp: if the stamp is old, re-verify before relying on it. This
 file exists so an agent can answer "what does the API actually allow" without reading
-2748 lines every session — not so it can skip reading upstream when the answer matters.
+2774 lines every session — not so it can skip reading upstream when the answer matters.
 
 **Precedence between this repo's three reference docs**, when they disagree:
 upstream `API.md` > this digest > `docs/04-field-whitelists.md` / `models.py` >
@@ -275,6 +275,33 @@ What changed at this sync, and why it matters to us:
   invisible unless a human reads the raw response or the `logs/*.jsonl` entry. Worth
   fixing when a batch next writes Chinese text into a PK column.
 
+### 1.10 What changed at the 2026-10-07 re-sync (`76ac0a47` → `df1495a7`)
+
+Seven commits touched `API.md`. In order of how much they matter here:
+
+- **`social-institution` gained `alt_names`** — the write path to
+  `SOCIAL_INSTITUTION_ALTNAME_DATA`, opened for this client (cbdb-online-main-server
+  #1335). Digested in §2.3; modelled per `docs/12-social-institution-aggregate.md`.
+  It is the one documented exception to the aggregate full-row overwrite: absent =
+  aliases untouched.
+- **"Unknown person" guards on relationships** (§9.7/§9.8): `kinship`/`associations`
+  `create` and `update` now 422 `unknown_person_not_allowed` when the owner or the
+  other party is `0`/`-999` (after integer conversion, so `"0e10"` counts), and
+  approving such a pending proposal is aborted. `delete` is exempt. `postings`/
+  `possessions` now refuse `person_id` `0`/`-999` on **update** too (previously create
+  only), including the address-only update path — a historical `c_personid = 0` row
+  there can only be deleted. No client change needed: this client never writes either.
+- **`ADDR_CODES` coordinates are a pair, and zero/blank is stored as `NULL`** (§13.1):
+  `0`, `"0.0"`, `""` on either axis clears **both** (with a `notices` entry), even the
+  axis not sent. `create` treats a missing axis as a half pair (both `NULL`); `update`
+  writes a single axis as sent and does not complete the pair. `updated_fields` can
+  therefore name a field you did not send. Relevant to `addr-codes` writes: send both
+  axes or neither, and read `result.row`.
+- `notices` now also announces that coordinate clearing (§4 response table).
+- The operations page moved to `/app/operations` (the old `/operations` redirects);
+  the in-site proposal withdrawal is `app/codes/{table}/proposals/{op}` — the legacy
+  path answers `410`. Neither is an endpoint this client calls.
+
 ## 2. Surface beyond the 13 resources this client models
 
 None of this is wired into `models.py`, and most of it we deliberately don't use — but
@@ -458,7 +485,7 @@ the underlying tables yourself:
 | resource | aliases | PK | tables | operations |
 |---|---|---|---|---|
 | `office` | `offices`, `office-load` | `c_office_id` | `OFFICE_CODES` + `OFFICE_CODE_TYPE_REL` | create / update / delete |
-| `social-institution` | `social-institutions`, `social-institution-load`, `socialinst-load` | `c_inst_code` | `SOCIAL_INSTITUTION_CODES` + `SOCIAL_INSTITUTION_NAME_CODES` + `SOCIAL_INSTITUTION_ADDR` | create / update / delete |
+| `social-institution` | `social-institutions`, `social-institution-load`, `socialinst-load` | `c_inst_code` | `SOCIAL_INSTITUTION_CODES` + `SOCIAL_INSTITUTION_NAME_CODES` + `SOCIAL_INSTITUTION_ADDR` + aliases `SOCIAL_INSTITUTION_ALTNAME_DATA` | create / update / delete |
 | `text-entity` | `text-entities`, `book`, `books` | `c_textid` | `TEXT_CODES` + `TEXT_INSTANCE_DATA` | create / update / delete |
 
 Unlike the code tables (§2.2), these support **both** `direct` and `proposal`, so even a
@@ -487,6 +514,22 @@ same collision creates.
 - **social-institution create.** Required: `name`, `type_code` (or `type_label`),
   `dynasty_code`, `addr_id`, `source_id`. **Its `update` takes an `addresses` array
   instead of `addr_id`**, and needs at least one row, each with `addr_id`.
+  **Aliases: an optional `alt_names` list on create and update** (added 2026-10-07).
+  Absent = untouched; present (even `[]`) = reconcile to exactly the list, deleting
+  every alias not in it; `null` → `422 alt_names: invalid`. The aliases have **no read
+  endpoint**; upstream says to build the list from the last write's `row.alt_names` or
+  the snapshot (this client uses only the snapshot plus the operations log — docs/12 §4).
+  Row keys `type_code` (absent → `0`, explicit `null` kept), `name` (required, ≤ 255),
+  `pinyin` (null keeps/derives), `source_id`, `pages`, `notes` (absent → `NULL` on a
+  matched row). Rows match by type + literal name, then type + variant-folded name
+  (the existing spelling is kept and a `notices` entry says so). `409`s, all rolled
+  back: `existing_duplicate_rows` (the PK-less table already holds two identical rows
+  — only an administrator can fix it), `already_exists`, `unexpected_row_count` (do
+  not retry), `code_out_of_range` (codes above SMALLINT 32767). Every alias row
+  written gets its own `operations` + `audit_log` row (resource
+  `SOCIAL_INSTITUTION_ALTNAME_DATA`, `resource_data` carries `c_inst_code`); the
+  generic restore is refused for this table. `result.row.alt_names` is the only
+  read-back.
 - **text-entity** (one shape for create and update). Required: only `title`. Optional:
   `title_pinyin` (derived if blank), `title_trans`, `title_alt_chn`, `type_id`, `year`,
   `nh_code`, `nh_year`, `range_code`, `bibl_cat_code`, `extant`, `country`,
@@ -520,8 +563,10 @@ same collision creates.
   resources plus `nianhao` (14 definitions in total) and nothing else — `resolve('office')`
   returns `null`. So rule 11's read-back has to go through
   `GET /api/select/search/office` (or `socialinst`, or `GET /api/v2/texts`) instead, and
-  `batch_runner.fetch_current_values()` will report "couldn't fetch" for an aggregate
-  proposal — expected, not a bug.
+  `batch_runner.fetch_current_values()` will report "couldn't fetch" for an `office`
+  proposal — expected, not a bug. For `social-institution` it composes the row from
+  `socialinstcode`/`socialinst`/`socialinstaddr` (and the aliases from snapshot +
+  operations log): `docs/12` §4.
 - **Audit rows multiply.** A `direct` aggregate write records one `operations` +
   `audit_log` row for the main table **plus one per lower-level row added or removed**
   (each office type relation, each institution address), but the response returns only the

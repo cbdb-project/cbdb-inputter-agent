@@ -599,7 +599,19 @@ def _pk_ref_issues(batch: "StagingBatch", by_id: dict) -> list["Issue"]:
         # `{"ref": "p1", "why": "..."}` and `{"Ref": "p1"}` are all plausible
         # hand-edits. These columns hold scalars only, so any dict that is not a
         # well-formed reference is a mistake worth naming.
+        try:
+            ref_spec = find_spec_by_alias(p.resource)
+        except FieldWhitelistError:
+            ref_spec = None
+        # Except where a list of ROWS is the field's documented shape (models.
+        # RowListShape - e.g. the social-institution aggregate's `addresses`): those
+        # dicts are rows, validated key by key there, and no reference may sit
+        # inside one (RowListShape rejects a non-scalar value).
+        row_lists = set(ref_spec.row_list_fields) if ref_spec else set()
         for where, fieldname, value in _iter_pk_ref_slots(p):
+            if (where == "changes" and fieldname.split("[", 1)[0] in row_lists
+                    and isinstance(value, dict) and not is_pk_ref(value)):
+                continue
             if isinstance(value, dict) and not is_pk_ref(value):
                 issues.append(Issue(
                     proposal_id=p.id, severity="error",
@@ -607,10 +619,6 @@ def _pk_ref_issues(batch: "StagingBatch", by_id: dict) -> list["Issue"]:
                             f"reference: expected exactly "
                             f"{{'ref': '<proposal id>'}} with a string id, "
                             f"got {value!r}"))
-        try:
-            ref_spec = find_spec_by_alias(p.resource)
-        except FieldWhitelistError:
-            ref_spec = None
         for where, fieldname, target in iter_pk_refs(p):
             label = f"{where}.{fieldname}"
             # WHICH column, and WHICH kind of row. Without both, a reference in
