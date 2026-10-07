@@ -562,3 +562,95 @@ class TestTheDuplicateCheckRunsAtSubmitTime:
         results = run_batch(batch, make_api(tmp_path, dry_run=True))
         assert [r.status for r in results] == ["success"]
         assert not responses.calls
+
+
+# ===========================================================================
+# A new person, and a new book title, referenced from the same batch
+# ===========================================================================
+#
+# A 年譜 names relatives and associates CBDB does not have yet, and cites a book
+# that may not be in TEXT_CODES yet. The relative's c_personid is allocated by
+# batch_runner at submit time and the title's c_textid by the server, so neither
+# can be written into the file - the same problem the address edges had.
+
+def person(pid="p-tmp-1"):
+    return Proposal(
+        id=pid, resource="basicinformation", operation="create", person_id="NEW",
+        changes={"c_name_chn": "王氏(王安石女)", "c_female": 1, "c_dy": 15},
+        source_quote="鄞女", confidence="medium")
+
+
+def title(pid="txt-src"):
+    return Proposal(
+        id=pid, resource="text-codes", operation="create", person_id=0,
+        target_pk={}, changes={"c_title_chn": "王荊文公年譜"},
+        source_quote="q", confidence="medium")
+
+
+def kin(pid="kin-1", kin_id=None, source=None):
+    kin_id = {"ref": "p-tmp-1"} if kin_id is None else kin_id
+    changes = {"c_kin_id": kin_id, "c_kin_code": 176}
+    if source is not None:
+        changes["c_source"] = source
+    return Proposal(
+        id=pid, resource="kinship", operation="create", person_id=1762,
+        target_pk={"c_kin_id": kin_id, "c_kin_code": 176}, changes=changes,
+        source_quote="鄞女", confidence="high")
+
+
+class TestPersonAndTitleReferences:
+    def test_a_relative_and_a_source_may_both_be_references(self):
+        msgs = issues_for(person(), title(), kin(source={"ref": "txt-src"}))
+        assert msgs == []
+
+    def test_the_relative_is_sent_after_the_person_and_the_title(self):
+        batch = StagingBatch(batch_id="b", proposals=[
+            kin(source={"ref": "txt-src"}), title(), person()])
+        order = [p.id for p in topological_submission_order(batch)]
+        assert order.index("kin-1") > order.index("p-tmp-1")
+        assert order.index("kin-1") > order.index("txt-src")
+
+    def test_a_person_create_with_a_known_id_is_not_a_reference_target(self):
+        """Only a NEW person has an id the file cannot know."""
+        known = person().model_copy(update={"person_id": 705020})
+        msgs = issues_for(known, kin())
+        assert any("write that id here instead" in m for m in msgs)
+
+    def test_a_source_cannot_reference_a_person(self):
+        msgs = issues_for(person(), kin(kin_id=5305, source={"ref": "p-tmp-1"}))
+        assert any("text_codes" in m for m in msgs)
+
+    def test_a_relative_cannot_reference_a_title(self):
+        msgs = issues_for(title(), kin(kin_id={"ref": "txt-src"}))
+        assert any("basicinformation" in m for m in msgs)
+
+    def test_a_reference_outside_the_table_is_still_refused(self):
+        """c_kin_code is a code, never a key another proposal is assigned."""
+        bad = kin()
+        bad = bad.model_copy(update={"changes": dict(bad.changes, c_kin_code={"ref": "p-tmp-1"})})
+        msgs = issues_for(person(), bad)
+        assert any("not a field that may carry a reference" in m for m in msgs)
+
+    def test_the_runner_writes_the_allocated_id_and_the_assigned_textid(
+            self, tmp_path, monkeypatch):
+        from cbdb_agent import batch_runner
+
+        monkeypatch.setattr(batch_runner, "allocate_person_id",
+                            lambda api, already_claimed=(): 800001)
+        sent = []
+
+        class Api(MutationApi):
+            def create(self, key, *, person_id, target_pk, changes, **kw):
+                sent.append((key, person_id, target_pk, changes))
+                pk = {"c_textid": 72300} if key == "text_codes" else {}
+                return {"ok": True, "result": {"pk": pk}}
+
+        api = Api(make_api(tmp_path).client)
+        batch = StagingBatch(batch_id="b", proposals=[
+            title(), person(), kin(source={"ref": "txt-src"})])
+        results = run_batch(batch, api)
+        assert [r.status for r in results] == ["success"] * 3
+        key, pid, target_pk, changes = sent[-1]
+        assert key == "kinship" and pid == 1762
+        assert target_pk["c_kin_id"] == 800001 and changes["c_kin_id"] == 800001
+        assert changes["c_source"] == 72300

@@ -4,6 +4,9 @@ Subcommands:
   validate     --staging <path> | --input <path>  [--env <path>]
   submit       --staging <path> | --input <path>  [--dry-run] [--env <path>]
   apply-review --staging <path> --decisions <path>
+  resume       --processed <dir> --batch-id <id>
+  from-workbook --xlsx <workbook> --case cases/<id>/workbook.yaml
+  check-mirrors --staging <path> [--env <path>]
 
 See docs/01-implementation-plan.md section 7 and docs/03-extraction-review-
 workflow.md section 2.3 for the intended interaction flow. Both --staging and
@@ -45,7 +48,12 @@ from .snapshot import (
     snapshot_is_stale,
 )
 from .config import ConfigError, load_config
-from .http_client import HttpClient
+from .http_client import (
+    AuthenticationError,
+    AuthorizationError,
+    HttpClient,
+    RateLimitedError,
+)
 from .mutation_api import MutationApi
 from .review import apply_decisions, export_review_json
 from .staging import (
@@ -454,6 +462,71 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_from_workbook(args: argparse.Namespace) -> int:
+    from .person_workbook import CaseConfig, WorkbookError, build_batch, read_workbook
+
+    try:
+        case = CaseConfig.load(args.case)
+        result = build_batch(read_workbook(args.xlsx), case)
+    except (WorkbookError, OSError, KeyError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_LOAD_ERROR
+    out_dir = Path(args.staging_root) / case.batch_id
+    path = out_dir / "proposal.yaml"
+    if path.exists():
+        # The file is where the review's decisions are written back to; regenerating
+        # over it would silently discard them.
+        print(f"error: {path} already exists - move it aside to regenerate",
+              file=sys.stderr)
+        return EXIT_LOAD_ERROR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    save_staging_file(result.batch, str(path))
+    print(f"{len(result.batch.proposals)} proposals, {len(result.findings)} findings")
+    for finding in result.findings:
+        print(f"  - {finding}")
+    print(f"wrote {path}")
+    print(f"next: python -m cbdb_agent validate --staging {path.as_posix()}")
+    return EXIT_OK
+
+
+def cmd_check_mirrors(args: argparse.Namespace) -> int:
+    from .mirror_check import PairCodes, apply_reports, check_batch
+
+    try:
+        batch = load_staging_file(args.staging)
+        config = load_config(args.env)
+    except (StagingError, OSError, ValueError, ConfigError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_LOAD_ERROR
+    client = HttpClient(config, AuditLog(config.local_audit_log_dir))
+    pairs = None
+    connection = None
+    try:
+        path = ensure_snapshot(config.sqlite_dir or snapshot_dir_from_env(),
+                               allow_download=config.sqlite_autodownload, progress=print)
+        if path is not None:
+            connection = open_snapshot(path)
+            pairs = PairCodes(connection)
+    except Exception as exc:  # noqa: BLE001 - without codes every check says "unknown"
+        print(f"Warning: snapshot unavailable ({exc})", file=sys.stderr)
+    try:
+        reports = check_batch(batch, MutationApi(client), pairs)
+    except (AuthenticationError, AuthorizationError, RateLimitedError) as exc:
+        # Batch-wide (AGENTS.md rule 10): stop, write nothing, say why.
+        print(f"error: {exc} - stopped; nothing was written to {args.staging}",
+              file=sys.stderr)
+        return EXIT_SUBMISSION_FAILURES
+    finally:
+        if connection is not None:
+            connection.close()
+    for line in apply_reports(batch, reports):
+        print(f"  {line}")
+    save_staging_file(batch, args.staging)
+    safe = sum(r.status == "safe" for r in reports)
+    print(f"{len(reports)} pair update(s) checked, {safe} safe; wrote {args.staging}")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m cbdb_agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -506,6 +579,26 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--staging-root", default="data/staging")
     resume.add_argument("--processed-root", default="data/processed")
     resume.set_defaults(func=cmd_resume)
+
+    from_workbook = subparsers.add_parser(
+        "from-workbook",
+        help="Generate a staging batch from a 人物資料標準化 template workbook",
+    )
+    from_workbook.add_argument("--xlsx", required=True, help="the workbook")
+    from_workbook.add_argument(
+        "--case", required=True,
+        help="cases/<case-id>/workbook.yaml: batch id, source text, update targets")
+    from_workbook.add_argument("--staging-root", default="data/staging")
+    from_workbook.set_defaults(func=cmd_from_workbook)
+
+    check_mirrors = subparsers.add_parser(
+        "check-mirrors",
+        help="Read the reverse row of every kinship/association update live and "
+             "record whether writing it is safe",
+    )
+    check_mirrors.add_argument("--staging", required=True)
+    check_mirrors.add_argument("--env", default=None)
+    check_mirrors.set_defaults(func=cmd_check_mirrors)
 
     return parser
 

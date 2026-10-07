@@ -583,6 +583,33 @@ first**, then:
   these and count as an unintended edit to content you were only supposed to
   leave alone).
 
+**The sync copies the whole row, not the fields you changed.** Read on
+`origin/develop` (2026-10-06): `afterDirectUpdate` builds the mirror from the forward
+row *after* the update (`$dataMirror = $newArray`), rewrites only the people, the
+relationship codes and (for associations) the kin ids, and `update()`s the reverse
+row with all of it. An update of `c_occasion_code` alone therefore also overwrites
+the reverse row's `c_source`, `c_pages`, `c_notes`, `c_addr_id`… — and the server's
+409 guard checks only the content fields that changed, so it is no backstop for the
+rest. The paragraphs above name the fields where this was first noticed; the rule
+applies to every column.
+
+**That read is `python -m cbdb_agent check-mirrors --staging <file>`** (`mirror_check.py`),
+not a hand-built `/api/v2/get`, and it is run again **immediately before `submit`** —
+a verdict is only as old as its read. It checks every `kinship`/`associations`
+update, finds the reverse row by the server's own locator (associations: other person,
+this person as `c_assoc_id`, the OLD title and first year, the pair codes; kinship:
+`c_kin_id` = this person and the union of reverse codes), reads it raw, and compares
+every column the server writes, text byte for byte: blank, in step with the forward
+row, or already the value the server will write is safe; anything else is divergent.
+An update that makes the server *create* a missing reverse row (an association update
+sending a pair code; a pair-only kinship update) is reported as `backfill`, never safe. It records the answer in the proposal's `mirror`
+conflict, flags a second proposal in the same batch writing the same row or its
+reverse, and never overrides a reviewer's resolution. **Do not look the reverse row
+up with the forward row's `c_kin_id`/`c_assoc_kin_id`:** the server writes the
+forward person's id into both on every association mirror row, so the forward row's
+0s miss it, and a 404 there is not damage (docs/02, 2026-10-06 — reported as damaged
+once, wrongly).
+
 **A `kinship` update whose `changes` contains *only* `c_kinship_pair` is not a
 narrow edit — it can create a row under the other person.** `API.md` §9.8 says
 flatly that `kinship.update` (unlike `associations.update`) never back-fills a

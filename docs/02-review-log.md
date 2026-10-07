@@ -2834,3 +2834,243 @@ The stamp in 72220's `c_notes` was still present when read again. The bare
 `notes` (API.md §13.4), and that is what the web edit page
 `/app/text/{id}/edit` writes through — so the user can clear it there. The other
 page, `/app/codes/TEXT_CODES/{id}/edit`, is the bare table and cannot.
+
+## 王安石 年譜: a template workbook reader, and references to new people and titles — 2026-10-06
+
+Case `wang-anshi-nianpu`. The user supplied a workbook in the 人物資料標準化
+template: one sheet per CBDB table, every row coded and compared with CBDB
+(`new` / `update` / `exist`). The template is a standing format, so its reader is
+a tool (`src/cbdb_agent/person_workbook.py`, `python -m cbdb_agent from-workbook`)
+and this job's facts are a data file (`cases/wang-anshi-nianpu/workbook.yaml`).
+Staged as `2026-10-06-wang-anshi-nianpu`, 78 proposals, 32 open conflicts, not
+reviewed.
+
+**Decisions the user took before anything was generated.** (1) 《王荊文公年譜》 is
+not in TEXT_CODES (live search, four spellings); the batch creates it, gated by a
+conflict (rule 12). (2) 《三經新義》 likewise. (3) An existing CBDB value is never
+overwritten: an `update` writes only what the template lists after 「可補」, and
+every difference from CBDB is a finding. Checked against the live preview: every
+field an update writes is currently empty, 0 or −1, and all 12 update targets
+resolved.
+
+**What the tool had to learn.**
+
+* `{"ref": ...}` was limited to address ids. A 年譜 cites a book that may not exist
+  yet and names relatives who do not, so `models.PK_REF_TARGETS` now also lets
+  `c_source` and `texts`/`sources`.`c_textid` reference a `text_codes` create, and
+  `kinship.c_kin_id` / `associations.c_assoc_id` reference a NEW `basicinformation`
+  create. A person's key is client-allocated, not server-assigned, so
+  `models.ref_key_field` says what a reference stands for. `batch_runner` records
+  the allocated id, `staging` refuses a reference to a person create with a known id,
+  and `resume` resolves a reference to a landed person to its `c_personid`.
+  Without this, 王安石's kinship row to his daughter, created in the same batch,
+  could not be written at all.
+* `TEXT_CODES` creates had no submit-time duplicate check, though rule 12 asks for
+  one for every table that does not dedupe. `preflight.assert_text_create_is_not_a_duplicate`
+  reads every page of `/api/select/search/text` and matches the title exactly; a
+  short answer is refused, not treated as clean.
+* Two template columns name real database columns that the API will not take
+  (`ASSOC_DATA.c_litgenre_code`, `BIOG_TEXT_DATA`'s year). They are reported,
+  never sent.
+* The template's merge step leaves bookkeeping in 備註 (「本列由來源列…合併而成」,
+  「（來源列 18）」). It refers to the workbook, not to history, and would have been
+  written into public `c_notes`; `clean_notes` removes it and keeps the prose.
+
+A dry run of the whole batch with every conflict confirmed (scratch copy): 78/78,
+no unsubstituted reference in any logged payload.
+
+### Review agent pass
+
+No serious issue in the reference, resume or preflight plumbing. Five serious
+findings in the converter, all fixed: (S1) a 基本資料 row marked 不入庫/無法對應 was
+still created; (S2) a 待確認 row with an empty note got no conflict; (S3) a
+number-typed text code (`"01"` read as 1) would have been sent padded wrong, into a
+table with no delete — now refused; (S4) the update path skipped `clean_notes`;
+(S5) association updates write year fields the server mirrors onto the reverse row,
+and nothing read the reverse row — each such update now carries a `mirror`
+conflict. Minor, fixed: unmapped 可補 labels and `；`-terminated lists are findings,
+a row citing another 出處文本ID is a finding, float page numbers, wider 來源列
+pattern, an NFC query. Not changed: year companions are written with the year
+(M1; for this batch every one was read live as empty), and a deferred source-title
+create does not hold back the person creates (M6; recoverable with `resume`).
+
+### codex pass
+
+Two serious, both in the text duplicate check, both fixed: a response without
+`last_page`/`total` was read as complete, and only the NFC spelling was searched.
+It now refuses a response without the paginator's metadata, requires the distinct
+count to equal `total`, and searches every `_spellings()` variant. Minor, fixed:
+missing control columns are a `WorkbookError`, not a traceback.
+
+### The two-direction read (S5, done by hand)
+
+Live `/api/v2/get` of both directions of the three association updates:
+1762↔1384 (14/13) and 7364↔5305 (44/43) are blank on both sides, safe.
+1762→770 (429): its reverse 770→1762 (430) did not answer `/api/v2/get` under the
+key with `c_kin_id`/`c_assoc_kin_id` = 0, and was first reported here as malformed
+with a suggested defer. **That was wrong.** Read from `/cbdbapi/person?id=770`, the
+row carries 1762 in both columns, and that is the server's own convention: on every
+mirror write `AssociationMutationHandler` sets `c_kin_id` and `c_assoc_kin_id` to
+the forward person. The update's mirror locator
+(`syncAssocMirrorOnUpdate`, same rule as `RelationshipMirrorService::locateOppositeEdges`)
+matches on `c_assoc_id`, `c_personid`, title, old first year and the pair codes, never
+on those two columns, and the content fields are equal on both sides, so the update
+syncs it with no 409. Corrected to confirm. Lesson: a reverse row is found the way
+the server finds it, not by `/api/v2/get` with the forward row's kin columns.
+
+Suite: 852 passed. Regenerated batch: 78 proposals, 36 open conflicts, 0 errors.
+A confirming re-review of the fixes has not been run yet.
+
+### 2026-10-06, later — first review decisions
+
+The user, on the staged batch: both `text-codes` creates approved (《王荊文公年譜》,
+《三經新義》); TMP-001 黃某 is a new person, not 845 黃莘 as the earlier 汇总本 had
+it; 判某府軍府事 (3136) stands for `post-051`; sentences recording coding method
+rather than history are dropped from `c_notes` (29 proposals edited, one note
+emptied), and `p-tmp-002`'s duplicated sentence removed. Applied to the staging
+file directly; a backup of the pre-edit file is in the session scratchpad. 33
+conflicts remain open.
+
+### 2026-10-06, later — `check-mirrors`, and the two titles in production
+
+**`mirror_check.py` / `check-mirrors`.** The two-direction read AGENTS.md asks for
+before a pair update, as a tool: the reverse row is located by the server's own rule
+(`syncAssocMirrorOnUpdate` / `syncKinMirrorOnUpdate`, read on `origin/develop`), its
+candidates taken from `/cbdbapi/person` of the other person, read raw by
+`/api/v2/get` under its own key, and compared field by field with the server's
+divergence test (blank/sentinel, or equal to the forward row's current value) over
+every mirrored field the update writes. Safe → the `mirror` conflict is resolved,
+marked as the tool's; anything else reopens it with the evidence and never touches a
+reviewer's resolution. A second proposal writing the same row or its reverse is
+flagged — the race the server's guard cannot see — but another relationship between
+the same two people is not (first version flagged `assoc-011` against `assoc-013`,
+a different 1054 recommendation; narrowed). On this batch: 3 checked, 3 safe,
+including `assoc-003`, which confirms the correction above. Pair codes come from the
+snapshot (reference data); without it every check says `unknown`. Tests: 17.
+AGENTS.md's mirror section now names the tool and the kin-id trap.
+
+**The two titles.** On the user's instruction, the two `text-codes` creates were
+split into `2026-10-06-wang-anshi-nianpu-titles` and submitted to production through
+`submit`: `CBDB_DRY_RUN=false` and `CBDB_CONFIRM_PROD` set in `.env` for that one
+run and reverted in the same command. The live duplicate check ran first. **2/2
+landed**: 王荊文公年譜 = 72223, 三經新義 = 72224 (`c_text_type_id` 010110),
+created by the user's account at 17:01; read back through `GET /api/v2/texts`,
+matching what was sent. The main batch dropped the two proposals and its 63
+references became the ids (76 proposals, 0 errors, 30 open conflicts);
+`workbook.yaml` names the ids, and a `new_texts` entry with `textid` now makes the
+converter cite instead of create. Regenerating from the case file reproduces the
+batch exactly apart from the hand-edited notes. Suite: 870 passed.
+
+### 2026-10-06, later — confirming review passes
+
+**Agent.** Two serious, both in `mirror_check.py`, both fixed. (S-A) The server
+copies the *whole* forward row onto the reverse (`$dataMirror = $newArray` in both
+handlers' `afterDirectUpdate`), but the check compared only the changed fields — an
+update of `c_notes` alone was "safe" over a reverse row with its own `c_source` and
+`c_pages`, which the server overwrites with no 409. Now every column is compared
+except those the server rewrites itself (`_SERVER_REWRITES`), and every pair update
+is checked whatever it changes; kinship's `c_autogen_notes`, asymmetric by the
+server's own account, is reported when it will change rather than counted as
+divergence. (S-B) The ownership marker was on every verdict, so after one run a
+reviewer's `defer` could be flipped to `confirmed` and a reviewer's `confirmed` reset.
+A resolution is now the tool's only if it is `confirmed` after the tool's own `safe`.
+Minor, fixed: the "missing" message says when an association update with a pair code
+will backfill; titles compare with trailing spaces ignored, as MySQL does; one
+malformed proposal is `unknown`, not a crashed command; `-999` counts as a sentinel;
+the case file's TEXT_CODES values go through the same string guard as the workbook's
+(YAML reads an unquoted `010110` as octal 4168); rows naming an existing person whose
+own row is 不入庫/無法對應 now carry the identity question; preflight messages raised
+from the text check no longer say "office". Not changed: the server's pair-code
+baselines are not reproduced — a "safe" verdict can still meet a 409, which errs
+safe.
+
+**codex.** Two serious: pair-only and code-only updates skipped, and copied columns
+left out of the comparison — the same two defects as S-A, already fixed by the change
+above. Nothing else found; workbook fixes and the TEXT_CODES guard confirmed.
+
+AGENTS.md's mirror section now says the sync is a whole-row copy and that
+`check-mirrors` is run again just before `submit`. Re-run live on the batch: all
+three association updates safe across all 31 copied columns. Suite: 881 passed.
+
+### 2026-10-06, later — third review round
+
+**Agent: no serious issue.** It confirmed against `origin/develop` that the
+whole-row model and the ownership fix hold. Four minor, all fixed: a pair-only
+kinship update with no reverse row was described as "no backfill", where the server's
+`handlePairOnlyMirrorSync` creates one (AGENTS.md's trap); a reviewer's `confirmed`
+could still be withdrawn in the sequence divergent → confirmed → safe → divergent;
+the columns the server sets itself (relationship codes, association kin ids) were
+skipped, so a real third party in `c_kin_id` or a hand-chosen reverse code would be
+lost unreported; a 人物ID typed as text in one sheet and a number in another dropped
+the identity question.
+
+**codex: three serious**, all fixed: the pair-only backfill (the same as the agent's
+first minor); `c_autogen_notes` reported but counted as safe while it was being
+overwritten; and text compared after `.strip()`, so `"text "` equalled `"text"`
+against the byte-for-byte rule.
+
+The changes: a `backfill` verdict, suggested `defer`, for an update that makes the
+server create the reverse row; the columns the server sets are compared with the
+value it will write (`_server_values`); `c_autogen_notes` is an ordinary column;
+text compares exactly, and a number equals only its own plain text; an explicit
+marker (`SET_BY_TOOL`) records which resolutions the tool set, and only those are
+ever changed. Nits fixed: ids normalised before the identity lookup; a row of a
+refused TMP person is a named `WorkbookError`; `check-mirrors` reports a dead token
+as a message and writes nothing. Not changed: deletes of pair rows are not checked
+(the server deletes the reverse row too), and a hand-written pair update gets a
+`mirror` question only when `check-mirrors` is run, not from `validate`.
+
+Re-run live: all three association updates safe across all 36 written columns.
+Suite: 891 passed.
+
+### 2026-10-07 — the review comes back
+
+The user's `decisions.json` answered all 30 open questions: 22 `confirmed`, 8 in
+words. `apply-review` records a worded answer verbatim as a decision that does not
+hold the proposal back, so "do not create this" written in words would still have
+been sent; each was carried out by hand, the reviewer's words kept in
+`agent_reasoning`. **Worth fixing in the tool**: a free-text resolution should not
+count as submittable without being turned into `confirmed`/`defer`/a value.
+
+What the words said: `post-004` (徐兵部's 兵部郎中) and `post-051` (再鎮金陵 — posting
+39745, read live as 3102 知某府軍府事 1076–1086) not created; `post-035` created (not
+compatible in time with the CBDB row); `post-041` recoded to 214 大學士, the general
+code; `post-046` (復拜平章事, 1075) not created — instead posting 28196 (805,
+1070–1074) gets its end year 1074 → 1076 (熙寧 9) and a 《王荊文公年譜》 citation in
+`c_notes`; `post-050` (使相) not created — it is posting 105221 (5833), which gets the
+citation in its `c_notes`. In both notes the trailing U+007F characters were dropped
+on the user's instruction and the visible text kept. `inst-001` stands; adding 報寧
+as an alias of institution 945 needs the `social-institution` aggregate, which is not
+modelled yet, and goes in a separate batch.
+
+Result: 78 proposals, 0 errors, 0 open; 74 to send, 4 held out (`post-004`,
+`post-046`, `post-050`, `post-051`).
+
+### 2026-10-07, later — submitted: 74/74 in production, over three runs
+
+`check-mirrors` was run again immediately before each submit (3/3 safe each time);
+the production gate was opened in `.env` for each run alone and closed in the same
+command.
+
+* **Run 1** (`2026-10-06-wang-anshi-nianpu`): `bio-1762` landed (卒月 4); `bio-1762-src`,
+  a `sources` create with no page, got `500 Server Error` and stopped the batch.
+  Reconciled: `GET /api/v2/operations` showed nothing after operation 371545, and
+  `/cbdbapi/person?id=1762` did not list 72223 — not written. **Cause, read in
+  upstream `origin/develop`:** `BiogSourceRepository::buildCreatePayload` evaluates
+  `$changes['c_pages'] ?? $targetPk['c_pages']`, and with the key absent from both,
+  PHP 8's undefined-array-key error becomes a 500. API.md says an empty page is
+  allowed; it is, if the key is sent. `MutationApi.create` now sends `c_pages: null`
+  for a page-less `sources` create (tested). Worth reporting upstream.
+* **Run 2** (`…-resume`): 37 landed, including the source row — the fix holds — and
+  the three new people, 705348 / 705349 / 705350. `post-052` then failed with
+  `WinError 10061` before any byte was sent; reconciled the same way (nothing after
+  operation 371582, no office-559 posting) — not written. The rule-2 drop, again.
+* **Run 3** (`…-resume-2`): 36/36. `resume` had rewritten every `{"ref": ...}` to the
+  three people into their ids — the person-reference path, live for the first time.
+
+Read back: all 74 returned rows match what was sent (a first pass of the comparison
+paired posting results with the wrong request, because posting creates return no
+`operation_id`; redone against each run's submitted `proposal.yaml`). Mirrors read
+through `/cbdbapi/person`: the new people's reverse kinship and association rows
+exist; the three association year updates reached 770, 1384 and 5305; 28196 now
+ends 1076; 1762 cites 72223. Gates re-locked.

@@ -772,3 +772,33 @@ def test_a_malformed_sent_id_is_refused_on_the_reconciled_path(bad):
     results = [indeterminate, _person_result("p13src", resume.NOT_ATTEMPTED[0])]
     with pytest.raises(resume.ResumeError, match="positive integer"):
         resume.plan(batch, results, reconciled={"p13": {"c_personid": 1}})
+
+
+class TestRelativesCreatedInTheSameBatch:
+    """A kinship row whose other party was a NEW person of the same batch names it
+    by `{"ref": ...}`; resumed after that person landed, the reference has to
+    become the c_personid the first run allocated."""
+
+    def _kin(self):
+        return Proposal(
+            id="kin1", resource="kinship", operation="create", person_id=1762,
+            target_pk={"c_kin_id": {"ref": "p13"}, "c_kin_code": 176},
+            changes={"c_kin_id": {"ref": "p13"}, "c_kin_code": 176},
+            source_quote="鄞女", confidence="high")
+
+    def test_the_reference_becomes_the_landed_c_personid(self):
+        batch = _batch([_person("p13"), self._kin()])
+        results = [_person_result("p13", resume.LANDED, 705014),
+                   _person_result("kin1", resume.NOT_ATTEMPTED[0])]
+        plan = resume.plan(batch, results)
+        (kin,) = plan.outstanding
+        assert kin.target_pk["c_kin_id"] == 705014
+        assert kin.changes["c_kin_id"] == 705014
+
+    def test_a_reconciled_person_resolves_to_its_c_personid(self):
+        batch = _batch([_person("p13"), self._kin()])
+        results = [_person_result("p13", resume.INDETERMINATE, 705014),
+                   _person_result("kin1", resume.NOT_ATTEMPTED[0])]
+        plan = resume.plan(batch, results, reconciled={"p13": {"c_personid": 705014}})
+        (kin,) = plan.outstanding
+        assert kin.changes["c_kin_id"] == 705014

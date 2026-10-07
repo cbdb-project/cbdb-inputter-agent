@@ -27,6 +27,7 @@ from .models import FieldWhitelistError, get_resource_spec
 from .preflight import (
     assert_addr_create_is_not_a_duplicate,
     assert_office_create_is_not_a_duplicate,
+    assert_text_create_is_not_a_duplicate,
 )
 
 
@@ -94,6 +95,15 @@ class MutationApi:
         alias = resource_string or spec.key
         spec.resolve_alias(alias, "create")
         spec.validate_target_pk_for_create(target_pk)
+        if spec.key == "sources" and "c_pages" not in target_pk:
+            # A source with no page is allowed (API.md: create normalises it to ""),
+            # but only if the key is SENT. Upstream's
+            # BiogSourceRepository::buildCreatePayload reads
+            # `$changes['c_pages'] ?? $targetPk['c_pages']`, and an absent key there is
+            # an "Undefined array key" that Laravel turns into a 500 - after nothing
+            # was written (2026-10-07, operation log checked). An explicit null is
+            # present, falls through to '' and lands as the documented empty page.
+            target_pk = dict(target_pk, c_pages=None)
 
         merged_changes = dict(changes)
         for pk_field, pk_value in target_pk.items():
@@ -109,10 +119,10 @@ class MutationApi:
 
         spec.validate_changes("create", merged_changes)
 
-        # Pre-create duplicate checks, for the two resources where the server has no
+        # Pre-create duplicate checks, for the resources where the server has no
         # guard of its own: `office`, whose create allocates max+1 and inserts with
-        # no name lookup, and `addr_codes`, which has no unique key on `c_name_chn`
-        # and no delete path.
+        # no name lookup, and `addr_codes` and `text_codes`, which have no unique key
+        # on their name column and no delete path.
         #
         # They live HERE, at the layer that actually sends the request, and not only
         # where a batch is generated. Two reasons. A guard that exists only in
@@ -155,6 +165,9 @@ class MutationApi:
                     first_year=merged_changes.get("c_firstyear"),
                     last_year=merged_changes.get("c_lastyear"),
                 )
+            elif spec.key == "text_codes":
+                assert_text_create_is_not_a_duplicate(
+                    self._client, title=merged_changes.get("c_title_chn"))
 
         envelope = _build_envelope(
             resource_string=alias,

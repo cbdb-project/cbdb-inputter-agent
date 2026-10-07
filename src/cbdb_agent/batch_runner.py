@@ -396,6 +396,9 @@ def run_batch(batch: StagingBatch, api: MutationApi) -> list[ProposalResult]:
 
         if spec.key == "basicinformation" and proposal.operation == "create":
             person_id_map[proposal.id] = resolved_pid
+            # What a `{"ref": ...}` to a new person stands for: the other party's
+            # c_kin_id / c_assoc_id on a pair created in the same batch.
+            assigned_pk[proposal.id] = resolved_pid
 
         if proposal.operation == "create" and spec.server_assigned_pk_fields:
             assigned = _assigned_pk(response, spec)

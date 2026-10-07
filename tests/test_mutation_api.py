@@ -213,9 +213,18 @@ def _ok_create():
     )
 
 
+def _no_text_title_matches():
+    """The live duplicate check on a TEXT_CODES create: nothing by that title."""
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/text",
+        json={"data": [], "last_page": 1, "total": 0}, status=200,
+    )
+
+
 @responses.activate
 def test_text_codes_create_envelope(tmp_path):
     api = make_api(tmp_path)
+    _no_text_title_matches()
     _ok_create()
     api.create(
         "text_codes",
@@ -224,7 +233,7 @@ def test_text_codes_create_envelope(tmp_path):
         changes={"c_title_chn": "聽雪先生集", "c_title": "Tingxue xiansheng ji"},
         resource_string="text-codes",
     )
-    sent = json.loads(responses.calls[0].request.body)
+    sent = json.loads(responses.calls[-1].request.body)
     assert sent["resource"] == "text-codes"
     assert sent["mode"] == "direct"          # proposal mode would be a 501
     assert sent["operation"] == "create"
@@ -256,6 +265,7 @@ def test_text_codes_create_works_through_the_generic_api_without_resource_string
     """MutationApi.create() falls back to spec.key as the alias, so spec.key must be
     one of the resource's own create aliases."""
     api = make_api(tmp_path)
+    _no_text_title_matches()
     _ok_create()
     api.create(
         "text_codes",
@@ -263,7 +273,61 @@ def test_text_codes_create_works_through_the_generic_api_without_resource_string
         target_pk={},
         changes={"c_title_chn": "聽雪先生集"},
     )
-    assert json.loads(responses.calls[0].request.body)["resource"] == "text_codes"
+    assert json.loads(responses.calls[-1].request.body)["resource"] == "text_codes"
+
+
+@responses.activate
+def test_a_text_codes_create_is_stopped_by_an_existing_title(tmp_path):
+    """TEXT_CODES has no delete and c_title_chn is frozen, so a second row for the
+    same book is permanent. A substring hit on another title must not stop it."""
+    from cbdb_agent.preflight import PreflightError
+
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/text",
+        json={"data": [{"c_textid": 72220, "c_title_chn": "聽雪先生集"},
+                       {"c_textid": 9, "c_title_chn": "聽雪先生集補遺"}],
+              "last_page": 1, "total": 2},
+        status=200,
+    )
+    api = make_api(tmp_path)
+    with pytest.raises(PreflightError, match="72220"):
+        api.create("text_codes", person_id=0, target_pk={},
+                   changes={"c_title_chn": "聽雪先生集"}, resource_string="text-codes")
+    assert not [c for c in responses.calls if c.request.method == "POST"]
+
+
+@responses.activate
+def test_a_substring_hit_does_not_stop_a_text_codes_create(tmp_path):
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/text",
+        json={"data": [{"c_textid": 9, "c_title_chn": "聽雪先生集補遺"}],
+              "last_page": 1, "total": 1},
+        status=200,
+    )
+    _ok_create()
+    api = make_api(tmp_path)
+    api.create("text_codes", person_id=0, target_pk={},
+               changes={"c_title_chn": "聽雪先生集"}, resource_string="text-codes")
+    assert [c for c in responses.calls if c.request.method == "POST"]
+
+
+@responses.activate
+def test_a_short_text_search_answer_is_not_a_clean_one(tmp_path):
+    """Fewer distinct rows than the paginator's total: the exact match may be the
+    one that was skipped, so the guard refuses rather than reporting clean."""
+    from cbdb_agent.preflight import PreflightError
+
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/text",
+        json={"data": [{"c_textid": 9, "c_title_chn": "聽雪先生集補遺"}],
+              "last_page": 1, "total": 2},
+        status=200,
+    )
+    api = make_api(tmp_path)
+    with pytest.raises(PreflightError, match="reported 2 rows"):
+        api.create("text_codes", person_id=0, target_pk={},
+                   changes={"c_title_chn": "聽雪先生集"}, resource_string="text-codes")
+    assert not [c for c in responses.calls if c.request.method == "POST"]
 
 
 # --- office entity aggregate: the wire envelope, and the whitelist ---------
@@ -518,6 +582,7 @@ def test_an_envelope_carries_no_meta_when_there_is_no_comment(tmp_path):
     a side-check of a deleted approval test.
     """
     api = make_api(tmp_path)
+    _no_text_title_matches()
     responses.add(
         responses.POST, "http://localhost:8000/api/v2/create",
         json={"ok": True, "result": {"pk": {"c_textid": 1}}}, status=200)
@@ -528,7 +593,7 @@ def test_an_envelope_carries_no_meta_when_there_is_no_comment(tmp_path):
         changes={"c_title_chn": "聽雪先生集"},
         resource_string="text-codes",
     )
-    sent = json.loads(responses.calls[0].request.body)
+    sent = json.loads(responses.calls[-1].request.body)
     assert "meta" not in sent
 
 
@@ -626,3 +691,43 @@ def test_the_period_arguments_reach_the_guard_the_right_way_round(tmp_path):
 
     assert seen["first_year"] == 1368, "first_year must be c_firstyear"
     assert seen["last_year"] == 1643, "last_year must be c_lastyear"
+
+
+@responses.activate
+def test_a_text_search_without_pagination_is_not_a_clean_answer(tmp_path):
+    """No last_page/total: page one may not be the whole answer."""
+    from cbdb_agent.preflight import PreflightError
+
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/text",
+        json={"data": []}, status=200,
+    )
+    api = make_api(tmp_path)
+    with pytest.raises(PreflightError, match="last_page/total"):
+        api.create("text_codes", person_id=0, target_pk={},
+                   changes={"c_title_chn": "聽雪先生集"}, resource_string="text-codes")
+    assert not [c for c in responses.calls if c.request.method == "POST"]
+
+
+@responses.activate
+def test_a_source_with_no_page_sends_the_page_key_as_null(tmp_path):
+    """Upstream 500s on a sources create whose target.pk has no c_pages key at all
+    (an undefined-key error in buildCreatePayload); an explicit null lands as the
+    documented empty page."""
+    api = make_api(tmp_path)
+    responses.add(responses.POST, "http://localhost:8000/api/v2/create",
+                  json={"ok": True, "result": {"pk": {}}}, status=200)
+    api.create("sources", person_id=1762, target_pk={"c_personid": 1762, "c_textid": 72223},
+               changes={})
+    sent = json.loads(responses.calls[-1].request.body)
+    assert "c_pages" in sent["target"]["pk"] and sent["target"]["pk"]["c_pages"] is None
+
+
+@responses.activate
+def test_a_source_with_a_page_is_sent_as_it_is(tmp_path):
+    api = make_api(tmp_path)
+    responses.add(responses.POST, "http://localhost:8000/api/v2/create",
+                  json={"ok": True, "result": {"pk": {}}}, status=200)
+    api.create("sources", person_id=1762,
+               target_pk={"c_personid": 1762, "c_textid": 72223, "c_pages": "卷一"}, changes={})
+    assert json.loads(responses.calls[-1].request.body)["target"]["pk"]["c_pages"] == "卷一"

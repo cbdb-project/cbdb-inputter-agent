@@ -234,7 +234,12 @@ def plan(
         plan_.reconciled[pid] = outcome
         if outcome is not None:
             landed_ids.add(pid)
-            plan_.landed[pid] = outcome
+            # A person's "key" is the c_personid it was created as, and a
+            # reference to it (a relative's c_kin_id) needs exactly that integer,
+            # not whatever shape the reconciliation recorded it in.
+            plan_.landed[pid] = (
+                _landed_person_id(pid, status[pid], outcome)
+                if _is_person_create(by_id[pid]) else outcome)
 
     # --- 3. the ids, where there are any ----------------------------------
     # Read for every landed proposal, because a reader of the resumed batch wants
@@ -247,7 +252,10 @@ def plan(
         if pid in plan_.landed:
             continue                      # a reconciliation already supplied it
         try:
-            plan_.landed[pid] = assigned_pk(status[pid], by_id[pid].resource)
+            plan_.landed[pid] = (
+                _landed_person_id(pid, status[pid], None)
+                if _is_person_create(by_id[pid])
+                else assigned_pk(status[pid], by_id[pid].resource))
         except ResumeError:
             if pid in needed:
                 raise
@@ -331,6 +339,12 @@ def _landed_person_id(pid: str, entry: dict, reconciled: Any) -> int:
             f"answered {written}. Which one the person is under is not something "
             f"this can pick.")
     return written if written is not None else sent
+
+
+def _is_person_create(proposal: Proposal) -> bool:
+    """A new person, whose key is the c_personid batch_runner allocated."""
+    return (proposal.operation == "create"
+            and find_spec_by_alias(proposal.resource).key == "basicinformation")
 
 
 def _is_personid(value: Any) -> bool:
