@@ -18,6 +18,7 @@ consolidated from an earlier 汇总本 and checked against a collated copy of th
 | `2026-10-06-wang-anshi-nianpu` | 78 | reviewed 2026-10-07 (74 to send, 4 held out); submitted — 1 landed, then a 500 at proposal 2 |
 | `2026-10-07-wang-anshi-nianpu-resume` | 77 | submitted — 37 landed, then a refused connection at `post-052` |
 | `2026-10-07-wang-anshi-nianpu-resume-2` | 40 | submitted — **36/36 landed**; the main batch is complete, **74/74** |
+| `2026-10-07-wang-anshi-nianpu-inst-alias` | 1 | submitted — **1/1 landed**: alias 報寧寺 on institution 945 (operation 371832) |
 
 What the 76 proposals of the main batch are (the two titles went first):
 
@@ -56,13 +57,18 @@ The workbook's temporary ids were written back on 2026-10-07: TMP-001/002/003 be
 705348/705349/705350 in every data sheet, with their 人物ID狀態 set to 已對應 (the
 修正記錄 sheet, a history of the consolidation, was left as it was).
 
-**Not done, and not doable through this client: the alias 報寧 for institution 945
-(半山寺).** CBDB keeps institution aliases in `SOCIAL_INSTITUTION_ALTNAME_DATA`, and
-upstream has no write path to it at all — no API resource, no code-table registry
-entry, no edit page, and no alias field in the `social-institution` aggregate.
-Upstream's own `docs/CODE_TABLE_MUTATION_API_PLAN.md` (D-1) skips the table on purpose
-(it has no primary key). The user's decision, 2026-10-07: open a write path upstream;
-until then the alias waits.
+**The alias 報寧寺 for institution 945 (半山寺), done 2026-10-07.** CBDB keeps
+institution aliases in `SOCIAL_INSTITUTION_ALTNAME_DATA`, which had no write path at
+all upstream. The user chose to open one: cbdb-online-main-server #1335 added an
+`alt_names` list to the `social-institution` aggregate, deployed the same day, and
+this client modelled the aggregate for it (update only — `docs/12`). Batch
+`2026-10-07-wang-anshi-nianpu-inst-alias` sent the institution's live row unchanged
+plus `alt_names: [報寧寺, type 0, source 72223]`. Response: operation 371832,
+`alt_names_added` 1, `alt_names_removed` 0, no `notices`; a live re-read after the
+write showed every other field as before. The server derived the alias pinyin as
+`bao ning si` (lowercase), unlike CBDB's usual `Banshan Si` style — left as is.
+Not changed, and still CBDB's own: 945's address row is 7537 荊溪 with notes
+describing another temple, and its `c_inst_floruit_dy` is 20 (清).
 
 ## Decisions taken before staging (the user, 2026-10-06)
 
