@@ -1040,6 +1040,74 @@ RESOURCE_SPECS["social_institution_aggregate"] = ResourceSpec(
 )
 
 
+# `text-entity` spans TEXT_CODES + TEXT_INSTANCE_DATA (the edition rows), written
+# through the aggregate (API.md 13.4). It is the only write path for most of a
+# book's row: the bare `text_codes` update takes `c_title` alone. Modelled
+# 2026-11-18 for the 江蘇藝文志 correction (c_textid 66769); see
+# docs/04-field-whitelists.md §20 and `text_entity_aggregate.py`. What shapes it:
+#
+#   - ONLY `text-entity` is registered, and only for UPDATE. `text`/`texts` are the
+#     PERSON sub-resource BIOG_TEXT_DATA, and `text-codes` is the bare code table -
+#     read the separator. The server's other spellings (`text-entities`, `book`,
+#     `books`) are left out so there is one way to say it. Create and delete are
+#     not modelled.
+#   - `update` is a FULL-ROW OVERWRITE of TEXT_CODES: every field below must appear,
+#     with its value or an explicit null. Read the row first
+#     (`text_entity_aggregate.read_text()`) and carry every value across.
+#   - `instances` is NOT an exception to that, unlike social-institution's
+#     `alt_names`: an absent key is an empty list upstream, and an empty list
+#     deletes every edition row. So it is required on every update, and this client
+#     only lets it carry the current rows across unchanged -
+#     `mutation_api` checks that against snapshot + operations log immediately
+#     before the request and against the server's counters after it.
+#   - `title` is normalized server-side: whitespace removed, full-width brackets
+#     made half-width, `:` made `: `, character variants replaced. A given
+#     `title_pinyin` is only lower-cased and whitespace-folded; a null one is
+#     derived. `type_id` is a string code with a significant leading zero ("02").
+_TEXT_ENTITY_AGGREGATE_FIELDS = frozenset(
+    {
+        "title", "title_pinyin", "title_trans", "title_alt_chn", "type_id",
+        "year", "nh_code", "nh_year", "range_code", "bibl_cat_code", "extant",
+        "country", "dynasty_code", "source_id", "pages", "url_api", "url_api_coda",
+        "url_homepage", "notes", "instances",
+    }
+)
+
+RESOURCE_SPECS["text_entity_aggregate"] = ResourceSpec(
+    key="text_entity_aggregate",
+    create_aliases=frozenset(),   # not modelled
+    update_aliases=frozenset({"text-entity"}),
+    delete_aliases=frozenset(),   # not modelled
+    pk_fields=("c_textid",),
+    server_assigned_pk_fields=frozenset({"c_textid"}),
+    create_fields=frozenset(),
+    update_fields=_TEXT_ENTITY_AGGREGATE_FIELDS,
+    is_global_reference_data=True,
+    # ResolvesTextAggregateInput: `title` is the one required field, create and update.
+    required_update_fields=frozenset({"title"}),
+    full_overwrite_update=True,
+    row_list_fields={
+        "instances": RowListShape(
+            fields=frozenset(
+                {
+                    "edition_id", "instance_id", "title_chn", "title_pinyin",
+                    "publisher", "pub_loc", "pub_year", "pub_dy", "pub_nh_code",
+                    "pub_nh_year", "source_id", "pages", "extant", "notes",
+                }
+            ),
+            required=frozenset({"edition_id", "instance_id"}),
+            integer_fields=frozenset(
+                {
+                    "edition_id", "instance_id", "pub_year", "pub_dy", "pub_nh_code",
+                    "pub_nh_year", "source_id", "extant",
+                }
+            ),
+            unique_by=("edition_id", "instance_id"),
+        ),
+    },
+)
+
+
 # --- Place-name code tables (NOT person data). AGENTS.md rule 12 applies. -------
 #
 # Opened upstream 2026-09-10, pulled and modelled here 2026-09-11 (API.md 13.1/13.2;

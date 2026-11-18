@@ -623,6 +623,59 @@ Design, traps and the live read: **`docs/12-social-institution-aggregate.md`**. 
   deletable upstream while unreferenced; an alias row, once deleted, is recoverable
   only by re-sending it.
 
+## 20. text_entity_aggregate (`TEXT_CODES` + `TEXT_INSTANCE_DATA`) — an entity aggregate ⚠️
+
+The way to change a book's row beyond `c_title` (the bare §14 `text_codes` update takes
+nothing else). Modelled 2026-11-18 for the 江蘇藝文志 correction, case
+`jiangsu-yiwenzhi`. Verified against upstream `origin/develop` `4aa269c9`:
+`TextAggregateDefinition`, `ResolvesTextAggregateInput`, `TextImportService::update()`.
+What `models.py` encodes:
+
+- **Resource string `text-entity`, update only.** `text`/`texts` are §10's person
+  sub-resource `BIOG_TEXT_DATA` and `text-codes` is §14's bare table; the server's
+  other spellings (`text-entities`, `book`, `books`) are unregistered. Create and
+  delete are not modelled.
+- **PK `c_textid`**, in `server_assigned_pk_fields` (present on update, never
+  invented). `person_id: 0`.
+- **Fields** (semantic names; the server also takes the column names, unregistered
+  here): `title` (← `c_title_chn`, **required**), `title_pinyin` (`c_title`),
+  `title_trans`, `title_alt_chn`, `type_id` (`c_text_type_id`, a **string** code —
+  "02", the leading zero matters), `year`, `nh_code`, `nh_year`, `range_code`,
+  `bibl_cat_code`, `extant`, `country`, `dynasty_code` (`c_text_dy`), `source_id`
+  (`c_source`, nullable — the root of the citation tree), `pages`, `url_api`,
+  `url_api_coda`, `url_homepage`, `notes`, `instances`.
+- **Full-row overwrite** (`full_overwrite_update`) with **no exempt field**:
+  `textColumns()` writes all 19 TEXT_CODES columns from the request. A value that is
+  empty or whitespace is written as NULL.
+- **`instances` is required, and it is not "leave alone"**: upstream reads an absent
+  key as `[]`, and the edition rows are reconciled to exactly the list — so leaving it
+  out deletes every edition. Rows (`RowListShape`): `edition_id`, `instance_id`
+  (required, unique together), `title_chn`, `title_pinyin`, `publisher`, `pub_loc`,
+  `pub_year`, `pub_dy`, `pub_nh_code`, `pub_nh_year`, `source_id`, `pages`, `extant`,
+  `notes`. A matched row has those columns rewritten; its other columns (`c_print`,
+  `c_part_of_instance`, …) are left alone.
+- **This client only carries the edition rows across unchanged.**
+  `MutationApi.update()` runs `assert_instances_unchanged` immediately before the
+  request (key for key and value for value, compared as the server compares) and
+  `assert_instances_write_changed_nothing` after it: `instances_added`,
+  `instances_removed` and `instances_updated` must all be 0, else
+  `InstancesChangedError` (indeterminate) stops the batch.
+- **Reads.** The row: `GET /api/v2/texts/{id}` returns every TEXT_CODES column
+  (`text_entity_aggregate.read_text()` checks all 19 are present). The edition rows:
+  **no API read** — `read_instances()` composes them from snapshot + every
+  `TEXT_INSTANCE_DATA` operation since (refusing what it cannot replay exactly, and
+  any operation dated on the build day). `fetch_current_values()` uses both, so the
+  preview diffs this resource.
+- **Server-side normalization of `title`:** all whitespace removed, `（）` → `()`,
+  `:`/`：` → `: `, then character variants replaced (`result.variant_replacements` /
+  `notices`). A given `title_pinyin` is only lower-cased, whitespace-folded and v→ü;
+  a null one is derived from the title. `notes`, `pages`, `title_trans` and
+  `title_alt_chn` go through the variant replacement too.
+- **`source_id` must not point at the book itself or a descendant** (422
+  `source_cycle`).
+- **`is_global_reference_data = True`** (rule 12). The aggregate is deletable
+  upstream while unreferenced; a TEXT_CODES row with person citations is not.
+
 ## Source citations
 
 - `app/Support/CompositePrimaryKey.php` (`SCHEMAS` const) — authoritative PK schema

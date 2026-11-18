@@ -36,6 +36,7 @@ from .mutation_api import MutationApi
 from .person_id import PersonIdError, get_max_person_id, is_person_id_taken, validate_new_person_id
 from .snapshot import ensure_snapshot
 from .social_institution_aggregate import read_alt_names, read_institution
+from .text_entity_aggregate import read_instances, read_text
 from .staging import (
     StagingError,
     substitute_pk_refs,
@@ -483,6 +484,17 @@ def fetch_current_values(batch: StagingBatch, api: MutationApi) -> dict[str, Pro
                     row["alt_names"] = read_alt_names(
                         api.client, ensure_snapshot(allow_download=False), inst_code
                     )["rows"]
+                results[proposal.id] = ProposalCurrentState(row=row)
+                continue
+            if spec.key == "text_entity_aggregate":
+                # Same reason: no /api/v2/get for TEXT_CODES. The row comes from
+                # /api/v2/texts/{id}; the edition rows from snapshot + operations
+                # log, and an unreadable edition set fails the whole fetch.
+                text_id = int(full_target_pk["c_textid"])
+                row = read_text(api.client, text_id)
+                row["instances"] = read_instances(
+                    api.client, ensure_snapshot(allow_download=False), text_id
+                )["rows"]
                 results[proposal.id] = ProposalCurrentState(row=row)
                 continue
             body = api.get(spec.key, person_id=resolved_pid, target_pk=full_target_pk)
