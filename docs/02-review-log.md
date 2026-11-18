@@ -3261,3 +3261,8 @@ of `/api/v2/operations`; AGENTS.md rule 12 names `text-instance-data` (opened up
 `927c0460`, unmodelled); `type_id` must be a string (an unquoted YAML `02` is 2). It
 also confirmed the staged title batch produces the intended write, and that the
 replay matches every way upstream records TEXT_INSTANCE_DATA writes.
+
+codex re-review of the fix commit (891350d): no serious. One minor, left as is:
+Python's `\s` and PHP's `/\s/u` may disagree on some Unicode whitespace, which could
+make `normalize_title` refuse a title the server would keep. That errs toward
+refusing a correct write, never toward letting a rewritten value through.
