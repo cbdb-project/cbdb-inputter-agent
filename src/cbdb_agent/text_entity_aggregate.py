@@ -35,6 +35,7 @@ What nothing here can see: a write made directly against the database.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -140,6 +141,95 @@ def read_text(client: HttpClient, text_id: int) -> dict[str, Any]:
     return {key: row[col] for col, key in TEXT_COLUMNS.items()}
 
 
+# What PHP `trim()` strips, and so what Laravel's TrimStrings middleware strips from
+# every string in the request before the aggregate sees it.
+_PHP_TRIM = " \t\n\r\0\x0b"
+
+
+def normalize_title(title: str) -> str:
+    """`TextImportService::normalizeTitle()`: all whitespace removed, full-width
+    brackets made half-width, a colon and what follows it made `: `. (Character
+    variants are replaced after this, from `char_variant_map`; that part cannot be
+    predicted here and is caught by the read-back instead.)"""
+    title = re.sub(r"\s+", "", title)
+    title = title.replace("（", "(").replace("）", ")")
+    title = re.sub(r"[:：]\s*", ": ", title)
+    return title.strip(_PHP_TRIM)
+
+
+def assert_row_survives_normalization(changes: dict[str, Any]) -> None:
+    """Refuse a TEXT_CODES payload the server would visibly rewrite on the way in.
+
+    The update overwrites the whole row, and the server normalizes some of what it is
+    sent: the title (`normalize_title`), a given pinyin (lower-cased, whitespace
+    folded, v -> ü), a null pinyin (derived from the title - a change if the stored
+    one was NULL), and every string (trimmed by the middleware). Any of those would
+    quietly change a field the proposal meant to carry across - so the proposal must
+    say the normalized value itself, where a reviewer can see it. Character-variant
+    replacement cannot be predicted; `assert_row_written_as_sent` catches it after.
+    """
+    problems = []
+    type_id = changes.get("type_id")
+    if type_id is not None and not isinstance(type_id, str):
+        problems.append(f"type_id {type_id!r} must be a string code such as '02' "
+                        "(an unquoted YAML 02 arrives as 2)")
+    title = changes.get("title")
+    if isinstance(title, str) and title != normalize_title(title):
+        problems.append(f"title {title!r} would be stored as {normalize_title(title)!r}")
+    pinyin = changes.get("title_pinyin")
+    if pinyin is None:
+        problems.append("title_pinyin is null, so the server would derive one")
+    elif isinstance(pinyin, str):
+        folded = re.sub(r"\s+", " ", pinyin.strip(_PHP_TRIM)).lower()
+        if pinyin != folded or "v" in pinyin:
+            problems.append(f"title_pinyin {pinyin!r} would be lower-cased, "
+                            "whitespace-folded or have v turned into ü")
+    for key, value in changes.items():
+        if isinstance(value, str) and value != value.strip(_PHP_TRIM):
+            problems.append(f"{key} has leading or trailing whitespace the server trims")
+    if problems:
+        raise TextEntityReadError(
+            "this text-entity update would not be stored as sent: " + "; ".join(problems)
+            + ". Write the value the server would store.")
+
+
+def _same(a: Any, b: Any) -> bool:
+    a = None if a == "" else a
+    b = None if b == "" else b
+    if a is None or b is None:
+        return a is None and b is None
+    return str(a) == str(b)
+
+
+class TextRowMismatchError(CbdbApiError):
+    """The write LANDED, and the stored row is not what was sent - or could not be
+    read back to tell. `indeterminate`, so batch_runner stops (rule 11)."""
+
+    indeterminate = True
+
+
+def assert_row_written_as_sent(client: HttpClient, text_id: int,
+                               changes: dict[str, Any]) -> None:
+    """After a text-entity update: read the row back and compare every column with
+    what was sent. Catches what the pre-flight cannot predict - above all the
+    server's character-variant replacement, which can rewrite a carried title or
+    note - and reports it rather than letting a `200` stand for it."""
+    try:
+        stored = read_text(client, text_id)
+    except CbdbApiError as exc:
+        raise TextRowMismatchError(
+            f"the update to book {text_id} landed but the row could not be read back "
+            f"to verify it: {exc}. Read GET /api/v2/texts/{text_id} by hand.") from exc
+    diffs = {k: (changes.get(k), stored[k]) for k in TEXT_COLUMNS.values()
+             if k in changes and not _same(changes.get(k), stored[k])}
+    if diffs:
+        raise TextRowMismatchError(
+            f"the update to book {text_id} landed, but the stored row differs from what "
+            f"was sent (sent, stored): {diffs}. Check the response's notices / "
+            "variant_replacements; the previous values are in GET /api/v2/operations "
+            f"(TEXT_CODES, resource_id {text_id}).")
+
+
 def _norm_instance(row: dict[str, Any]) -> dict[str, Any]:
     """An `instances` row as the server compares it: ints for the int keys, every
     other value a string, and an empty value NULL (`normalizeInstanceInput`)."""
@@ -184,23 +274,35 @@ def instances_at_baseline(snapshot: Path, text_id: int) -> list[dict[str, Any]]:
     return sorted((_instance_row(dict(r)) for r in rows), key=_instance_key)
 
 
-def _op_key(op: dict[str, Any], data: dict | None) -> tuple[str | None, tuple[int, int] | None]:
-    """(c_textid, (edition, instance)) of an operation: from its row data, falling
-    back to the stored `resource_id` (`c_textid=..&c_text_edition_id=..&...`)."""
-    fields: dict[str, Any] = {}
-    rid = op.get("resource_id")
-    if isinstance(rid, str) and "=" in rid:
-        fields.update(dict(parse_qsl(rid)))
-    if data:
-        for col in ("c_textid", "c_text_edition_id", "c_text_instance_id"):
-            if data.get(col) is not None:
-                fields[col] = data[col]
+_KEY_COLUMNS = ("c_textid", "c_text_edition_id", "c_text_instance_id")
+
+
+def _key_of(fields: dict[str, Any]) -> tuple[str | None, tuple[int, int] | None]:
     textid = fields.get("c_textid")
     try:
         key = (int(fields["c_text_edition_id"]), int(fields["c_text_instance_id"]))
     except (KeyError, TypeError, ValueError):
         key = None
     return (None if textid is None else str(textid).strip(), key)
+
+
+def _op_key(op: dict[str, Any], after: dict | None,
+            before: dict | None) -> tuple[str | None, tuple[int, int] | None]:
+    """(c_textid, (edition, instance)) of an operation, from the stored `resource_id`
+    (`c_textid=..&c_text_edition_id=..&...`) and BOTH row images. If they disagree -
+    an operation that moved a row to another book or edition, which no server path
+    does today - the answer is None, and the replay refuses."""
+    seen = []
+    rid = op.get("resource_id")
+    if isinstance(rid, str) and "=" in rid:
+        seen.append(_key_of(dict(parse_qsl(rid))))
+    for image in (after, before):
+        if image and all(image.get(c) is not None for c in _KEY_COLUMNS):
+            seen.append(_key_of(image))
+    seen = [k for k in seen if k[0] is not None and k[1] is not None]
+    if not seen or any(k != seen[0] for k in seen):
+        return (None, None)
+    return seen[0]
 
 
 def read_instances(client: HttpClient, snapshot: Path | None,
@@ -212,6 +314,10 @@ def read_instances(client: HttpClient, snapshot: Path | None,
     Refuses (TextEntityReadError) rather than guess when there is no snapshot, the
     operations window cannot be read completely, or an operation cannot be applied
     exactly.
+
+    Blind spot, shared with `live_state`: `/api/v2/operations` lists only rows with
+    `crowdsourcing_status = 0`, so a write approved through the old crowdsourcing
+    channel would not be replayed. No such path to TEXT_INSTANCE_DATA is known.
     """
     if snapshot is None:
         raise TextEntityReadError(
@@ -232,12 +338,12 @@ def read_instances(client: HttpClient, snapshot: Path | None,
         before = op.get("resource_original")
         after = after if isinstance(after, dict) else None
         before = before if isinstance(before, dict) else None
-        owner, key = _op_key(op, after or before)
+        owner, key = _op_key(op, after, before)
         where = f"{INSTANCE_TABLE} operation {op.get('id')} (op_type {op.get('op_type')})"
         if owner is None or key is None:
             raise TextEntityReadError(
-                f"{where} cannot be attributed to a book and edition; the edition "
-                "rows cannot be replayed past it")
+                f"{where} cannot be attributed to one book and edition (no key, or "
+                "its images disagree); the edition rows cannot be replayed past it")
         if owner != str(int(text_id)):
             continue
         if str(op.get("updated_at") or "")[:10] <= as_of:
@@ -297,6 +403,16 @@ def assert_instances_unchanged(client: HttpClient, snapshot: Path | None,
             raise TextEntityReadError(
                 f"edition {_instance_key(row)} of book {text_id} stores an empty string "
                 f"in {empty}; any update would rewrite it as NULL. Not handled here.")
+        padded = sorted(k for k, v in row.items()
+                        if isinstance(v, str) and v != v.strip(_PHP_TRIM))
+        if padded:
+            # The middleware trims the sent copy, so it would no longer equal the
+            # stored row, and the server would rewrite the row (re-deriving pinyin
+            # and replacing variants on the way).
+            raise TextEntityReadError(
+                f"edition {_instance_key(row)} of book {text_id} stores leading or "
+                f"trailing whitespace in {padded}; the server trims what it is sent, so "
+                "carrying it across would rewrite the row. Not handled here.")
     have = {_instance_key(r): _norm_instance(r) for r in current}
     sent: dict[tuple[int, int], dict] = {}
     for r in instances:
