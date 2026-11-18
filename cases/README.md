@@ -31,6 +31,7 @@ See AGENTS.md, "Where code goes", for the rule that separates a case from a tool
 | [salt-administration](salt-administration/) | 6 (2026-09-10 … 2026-09-19) | **complete** — all 118 rows in production | `docs/11` |
 | [zhenanzhou-renhuai-suiyang](zhenanzhou-renhuai-suiyang/) | 1 (2026-09-21) | **complete** — all 6 rows in production, verified | `cases/zhenanzhou-renhuai-suiyang/README.md` |
 | [wang-anshi-nianpu](wang-anshi-nianpu/) | 7 (2026-10-06 … 2026-10-07) | **complete** — titles 72223/72224, main batch 74/74 in production, verified; 王安石's 報寧 temple is its own institution 4012 (the 945 alias was undone) | `cases/wang-anshi-nianpu/README.md` |
+| [jiangsu-yiwenzhi](jiangsu-yiwenzhi/) | 2 (2026-11-18) | staged — 66769's title record (via the newly modelled `text-entity`) and 63 citation page numbers | `docs/04` §20 |
 
 ## Writing a case README
 

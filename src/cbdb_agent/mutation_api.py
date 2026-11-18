@@ -35,6 +35,10 @@ from .social_institution_aggregate import (
     assert_alt_names_write_deleted_nothing,
     assert_institution_create_is_not_a_duplicate,
 )
+from .text_entity_aggregate import (
+    assert_instances_unchanged,
+    assert_instances_write_changed_nothing,
+)
 
 
 def default_alias(spec: Any, operation: str) -> str:
@@ -253,6 +257,21 @@ class MutationApi:
                 removed,
             )
 
+        # A text-entity update reconciles the book's edition rows to exactly the
+        # `instances` sent (required by the spec - absent would mean "delete them
+        # all"), and those rows have no API read either. This client only carries
+        # them across unchanged: check that against the live operations log here,
+        # and the server's counters after the write. Skipped under dry-run.
+        checks_instances = (not self._client.dry_run
+                            and spec.key == "text_entity_aggregate")
+        if checks_instances:
+            assert_instances_unchanged(
+                self._client,
+                ensure_snapshot(allow_download=False),
+                int(target_pk["c_textid"]),
+                changes["instances"],
+            )
+
         # Instructions to this client (e.g. `alt_names_removed`) never go on the wire.
         wire_changes = {k: v for k, v in changes.items()
                         if k not in spec.client_only_fields}
@@ -280,6 +299,8 @@ class MutationApi:
             # the batch) unless exactly the declared aliases were removed.
             assert_alt_names_write_deleted_nothing(
                 response, int(target_pk["c_inst_code"]), expected_removed=len(removed))
+        if checks_instances:
+            assert_instances_write_changed_nothing(response, int(target_pk["c_textid"]))
         return response
 
     def delete(

@@ -113,6 +113,7 @@ GLOBAL_REFERENCE_TABLES = {
     "addr_belongs_data": "ADDR_BELONGS_DATA",
     "admin_cat_codes": "ADMIN_CAT_CODES",
     "text_codes": "TEXT_CODES",
+    "text_entity_aggregate": "TEXT_CODES (+ TEXT_INSTANCE_DATA)",
     "office": "OFFICE_CODES (+ OFFICE_CODE_TYPE_REL)",
     "social_institution_aggregate": (
         "SOCIAL_INSTITUTION_CODES (+ _NAME_CODES, _ADDR, _ALTNAME_DATA)"

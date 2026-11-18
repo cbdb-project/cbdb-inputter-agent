@@ -317,7 +317,7 @@ user how old the build is instead of quietly trusting it.
     regardless — so it recorded nothing the operations log did not already have, in a
     place only this client could read. Do not reintroduce it; if you find a mention in
     an older document, it is stale.
-    Six such resources are modelled today:
+    Seven such resources are modelled today:
     **`text-codes`** (create only; `update` is not modelled since the server only allows
     `c_title`, and `delete` is disabled server-side), the three place-name tables opened
     (committed upstream 2026-09-10, pulled and modelled here 2026-09-11) —
@@ -347,13 +347,24 @@ user how old the build is instead of quietly trusting it.
     (the rest is ignored server-side, so it follows as an update) and runs a live
     same-name-same-address check first. Never send `alt_names` from memory or a
     hand-typed list.
-    The rest (`char-variant-map`, `office-type-tree`,
-    `text-entity`, `merged-person`) are still unmodelled, so a staging file naming one
+    The seventh, modelled 2026-11-18, is **`text-entity`** — **update only** — the
+    one path to most of a book's `TEXT_CODES` row (the bare `text_codes` update takes
+    `c_title` alone; see `docs/04-field-whitelists.md` §20). A full-row overwrite like
+    the others, and **its edition rows are the opposite of `alt_names`**: upstream
+    reads an absent `instances` key as `[]`, and `[]` deletes every
+    `TEXT_INSTANCE_DATA` row the book has. So `instances` is required on every update,
+    the edition rows have no read endpoint (they come from snapshot + operations log,
+    `text_entity_aggregate.read_instances`), and this client only lets them be carried
+    across **unchanged**: `MutationApi.update()` checks that live immediately before
+    sending, and afterwards requires `instances_added`/`_removed`/`_updated` all to be
+    0, stopping the batch otherwise.
+    The rest (`char-variant-map`, `office-type-tree`, `merged-person`) are still
+    unmodelled, so a staging file naming one
     is rejected as an unknown alias — a safe outcome, but by absence rather than by
-    design — **and by absence only here**: upstream accepts writes for all four
+    design — **and by absence only here**: upstream accepts writes for all three
     (`char_variant_map` create and update, `office-type-tree` create and update,
-    `text-entity` create/update/delete, `merged-person`
-    create and delete), and `social-institution` delete, which is not modelled either. So if a task needs one of them, modelling it is the work;
+    `merged-person` create and delete), and `social-institution` delete and
+    `text-entity` create/delete, which are not modelled either. So if a task needs one of them, modelling it is the work;
     routing around `models.py` is not.
     **The creatable set grew and is now six tables** (upstream commits dated
     2026-09-10; pulled here 2026-09-11).

@@ -9,6 +9,7 @@ is the target system's own `API.md`:
 | Local path | `${CBDB_ONLINE_MAIN_SERVER_REPO_DIR}/API.md` (see `.env.sample`; `Config.online_main_server_repo_dir`) |
 | **Synced against** | `origin/develop` commit `df1495a7` (commit date 2026-10-07 18:45:51 +0800), `API.md` blob `6defc4f6` |
 | **Previous sync** | `76ac0a47` (2026-09-10), blob `b847dc89` — 7 commits and +41/−15 lines of `API.md` earlier; the 2026-10-07 re-sync is summarized in §1.10 and rewrote §2.3's `social-institution` entry |
+| Partial re-check | 2026-11-18 against `4aa269c9` (2026-11-13): **only** §13.4's `text-entity` entry and §9.13 `sources`, plus the upstream code behind `text-entity` — see the end of §2.3's `text-entity` bullet. Upstream `API.md` has +192/−7 lines since `df1495a7` (TEXT_INSTANCE_DATA opened in `927c0460`; OIDC); the rest of this digest has not been re-synced |
 | Upstream length at sync | 2774 lines (v2 chapters 1–14, plus a "舊版 API 文檔" v1 appendix) |
 | Earlier syncs | `b2df35f5` (2026-09-04), blob `ff842de6`, 2701 lines; before that `fd747aba` (2026-08-18), blob `948585d1`, 2667 lines |
 | Stamp convention | **commit** date (`git log -1 --format=%ci`), not author date — they differ by minutes here and by a day for `fd747aba` |
@@ -536,6 +537,13 @@ same collision creates.
   `dynasty_code`, `source_id` (**nullable** — the citation tree needs a root), `pages`,
   `url_api`, `url_api_coda`, `url_homepage`, `notes`, plus an `instances` array of
   edition rows (each requiring `edition_id` + `instance_id`; update reconciles the set).
+  **An absent `instances` is an empty list** (`$changes['instances'] ?? []` in
+  `ResolvesTextAggregateInput`, read 2026-11-18 at `4aa269c9`), so an update that
+  leaves the key out deletes every edition row — the opposite of `alt_names`. API.md
+  does not say this. Nor does it say that `GET /api/v2/texts/{id}` returns every
+  `TEXT_CODES` column (it does — the documented example shows only a few), which is
+  what makes the full-row read possible; the edition rows have no read at all.
+  Modelled here as `text_entity_aggregate` (update only) — `docs/04` §20.
 
 **Traps, in rough order of how much damage they do:**
 

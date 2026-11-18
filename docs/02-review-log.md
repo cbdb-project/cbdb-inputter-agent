@@ -3189,3 +3189,42 @@ start year 1084 and its 上元 12829 address row sourced to 27842 (371877;
 `alt_names_removed` 0, no notices); 王安石 → 4012 role 6 (371879). Read back: 4012
 equals what was sent field by field; `/api/v2/get` finds 1762 → 4012 and 404s on
 1762 → 945.
+
+## text-entity aggregate (update only) — 2026-11-18
+
+Case `jiangsu-yiwenzhi`. A contributor's note asked for five changes to `TEXT_CODES`
+66769 (title, pinyin, year, `c_source`, `c_notes`) and 63 citation page numbers. The
+bare `text_codes` update takes `c_title` only, so the row needed the `text-entity`
+aggregate, which this client did not model. The user chose to model it rather than
+edit the row through the web UI.
+
+Read upstream at `origin/develop` `4aa269c9` (API.md §13.4 and the code behind it:
+`TextAggregateDefinition`, `ResolvesTextAggregateInput`, `TextImportService`). What
+API.md does not say, and the client is built around:
+
+- **An absent `instances` is `[]`** (`$changes['instances'] ?? []`), and the update
+  reconciles the edition rows to the list, so leaving the key out deletes every
+  `TEXT_INSTANCE_DATA` row of the book — the opposite of `alt_names`. `instances` is
+  therefore required on every update (not overwrite-exempt).
+- `GET /api/v2/texts/{id}` returns every `TEXT_CODES` column (the documented example
+  shows a few), so the full-row read is one public request. The edition rows have no
+  read at all: composed from snapshot + the `TEXT_INSTANCE_DATA` operations since, the
+  replay of `read_alt_names` (operations carry the full row and the three-part key).
+
+Modelled narrowly: `text_entity_aggregate`, update only, alias `text-entity` only.
+Edition rows may only be carried across unchanged — `assert_instances_unchanged`
+before the request (live, compared as the server compares: ints, `""` = NULL),
+`assert_instances_write_changed_nothing` after (`instances_added`/`_removed`/
+`_updated` all 0, else `InstancesChangedError`, indeterminate). `docs/04` §20,
+`AGENTS.md` rule 12 (now seven modelled resources), `docs/07` §2.3 corrected and given
+a partial re-check stamp (only the text-entity entry and §9.13; the rest of the digest
+is still at `df1495a7`).
+
+The pre-existing uncommitted `text_instance_data` spec found in the working tree at the
+start of this session was not written in it; it is stashed
+(`stash@{0}`, "pre-existing uncommitted WIP: text_instance_data spec") and untouched.
+
+Batches staged: `2026-11-18-jiangsu-yiwenzhi-text` (1) and
+`2026-11-18-jiangsu-yiwenzhi-citations` (63), each from live reads (snapshot
+2026-11-14 downloaded for the edition-row baseline). Every citation's suggested page
+falls inside its volume's stated page range.
