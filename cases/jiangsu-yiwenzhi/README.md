@@ -28,12 +28,17 @@ relative's entry).
 
 | Batch | What | Status |
 |---|---|---|
-| `2026-11-18-jiangsu-yiwenzhi-text` | 1 `text-entity` update of 66769 | staged, not submitted |
-| `2026-11-18-jiangsu-yiwenzhi-citations` | 63 `sources` updates (`c_pages`) | staged, not submitted |
+| `2026-11-18-jiangsu-yiwenzhi-text` | 1 `text-entity` update of 66769 | **production**, operation 385814; edition counters all 0 |
+| `2026-11-18-jiangsu-yiwenzhi-citations` | 63 `sources` updates (`c_pages`) | **production**, 63/63, operations 385815–385877 |
 
 Each was built from a live read: the row from `GET /api/v2/texts/66769`; every citation
 from `GET /api/v2/get` (all 63 found). 66769 has no edition rows (snapshot
 2026-11-14 plus the operations log since).
+
+Verified after submission: `GET /api/v2/texts/66769` returns exactly the values sent
+(title, pinyin, year 2019, `c_source` NULL, the new note; every carried field
+unchanged); each of the 63 citations reads back under its new `c_pages`, and none
+under its old one.
 
 ## What this case taught the repo
 

@@ -3266,3 +3266,11 @@ codex re-review of the fix commit (891350d): no serious. One minor, left as is:
 Python's `\s` and PHP's `/\s/u` may disagree on some Unicode whitespace, which could
 make `normalize_title` refuse a title the server would keep. That errs toward
 refusing a correct write, never toward letting a rewritten value through.
+
+Submitted, at the user's go-ahead, with the `.env` gates opened for the two runs
+and restored byte for byte in the same command (after a live re-read of 66769
+showed no drift in any carried field): `2026-11-18-jiangsu-yiwenzhi-text`, operation
+385814, `instances_added`/`_removed`/`_updated` 0, the post-write read-back clean (no
+variant replacement); `2026-11-18-jiangsu-yiwenzhi-citations`, 63/63, operations
+385815–385877. Independent read-back: 66769 equals what was sent field by field;
+every citation is found under its new `c_pages` and not under its old one.
