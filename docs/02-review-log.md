@@ -3228,3 +3228,36 @@ Batches staged: `2026-11-18-jiangsu-yiwenzhi-text` (1) and
 `2026-11-18-jiangsu-yiwenzhi-citations` (63), each from live reads (snapshot
 2026-11-14 downloaded for the edition-row baseline). Every citation's suggested page
 falls inside its volume's stated page range.
+
+### codex pass on the text-entity change — 2 SERIOUS (1 valid, 1 mostly not), 1 MINOR
+
+1. *A carried TEXT_CODES value can come back rewritten* (title normalization, pinyin
+   folding or derivation, variant replacement) with nothing flagging it. Valid. Fixed
+   twice over: `assert_row_survives_normalization` (offline, runs in dry-run too)
+   refuses a title not already in `normalizeTitle()` form, a null pinyin (it would be
+   derived), a pinyin the server would fold, and any string with whitespace the
+   middleware trims; `assert_row_written_as_sent` reads the row back after the write
+   and stops the batch (`TextRowMismatchError`, indeterminate) on any column that
+   differs, or if it cannot be read. Variant replacement cannot be predicted (the
+   snapshot has no `char_variant_map`), so the read-back is the check for it.
+2. *A carried edition row can be normalized during the reconcile, detected only after
+   commit.* Mostly not so: the reconcile rewrites a row only when `$current !== $row`
+   after normalization, and the pre-flight already refuses any difference, so an
+   unchanged row is never re-derived. The one real path — a stored value with
+   surrounding whitespace, which the middleware trims off the sent copy — is now
+   refused before the request.
+3. MINOR: duplicate edition keys checked on raw values while the server compares
+   ints. Already closed by `integer_fields` (a string key is refused); a test now
+   shows it.
+
+### Review-agent pass on the text-entity change — no open serious; 5 minors
+
+Its one serious against the first commit (carried values rewritten by TrimStrings /
+variant replacement, padded edition strings, no read-back) is codex's #1/#2 above,
+already fixed. Minors, all fixed: the replay now takes an operation's book and
+edition from `resource_id` and both row images and refuses if they disagree (it read
+the after-image only); the docstring names the `crowdsourcing_status = 0` blind spot
+of `/api/v2/operations`; AGENTS.md rule 12 names `text-instance-data` (opened upstream
+`927c0460`, unmodelled); `type_id` must be a string (an unquoted YAML `02` is 2). It
+also confirmed the staged title batch produces the intended write, and that the
+replay matches every way upstream records TEXT_INSTANCE_DATA writes.

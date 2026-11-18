@@ -325,11 +325,14 @@ def make_api(tmp_path, *, dry_run):
 _CLEAN = {"instances_added": 0, "instances_removed": 0, "instances_updated": 0}
 
 
-def _send(tmp_path, monkeypatch, result, guard=lambda *a: None):
+def _send(tmp_path, monkeypatch, result, guard=lambda *a: None, stored=None):
     monkeypatch.setattr("cbdb_agent.mutation_api.assert_instances_unchanged", guard)
     monkeypatch.setattr("cbdb_agent.mutation_api.ensure_snapshot", lambda **kw: None)
     responses.add(responses.POST, "http://localhost:8000/api/v2/mutate",
                   json={"ok": True, "result": result})
+    # The read-back after the write: by default the row as sent.
+    responses.add(responses.GET, "http://localhost:8000/api/v2/texts/66769",
+                  json={"ok": True, "data": dict(stored or _TEXT_ROW)})
     return make_api(tmp_path, dry_run=False).update(
         "text_entity_aggregate", person_id=0, target_pk={"c_textid": 66769},
         changes=full_changes())
@@ -373,7 +376,7 @@ def test_a_write_that_touched_an_edition_stops_the_batch(tmp_path, monkeypatch, 
     with pytest.raises(tea.InstancesChangedError) as caught:
         _send(tmp_path, monkeypatch, result)
     assert caught.value.indeterminate is True
-    assert len(responses.calls) == 1                    # landed; nothing re-sent
+    assert [c.request.method for c in responses.calls] == ["POST"]   # nothing re-sent
 
 
 @responses.activate
@@ -421,3 +424,97 @@ def test_fetch_current_values_reports_unreadable_editions_as_an_error(monkeypatc
     state = fetch_current_values(_batch(full_changes()),
                                  _Api(FakeClient(text_route())))["text-1"]
     assert state.row is None and "snapshot" in state.error
+
+
+# --- what the server rewrites on the way in -----------------------------------------
+
+
+@pytest.mark.parametrize("title, stored", [
+    ("江蘇藝文志（增訂本）", "江蘇藝文志(增訂本)"),
+    ("江蘇藝文志 增訂本", "江蘇藝文志增訂本"),
+    ("書名：三卷", "書名: 三卷"),
+    ("書名:三卷", "書名: 三卷"),
+])
+def test_normalize_title_matches_the_server(title, stored):
+    assert tea.normalize_title(title) == stored
+
+
+@pytest.mark.parametrize("override, word", [
+    ({"title": "江蘇藝文志（增訂本）"}, "title"),
+    ({"title_pinyin": None}, "derive"),
+    ({"title_pinyin": "Jiang su yi wen zhi"}, "lower-cased"),
+    ({"title_pinyin": "jiang  su"}, "lower-cased"),
+    ({"title_pinyin": "lv shi"}, "lower-cased"),
+    ({"notes": "江慶柏 主編 "}, "notes"),
+    ({"type_id": 2}, "type_id"),
+])
+def test_a_value_the_server_would_rewrite_is_refused(override, word):
+    with pytest.raises(tea.TextEntityReadError, match=word):
+        tea.assert_row_survives_normalization(full_changes(**override))
+
+
+def test_the_staged_shape_survives_normalization():
+    tea.assert_row_survives_normalization(full_changes(
+        title="江蘇藝文志(增訂本)", title_pinyin="jiang su yi wen zhi (zeng ding ben)"))
+
+
+def test_the_normalization_check_runs_even_in_dry_run(tmp_path):
+    with pytest.raises(tea.TextEntityReadError):
+        make_api(tmp_path, dry_run=True).update(
+            "text_entity_aggregate", person_id=0, target_pk={"c_textid": 66769},
+            changes=full_changes(title="江蘇藝文志 增訂本"))
+
+
+@responses.activate
+def test_a_stored_row_that_differs_from_the_sent_one_stops_the_batch(tmp_path, monkeypatch):
+    """The server's variant replacement rewrote a carried note: a 200 is not enough."""
+    with pytest.raises(tea.TextRowMismatchError, match="notes") as caught:
+        _send(tmp_path, monkeypatch, _CLEAN, stored={**_TEXT_ROW, "c_notes": "江庆柏 主編"})
+    assert caught.value.indeterminate is True
+
+
+@responses.activate
+def test_an_unreadable_row_after_the_write_stops_the_batch(tmp_path, monkeypatch):
+    monkeypatch.setattr("cbdb_agent.mutation_api.assert_instances_unchanged", lambda *a: None)
+    monkeypatch.setattr("cbdb_agent.mutation_api.ensure_snapshot", lambda **kw: None)
+    responses.add(responses.POST, "http://localhost:8000/api/v2/mutate",
+                  json={"ok": True, "result": _CLEAN})
+    responses.add(responses.GET, "http://localhost:8000/api/v2/texts/66769", status=500)
+    with pytest.raises(tea.TextRowMismatchError, match="could not be read back"):
+        make_api(tmp_path, dry_run=False).update(
+            "text_entity_aggregate", person_id=0, target_pk={"c_textid": 66769},
+            changes=full_changes())
+
+
+def test_the_read_back_compares_values_not_types():
+    """2019 and "2019" are the same stored value; "" and None are both NULL."""
+    client = FakeClient(text_route({**_TEXT_ROW, "c_text_year": "2019", "c_pages": ""}))
+    tea.assert_row_written_as_sent(client, 66769, full_changes(year=2019))
+
+
+def test_an_edition_with_padded_text_cannot_be_carried(snapshot):
+    con = sqlite3.connect(snapshot)
+    con.execute("update TEXT_INSTANCE_DATA set c_publisher = '某局 ' where c_textid = 500")
+    con.commit()
+    con.close()
+    with pytest.raises(tea.TextEntityReadError, match="whitespace"):
+        tea.assert_instances_unchanged(FakeClient(operations()), snapshot, 500,
+                                       [edition(publisher="某局 ")])
+
+
+def test_a_string_edition_key_is_refused_before_it_can_collide():
+    """"01" and 1 are one key to the server; the row shape refuses the string."""
+    with pytest.raises(FieldWhitelistError):
+        SPEC.validate_changes("update", full_changes(
+            instances=[edition(), edition(edition_id="01")]))
+
+
+def test_an_operation_whose_images_name_different_books_refuses(snapshot):
+    """Taking the key from the after-image alone would skip a move away from 500
+    and keep a stale row."""
+    op = _inst_op(1, 3, 7)
+    op["resource_original"] = {"c_textid": 500, "c_text_edition_id": 1,
+                               "c_text_instance_id": 1}
+    op["resource_id"] = None
+    with pytest.raises(tea.TextEntityReadError, match="images disagree"):
+        tea.read_instances(FakeClient(operations(op)), snapshot, 500)

@@ -38,6 +38,8 @@ from .social_institution_aggregate import (
 from .text_entity_aggregate import (
     assert_instances_unchanged,
     assert_instances_write_changed_nothing,
+    assert_row_survives_normalization,
+    assert_row_written_as_sent,
 )
 
 
@@ -262,6 +264,10 @@ class MutationApi:
         # all"), and those rows have no API read either. This client only carries
         # them across unchanged: check that against the live operations log here,
         # and the server's counters after the write. Skipped under dry-run.
+        if spec.key == "text_entity_aggregate":
+            # Offline, so it runs under dry-run too: refuse a value the server
+            # would visibly rewrite (title, pinyin, trimmed strings).
+            assert_row_survives_normalization(changes)
         checks_instances = (not self._client.dry_run
                             and spec.key == "text_entity_aggregate")
         if checks_instances:
@@ -301,6 +307,9 @@ class MutationApi:
                 response, int(target_pk["c_inst_code"]), expected_removed=len(removed))
         if checks_instances:
             assert_instances_write_changed_nothing(response, int(target_pk["c_textid"]))
+            # And the row itself: what the server's variant replacement did to a
+            # carried value cannot be predicted, only read back.
+            assert_row_written_as_sent(self._client, int(target_pk["c_textid"]), changes)
         return response
 
     def delete(

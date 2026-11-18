@@ -373,6 +373,10 @@ user how old the build is instead of quietly trusting it.
     `char_variant_map`, and — new — **`ADDR_CODES`, `ADDR_BELONGS_DATA`,
     `ADMIN_CAT_CODES` and `OFFICE_TYPE_TREE`**, each with a matching `update`
     registered in `config/code_table_mutations.php` over the same column set.
+    A seventh, **`TEXT_INSTANCE_DATA`** (`text-instance-data`, create and update),
+    was opened upstream in `927c0460` (2026-11-05) and is **not modelled** here;
+    don't mix it with `text-entity` for the same book — the aggregate's next update
+    deletes any edition row it was not sent (API.md 13.2).
     "Matching" means the whitelists agree, not that the write is a full-row
     overwrite: a code-table `update` is **per-field** (omit a column and it keeps its
     value; an empty `changes` is a 422). Full-row overwrite is the *aggregate*
