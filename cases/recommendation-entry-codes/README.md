@@ -19,7 +19,7 @@ because candidates were summoned by imperial edict.
 
 | Batch id | Proposals | Outcome |
 |---|---|---|
-| `2026-11-19-recommendation-entry-codes` | 3 (`entry-codes` / create) | staged, not yet submitted |
+| `2026-11-19-recommendation-entry-codes` | 3 (`entry-codes` / create) | submitted 2026-11-19: production answered `501 目前尚未支援此變更模式` on ec1 (upstream `407a4e02` not yet deployed there). Nothing written: live search finds none of the three names, and there are no ENTRY_CODES operations since 2026-11-19. To re-submit once deployed |
 
 ## Checked before creating
 
