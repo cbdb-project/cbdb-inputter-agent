@@ -484,9 +484,11 @@ def find_issues(batch: StagingBatch) -> list[Issue]:
                     message=f"target_pk has field(s) not in this resource's PK: {sorted(unknown_pk)}",
                 )
             )
-        # A text key column ("08", not 8) - in either slot, since mutation_api moves
-        # key columns between them. A `{"ref": ...}` is never a text key's value.
-        for message in spec.text_key_errors({**(p.changes or {}), **(p.target_pk or {})}):
+        # A text key column ("08", not 8). Checked in target_pk only: a key column
+        # in `changes` is refused by the whitelist above unless it is also a
+        # writable field, and none of today's text keys is. A `{"ref": ...}` is
+        # never a text key's value.
+        for message in spec.text_key_errors(p.target_pk or {}):
             issues.append(Issue(proposal_id=p.id, severity="error", message=message))
 
         # Field whitelist (including pseudo-fields) for changes.

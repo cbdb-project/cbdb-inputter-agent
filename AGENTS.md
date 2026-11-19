@@ -263,12 +263,13 @@ user how old the build is instead of quietly trusting it.
     yourself via `/api/v2/get` and compare — don't infer it from the exit code.
     **One exception, of capability rather than judgement — and it is narrower than
     "these resources cannot be read".** `/api/v2/get`'s resource table
-    (`API.md` §566–581) covers the 13 person resources plus `nianhao`; anything else
+    (`API.md` §566–581) covers the 13 person resources plus `nianhao` and, since
+    upstream `a9fb97a5`, `entry-code-type-rel` (whose read-back is therefore an
+    ordinary `/api/v2/get`); anything else
     is `501 目前尚未支援此取得模式`, which is the documented answer there, not a
     failure. So read back through the **public lookups** instead, which several of
     these do have: `GET /api/select/search/addr` or `/api/code/addr` for `ADDR_CODES`,
-    `GET /api/select/search/entry` for `ENTRY_CODES`, and `/api/v2/get` itself
-    for `entry-code-type-rel`, the one code table it answers for besides `nianhao`,
+    `GET /api/select/search/entry` for `ENTRY_CODES`,
     `GET /api/select/search/office` for `office` (`docs/07` §2.3 — this is why
     `fetch_current_values()` reports "couldn't fetch" for an aggregate proposal).
     `ADDR_BELONGS_DATA`, `ADMIN_CAT_CODES`, `char_variant_map` and `OFFICE_TYPE_TREE`
@@ -428,7 +429,8 @@ user how old the build is instead of quietly trusting it.
       *changed* by proposal but not *added to*.
     - **No `/api/v2/get`.** `API.md` §13.2 words this as "no `/api/v2/read`
       definition", but the endpoint is `/api/v2/get` and for these six it answers
-      `501`; among the code tables only `nianhao` has one. `ADDR_CODES` is still
+      `501`; among the code tables only `nianhao` and the link table
+      `entry-code-type-rel` have one. `ADDR_CODES` is still
       readable through the public lookups (`/api/select/search/addr`,
       `/api/code/addr`) — which is what makes its duplicate check an ordinary live
       query. The other five have no read surface at all, so take `result.pk` **and**
