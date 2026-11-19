@@ -3322,3 +3322,28 @@ jamo. codex re-review: no serious; caveat that Python's Unicode tables must agre
 with the server's. Review-agent minors fixed: the docstring's completeness claim,
 plus tests for Ω (U+2126) and が. Left as is: picking the longest run rather than the
 rarest may trip the page cap, which fails closed.
+
+## 2026-11-20 — entry-code-type-rel (ENTRY_CODE_TYPE_REL), create only
+
+Upstream opened the link table in `a9fb97a5`/`23bd0434` (API.md §13.2a); a live
+`/api/v2/get` for 101/`"08"` and 14/`"07"` returned the rows, so it is deployed. Modelled
+as `entry_code_type_rel`: two-column key, nothing writable, no update; upstream's
+`delete` deliberately not modelled. New `ResourceSpec.text_key_fields`: `c_entry_type`
+must be the exact string (`"08"`), checked in staging and before create and get, since
+an unquoted YAML `08` is the integer 8 (422 on create, 404 on delete or get). No client
+duplicate check: the server answers 409 for an existing link. `PK_REF_TARGETS` lets
+`c_entry_code` reference an `entry-codes` create in the same batch. docs/07 partially
+re-synced for §13.2a only. Batch `2026-11-20-recommendation-entry-codes-type-rel`
+staged (350 and 351 to `08` 薦舉門, 352 to `07` 徵召門, following 101/330 and 14).
+
+### Review-agent pass — no serious; 4 minors
+
+Checked the production envelope through `run_batch` with a capturing client, the
+ref path through batch_runner and resume, and the staged mapping against the
+snapshot. Fixed: the "get covers only person resources and `nianhao`" statements in
+AGENTS.md, docs/04 and docs/07 now name `entry-code-type-rel`; the staging text-key
+check reads `target_pk` only, with a corrected comment; `MutationApi.get` applies the
+text-key check too. Left: the client refuses `" 08 "`, which the server would trim
+(the stricter direction); docs/10 and docs/11 are about `office`, still unreadable.
+
+### codex pass — no defects found

@@ -432,7 +432,7 @@ Rules that apply to the whole set:
   table but not add to it.
 - **No `/api/v2/get`.** `API.md` §13.2 words it as "no `/api/v2/read` definition";
   the endpoint is `/api/v2/get` and for these six it answers `501` (among code tables
-  only `nianhao` has one). That is not the same as "unreadable": `ADDR_CODES` has two
+  only `nianhao` has one, plus the link table `entry-code-type-rel` since `a9fb97a5`). That is not the same as "unreadable": `ADDR_CODES` has two
   sanctioned public lookups, `GET /api/select/search/addr` and `GET /api/code/addr`,
   and `OFFICE_CODES` has `/api/select/search/office`. `ADDR_BELONGS_DATA`,
   `ADMIN_CAT_CODES`, `char_variant_map` and `OFFICE_TYPE_TREE` have none, and for
@@ -570,7 +570,8 @@ same collision creates.
   three aggregates need a client-side pre-create check; only the shape of what gets
   duplicated differs.
 - **`/api/v2/get` cannot read any of them.** `MutationReadService` covers 13 person
-  resources plus `nianhao` (14 definitions in total) and nothing else — `resolve('office')`
+  resources plus `nianhao` (14 definitions as of this sync; `a9fb97a5` added
+  `entry-code-type-rel`, a code table, not an aggregate) — `resolve('office')`
   returns `null`. So rule 11's read-back has to go through
   `GET /api/select/search/office` (or `socialinst`, or `GET /api/v2/texts`) instead, and
   `batch_runner.fetch_current_values()` will report "couldn't fetch" for an `office`

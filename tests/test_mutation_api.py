@@ -438,6 +438,16 @@ def test_entry_code_type_rel_reads_back_through_get(tmp_path):
     assert sent["target"]["pk"] == {"c_entry_code": 350, "c_entry_type": "08"}
 
 
+@responses.activate
+def test_entry_code_type_rel_get_refuses_an_integer_type(tmp_path):
+    api = make_api(tmp_path)
+    with pytest.raises(FieldWhitelistError, match="c_entry_type"):
+        api.get("entry_code_type_rel", person_id=0,
+                target_pk={"c_entry_code": 350, "c_entry_type": 8},
+                resource_string="entry-code-type-rel")
+    assert len(responses.calls) == 0
+
+
 # --- office entity aggregate: the wire envelope, and the whitelist ---------
 
 

@@ -375,6 +375,10 @@ class MutationApi:
         """
         spec = get_resource_spec(resource_key)
         alias = resource_string or spec.key
+        text_key_errors = spec.text_key_errors(target_pk)
+        if text_key_errors:
+            # A read-back with "8" for "08" would answer 404 for a row that exists.
+            raise FieldWhitelistError("; ".join(text_key_errors))
         envelope = {"resource": alias, "person_id": person_id, "target": {"pk": target_pk}}
         return self._client.get("/api/v2/get", json_body=envelope, resource=spec.key)
 

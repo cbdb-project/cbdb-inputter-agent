@@ -471,7 +471,7 @@ and the worked batch: **`docs/10-office-aggregate-design.md`**. What `models.py`
   name legitimately recurs across dynasties (`知州` exists separately for Tang, Yuan,
   Ming and Qing).
 - **`/api/v2/get` cannot read this resource** (`MutationReadService` covers 13 person
-  resources plus `nianhao`), so rule 11's read-back goes through
+  resources plus `nianhao`, and since 2026-11-20 `entry-code-type-rel` — §22), so rule 11's read-back goes through
   `GET /api/select/search/office` and `batch_runner.fetch_current_values()` reports
   "couldn't fetch" for an aggregate proposal — expected, not a bug.
 
