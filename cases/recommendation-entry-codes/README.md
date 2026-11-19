@@ -24,6 +24,7 @@ because candidates were summoned by imperial edict.
 | `2026-11-19-recommendation-entry-codes-ningzhi-beikao` | 2 (`text-codes` create 《寧志備考:十二卷》; `texts` create, 趙維寰 560105 as 編纂者) | refused client-side: the title has 16 compatibility spellings, past the duplicate check's cap. Nothing sent; the check was extended (`docs/02`, 2026-11-19) |
 | `2026-11-19-recommendation-entry-codes-ningzhi-beikao-retry` | 2 (resumed) | **in production, verified**: TEXT_CODES **72269**, linked to 560105 (operations 386190–386191) |
 | `2026-11-19-recommendation-entry-codes-zhao-weihuan-merge` | 3 (`sources` 63342, `texts` 63120 and 63121, all on 560105) | **in production, verified** (operations 386192–386194) |
+| `2026-11-20-recommendation-entry-codes-type-rel` | 3 (`entry-code-type-rel` / create) | **in production, verified** by `/api/v2/get`: 350 and 351 under `08` 薦舉門, 352 under `07` 徵召門 (operations 386327–386329) |
 
 ## 趙維寰: two records
 
@@ -40,7 +41,11 @@ A live `/api/select/search/entry` search for 經明, 稅戶, 懷才 and 人才 f
 徵辟 matched only code 14, the generic category. The 2026-11-14 snapshot's maximum
 code was 349. The client checks the exact Chinese name live again before each create.
 
-## Not done here
+## Entry types
 
-`ENTRY_CODE_TYPE_REL` (a code's entry type) has no API write path. Linking the three
-new codes to their types is a `/codes` UI job.
+`ENTRY_CODE_TYPE_REL` had no API write path on 2026-11-19. Upstream opened it in
+`a9fb97a5`/`23bd0434`, and this repo modelled it as `entry-code-type-rel`
+(`docs/04` §22) on 2026-11-20. The types follow the existing codes of the same kind:
+101 薦舉 and 330 are under `08` 薦舉門, and 14 徵辟 is under `07` 徵召門. Neither type
+has sub-types. Persons' `c_index_year` picks the links up at upstream's next
+`cbdb:rebuild-index-year`.
