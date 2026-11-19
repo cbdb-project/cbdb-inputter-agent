@@ -112,6 +112,7 @@ GLOBAL_REFERENCE_TABLES = {
     "addr_codes": "ADDR_CODES",
     "addr_belongs_data": "ADDR_BELONGS_DATA",
     "admin_cat_codes": "ADMIN_CAT_CODES",
+    "entry_codes": "ENTRY_CODES",
     "text_codes": "TEXT_CODES",
     "text_entity_aggregate": "TEXT_CODES (+ TEXT_INSTANCE_DATA)",
     "office": "OFFICE_CODES (+ OFFICE_CODE_TYPE_REL)",

@@ -330,6 +330,56 @@ def test_a_short_text_search_answer_is_not_a_clean_one(tmp_path):
     assert not [c for c in responses.calls if c.request.method == "POST"]
 
 
+# --- entry-codes: envelope and live duplicate check (upstream 407a4e02) -------------
+
+
+@responses.activate
+def test_entry_codes_create_envelope_after_a_clean_duplicate_check(tmp_path):
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/entry",
+        json={"data": [{"c_entry_code": 14, "c_entry_desc_chn": "徵辟"}],
+              "last_page": 1, "total": 1}, status=200,
+    )
+    _ok_create()
+    api = make_api(tmp_path)
+    api.create("entry_codes", person_id=0, target_pk={},
+               changes={"c_entry_desc": "Imperial summons: X",
+                        "c_entry_desc_chn": "徵辟: 懷才抱德科"},
+               resource_string="entry-codes")
+    sent = json.loads(responses.calls[-1].request.body)
+    assert sent["resource"] == "entry-codes"
+    assert sent["mode"] == "direct"
+    assert sent["target"] == {"pk": {}}
+    assert "c_entry_code" not in sent["changes"]
+
+
+@responses.activate
+def test_an_entry_codes_create_is_stopped_by_an_existing_name(tmp_path):
+    from cbdb_agent.preflight import PreflightError
+
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/entry",
+        json={"data": [{"c_entry_code": 350, "c_entry_desc_chn": "徵辟: 懷才抱德科"}],
+              "last_page": 1, "total": 1}, status=200,
+    )
+    api = make_api(tmp_path)
+    with pytest.raises(PreflightError, match="350"):
+        api.create("entry_codes", person_id=0, target_pk={},
+                   changes={"c_entry_desc": "x", "c_entry_desc_chn": "徵辟: 懷才抱德科"},
+                   resource_string="entry-codes")
+    assert not [c for c in responses.calls if c.request.method == "POST"]
+
+
+@responses.activate
+def test_an_entry_codes_create_needs_both_names(tmp_path):
+    api = make_api(tmp_path)
+    with pytest.raises(FieldWhitelistError, match="c_entry_desc"):
+        api.create("entry_codes", person_id=0, target_pk={},
+                   changes={"c_entry_desc_chn": "徵辟: 懷才抱德科"},
+                   resource_string="entry-codes")
+    assert len(responses.calls) == 0
+
+
 # --- office entity aggregate: the wire envelope, and the whitelist ---------
 
 
@@ -731,3 +781,21 @@ def test_a_source_with_a_page_is_sent_as_it_is(tmp_path):
     api.create("sources", person_id=1762,
                target_pk={"c_personid": 1762, "c_textid": 72223, "c_pages": "卷一"}, changes={})
     assert json.loads(responses.calls[-1].request.body)["target"]["pk"]["c_pages"] == "卷一"
+
+
+@responses.activate
+def test_an_entry_search_row_without_its_code_is_not_a_clean_answer(tmp_path):
+    from cbdb_agent.preflight import PreflightError
+
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/entry",
+        json={"data": [{"c_entry_desc_chn": "other"}], "last_page": 1, "total": 1},
+        status=200,
+    )
+    api = make_api(tmp_path)
+    with pytest.raises(PreflightError, match="without c_entry_code"):
+        api.create("entry_codes", person_id=0, target_pk={},
+                   changes={"c_entry_desc": "x", "c_entry_desc_chn": "徵辟: 懷才抱德科"},
+                   resource_string="entry-codes")
+    assert not [c for c in responses.calls if c.request.method == "POST"]
+

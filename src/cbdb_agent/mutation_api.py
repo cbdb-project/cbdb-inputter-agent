@@ -26,6 +26,7 @@ from .http_client import HttpClient
 from .models import FieldWhitelistError, get_resource_spec
 from .preflight import (
     assert_addr_create_is_not_a_duplicate,
+    assert_entry_create_is_not_a_duplicate,
     assert_office_create_is_not_a_duplicate,
     assert_text_create_is_not_a_duplicate,
 )
@@ -149,8 +150,8 @@ class MutationApi:
 
         # Pre-create duplicate checks, for the resources where the server has no
         # guard of its own: `office`, whose create allocates max+1 and inserts with
-        # no name lookup, and `addr_codes` and `text_codes`, which have no unique key
-        # on their name column and no delete path.
+        # no name lookup, and `addr_codes`, `text_codes` and `entry_codes`, which
+        # have no unique key on their name column and no delete path.
         #
         # They live HERE, at the layer that actually sends the request, and not only
         # where a batch is generated. Two reasons. A guard that exists only in
@@ -196,6 +197,9 @@ class MutationApi:
             elif spec.key == "text_codes":
                 assert_text_create_is_not_a_duplicate(
                     self._client, title=merged_changes.get("c_title_chn"))
+            elif spec.key == "entry_codes":
+                assert_entry_create_is_not_a_duplicate(
+                    self._client, name=merged_changes.get("c_entry_desc_chn"))
             elif spec.key == "social_institution_aggregate":
                 # The server mints a new c_inst_code on every create (it reuses
                 # only the name code), so a re-run is a second institution.

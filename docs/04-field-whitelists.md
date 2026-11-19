@@ -676,6 +676,41 @@ What `models.py` encodes:
 - **`is_global_reference_data = True`** (rule 12). The aggregate is deletable
   upstream while unreferenced; a TEXT_CODES row with person citations is not.
 
+## 21. entry_codes (`ENTRY_CODES`) — a code table, not person data ⚠️
+
+Opened upstream in `407a4e02` (2026-11-19; `API.md` §13.1/§13.2, upstream
+`docs/ENTRY_CODES_V2_WRITE_PLAN.md`). Aliases `entry-codes`/`entry_codes`/`entrycodes`
+— **not** `entry`/`entries`/`entry_data`, which are the person sub-resource
+`ENTRY_DATA` (§ above).
+
+| field | notes |
+|---|---|
+| `c_entry_desc` | English description (not pinyin — no v→ü). **Required by this client** |
+| `c_entry_desc_chn` | Chinese name. **Required by this client** |
+
+PK `c_entry_code` (smallint), server-assigned as `max(0, current max)+1` unless sent
+in `target_pk`; a full table answers 422 `auto_assign_exhausted`. CBDB groups entry
+codes in ranges by category, so a code meant for a particular range must be sent
+explicitly. This client leaves it server-assigned.
+
+- **Create and update, symmetric whitelists; delete 403.** The table is the FK target
+  of `ENTRY_DATA.c_entry_code` and `ENTRY_CODE_TYPE_REL.c_entry_code`.
+- **Both columns are `NOT NULL DEFAULT ''` and cannot be cleared through the API:**
+  `null` is a 422, and a JSON `""` becomes `null` in middleware first. Omitting one on
+  create stores `''`, which is why both are required here.
+- **No unique key on the name.** Live duplicate check before every create:
+  `preflight.assert_entry_create_is_not_a_duplicate` reads every page of
+  `/api/select/search/entry?q=` (a Laravel paginator, 20 a page, rows carry
+  `c_entry_code`/`c_entry_desc`/`c_entry_desc_chn`) and refuses on an exact
+  `c_entry_desc_chn` match.
+- **No `/api/v2/get`**; read back through `/api/select/search/entry` or the create
+  response's `result.pk`/`result.row`.
+- **No audit columns**; operator and time are in `operations`/`audit_log`.
+- **Same-batch reference:** an `entries` (`ENTRY_DATA`) row may cite a code created
+  earlier in the batch as `c_entry_code: {"ref": "<proposal id>"}` (`PK_REF_TARGETS`).
+- **`ENTRY_CODE_TYPE_REL` is not writable through the API.** A new code's link to its
+  entry type is still a `/codes` UI job.
+
 ## Source citations
 
 - `app/Support/CompositePrimaryKey.php` (`SCHEMAS` const) — authoritative PK schema

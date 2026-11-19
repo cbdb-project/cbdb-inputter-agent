@@ -256,6 +256,7 @@ def test_required_create_fields_is_only_set_where_intended():
         "office",
         "addr_codes",         # c_name_chn - a nameless place is unusable
         "admin_cat_codes",    # both name columns, and an FK target besides
+        "entry_codes",        # both name columns: NOT NULL, unclearable via API
         "social_institution_aggregate",  # an institution with no name/place/source
     }
 
@@ -310,6 +311,7 @@ def test_the_global_reference_data_inventory():
         "addr_codes", "addr_belongs_data", "admin_cat_codes",
         "social_institution_aggregate",
         "text_entity_aggregate",   # 2026-11-18, the 江蘇藝文志 (66769) correction
+        "entry_codes",             # 2026-11-19, upstream 407a4e02
     }
 
 
@@ -712,7 +714,7 @@ def test_office_update_requires_the_known_id():
 # column; check the column names themselves against `pragma table_info` on the weekly
 # SQLite snapshot. Never against another copy of this file.
 CODE_TABLE_SPECS = (
-    "addr_codes", "addr_belongs_data", "admin_cat_codes", "text_codes",
+    "addr_codes", "addr_belongs_data", "admin_cat_codes", "text_codes", "entry_codes",
 )
 
 
@@ -738,7 +740,7 @@ def test_the_code_tables_opened_in_2026_09_have_symmetric_create_and_update_sets
     `text_codes` is excluded on purpose - it predates that registry and really is
     asymmetric, so including it here would push someone to "fix" a difference that
     upstream intends."""
-    for key in ("addr_codes", "addr_belongs_data", "admin_cat_codes"):
+    for key in ("addr_codes", "addr_belongs_data", "admin_cat_codes", "entry_codes"):
         spec = RESOURCE_SPECS[key]
         assert spec.create_fields == spec.update_fields, key
 
@@ -795,3 +797,38 @@ def test_admin_cat_codes_requires_both_name_columns():
         {"c_admin_cat_py", "c_admin_cat_hz"}
     )
     assert spec.server_assigned_pk_fields == frozenset({"c_admin_cat_code"})
+
+
+def test_entry_codes_is_exactly_the_registry_entry():
+    """Source: config/code_table_writes.php + code_table_mutations.php, `ENTRY_CODES`
+    (upstream 407a4e02). Both name columns are NOT NULL and unclearable through the
+    API, so both are required on create."""
+    spec = get_resource_spec("entry_codes")
+    assert spec.create_fields == frozenset({"c_entry_desc", "c_entry_desc_chn"})
+    assert spec.pk_fields == ("c_entry_code",)
+    assert spec.server_assigned_pk_fields == frozenset({"c_entry_code"})
+    assert spec.required_create_fields == frozenset({"c_entry_desc", "c_entry_desc_chn"})
+    assert spec.delete_aliases == frozenset()
+
+
+def test_entry_codes_aliases_do_not_collide_with_the_person_entry_subresource():
+    """`entry`/`entries`/`entry_data` are ENTRY_DATA, one person's entry record; a
+    near-miss must never be routed to (or labelled as) the code table."""
+    from cbdb_agent.models import find_spec_by_alias, global_reference_aliases
+
+    marked = global_reference_aliases()
+    for person_alias in ("entry", "entries", "entry_data"):
+        assert person_alias not in marked, person_alias
+        assert find_spec_by_alias(person_alias).key != "entry_codes"
+    for code_alias in ("entry-codes", "entry_codes", "entrycodes"):
+        assert code_alias in marked, code_alias
+        assert find_spec_by_alias(code_alias).key == "entry_codes"
+
+
+def test_every_global_reference_resource_has_a_review_group_label():
+    """Otherwise the review page heads its rows "person_id 0, which is not a person",
+    the label meant for a staging mistake (entry_codes was missed once, 2026-11-19)."""
+    from cbdb_agent.review import GLOBAL_REFERENCE_TABLES
+
+    marked = {k for k, v in RESOURCE_SPECS.items() if v.is_global_reference_data}
+    assert marked <= set(GLOBAL_REFERENCE_TABLES), sorted(marked - set(GLOBAL_REFERENCE_TABLES))

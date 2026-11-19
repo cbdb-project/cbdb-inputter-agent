@@ -1195,6 +1195,38 @@ RESOURCE_SPECS["admin_cat_codes"] = ResourceSpec(
 )
 
 
+# --- ENTRY_CODES (入仕途徑代碼). AGENTS.md rule 12 applies. -------------------------
+#
+# Opened upstream in `407a4e02` (2026-11-19; API.md 13.1/13.2,
+# `docs/ENTRY_CODES_V2_WRITE_PLAN.md` there), modelled here the same day. Create and
+# update, symmetric whitelists, no delete (403, API.md 13.3) - the table is the FK
+# target of ENTRY_DATA.c_entry_code and ENTRY_CODE_TYPE_REL.
+#
+# ALIASES: `entry-codes`/`entry_codes`/`entrycodes` only. `entry`/`entries`/
+# `entry_data` are the PERSON sub-resource ENTRY_DATA (one person's entry record),
+# and upstream chose these spellings precisely to stay clear of them - so must we.
+#
+# Both columns are `NOT NULL DEFAULT ''` and, through a JSON request, cannot be
+# cleared afterwards ('' is turned into null by middleware, then 422). Omitting one
+# on create silently stores ''. Hence both required on create here: a code with no
+# name is unusable, undeletable and unrenameable-to-blank. The key is a smallint;
+# the server assigns max+1, so the new code lands after the current maximum.
+# ENTRY_CODE_TYPE_REL (code -> entry type) is NOT writable through the API; linking
+# a new code to its type is still a /codes UI job for a human.
+RESOURCE_SPECS["entry_codes"] = ResourceSpec(
+    key="entry_codes",
+    create_aliases=frozenset({"entry-codes", "entry_codes", "entrycodes"}),
+    update_aliases=frozenset({"entry-codes", "entry_codes", "entrycodes"}),
+    delete_aliases=frozenset(),   # 403 server-side on every code table
+    pk_fields=("c_entry_code",),
+    server_assigned_pk_fields=frozenset({"c_entry_code"}),
+    create_fields=frozenset({"c_entry_desc", "c_entry_desc_chn"}),
+    update_fields=frozenset({"c_entry_desc", "c_entry_desc_chn"}),
+    is_global_reference_data=True,
+    required_create_fields=frozenset({"c_entry_desc", "c_entry_desc_chn"}),
+)
+
+
 # Where a cross-proposal `{"ref": "<proposal id>"}` may appear, and what it may
 # point at: {resource key: {field: the resource key the value must come from}}.
 #
@@ -1228,7 +1260,8 @@ PK_REF_TARGETS: dict[str, dict[str, str]] = {
     "possessions": {"c_addr_id": "addr_codes", "c_source": "text_codes"},
     "addresses": {"c_addr_id": "addr_codes", "c_source": "text_codes"},
     "altnames": {"c_source": "text_codes"},
-    "entries": {"c_source": "text_codes"},
+    # c_entry_code: a new ENTRY_CODES row cited in the same batch (2026-11-19).
+    "entries": {"c_source": "text_codes", "c_entry_code": "entry_codes"},
     "statuses": {"c_source": "text_codes"},
     "social_institutions": {"c_source": "text_codes"},
     "texts": {"c_textid": "text_codes", "c_source": "text_codes"},

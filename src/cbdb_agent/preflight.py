@@ -452,12 +452,19 @@ def find_text_title_matches(client: HttpClient, title: str) -> list[dict[str, An
     wanted = _canonical(str(title))
     seen: dict[str, dict[str, Any]] = {}
     for spelling in _spellings(wanted):
-        seen.update(_text_search_all_pages(client, spelling))
+        seen.update(_paged_search(client, _TEXT_SEARCH_PATH, spelling,
+                                  id_field="c_textid", what="text"))
     return [row for row in seen.values()
             if _canonical(str(row.get("c_title_chn") or "")) == wanted]
 
 
-def _text_search_all_pages(client: HttpClient, query: str) -> dict[str, dict[str, Any]]:
+def _paged_search(client: HttpClient, path: str, query: str, *,
+                  id_field: str, what: str) -> dict[str, dict[str, Any]]:
+    """Every page of a paginated `/api/select/search/<table>?q=` answer, by id.
+
+    Any doubt about completeness is a PreflightError, never an empty result: a
+    missing paginator, more pages than the cap, or fewer distinct rows than `total`.
+    """
     seen: dict[str, dict[str, Any]] = {}
     page = 1
     while True:
@@ -465,35 +472,86 @@ def _text_search_all_pages(client: HttpClient, query: str) -> dict[str, dict[str
         if page > 1:
             params["page"] = page
         try:
-            body = client.get(_TEXT_SEARCH_PATH, params=params, public=True)
+            body = client.get(path, params=params, public=True)
         except (AuthenticationError, AuthorizationError, RateLimitedError):
             raise                    # batch-wide, see _search_all_pages
         except CbdbApiError as exc:
             raise PreflightError(
-                f"text-title duplicate check failed on page {page} ({exc}) - "
+                f"{what} duplicate check failed on page {page} ({exc}) - "
                 "refusing to treat a failed check as a clean one") from exc
         for row in _rows(body):
-            seen[str(row.get("c_textid"))] = row
+            row_id = row.get(id_field) if isinstance(row, dict) else None
+            if row_id is None or str(row_id).strip() == "":
+                # Rows without an id would all collapse onto one key and make the
+                # distinct-count check below meaningless.
+                raise PreflightError(
+                    f"{what} search for {query!r} returned a row without "
+                    f"{id_field}, so its completeness cannot be checked")
+            seen[str(row_id)] = row
         last_page, total = body.get("last_page"), body.get("total")
         if (not isinstance(last_page, int) or isinstance(last_page, bool)
                 or not isinstance(total, int) or isinstance(total, bool)):
             raise PreflightError(
-                f"text search for {query!r} came back without the paginator's "
+                f"{what} search for {query!r} came back without the paginator's "
                 f"last_page/total (keys: {sorted(body)[:8]}), so whether page {page} "
                 "was the whole answer cannot be told")
         if last_page > _PAGE_CAP:
             raise PreflightError(
-                f"text title {query!r} matches {total} rows over {last_page} "
+                f"{what} {query!r} matches {total} rows over {last_page} "
                 f"pages, past this check's {_PAGE_CAP}-page cap. Verify by hand "
-                "before creating the title.")
+                "before creating it.")
         if last_page <= page:
             if len(seen) != total:
                 raise PreflightError(
-                    f"text search for {query!r} reported {total} rows but "
+                    f"{what} search for {query!r} reported {total} rows but "
                     f"{len(seen)} distinct ones came back; an exact match could be "
                     "the one skipped")
             return seen
         page += 1
+
+
+_ENTRY_SEARCH_PATH = "/api/select/search/entry"
+
+
+def find_entry_name_matches(client: HttpClient, name: str) -> list[dict[str, Any]]:
+    """Live ENTRY_CODES rows whose `c_entry_desc_chn` is exactly `name`.
+
+    Same shape as the text-title check: `/api/select/search/entry` is a paginated
+    substring search (a Laravel paginator, 20 a page, measured 2026-11-19), so every
+    page is read, every byte-distinct spelling is searched, and the match is exact.
+
+    Known blind spots, shared with the other name checks here: upstream applies
+    character-variant replacement (異體字落地替換) on write, so a row stored under a
+    variant form of `name` is not found; and `\\` is MySQL's LIKE escape, so a name
+    containing a backslash is not searched literally.
+    """
+    wanted = _canonical(str(name))
+    seen: dict[str, dict[str, Any]] = {}
+    for spelling in _spellings(wanted):
+        seen.update(_paged_search(client, _ENTRY_SEARCH_PATH, spelling,
+                                  id_field="c_entry_code", what="entry-code"))
+    return [row for row in seen.values()
+            if _canonical(str(row.get("c_entry_desc_chn") or "")) == wanted]
+
+
+def assert_entry_create_is_not_a_duplicate(client: HttpClient, *, name: str) -> None:
+    """Raise if a live ENTRY_CODES row already has this `c_entry_desc_chn`.
+
+    The column has no unique key and the table no delete (API.md 13.2/13.3): a
+    second code for one entry method splits every ENTRY_DATA row between two codes
+    for good. Live, never from the snapshot.
+    """
+    if not str(name or "").strip():
+        raise PreflightError(
+            "cannot check an ENTRY_CODES create for duplicates without a "
+            "c_entry_desc_chn")
+    matches = find_entry_name_matches(client, name)
+    if matches:
+        codes = ", ".join(str(m.get("c_entry_code")) for m in matches)
+        raise PreflightError(
+            f"an entry method named {name!r} is already in ENTRY_CODES [{codes}]. "
+            "Creating it again would make a second permanent code for it; use the "
+            "existing c_entry_code instead.")
 
 
 def assert_text_create_is_not_a_duplicate(client: HttpClient, *, title: str) -> None:
