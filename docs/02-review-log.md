@@ -3302,3 +3302,23 @@ placement after the current maximum (no range choice) is put to the user.
 Fixed: `_paged_search` now refuses a result row with no id (rows would collapse onto
 one key and void the distinct-count check). The other minor is the blind spots
 already documented.
+
+## 2026-11-19 — preflight: literal-run fallback for names past the spelling cap
+
+`寧志備考:十二卷` has 16 compatibility-ideograph spellings (寧 x4, 志 x2, 備 x2), so
+the TEXT_CODES duplicate check refused it before sending anything. New
+`_search_queries`: within the cap, every spelling as before; past it, search the
+longest run (>= 3) of characters that can only be stored as themselves
+(`_is_stored_only_as_itself`), then filter by exact NFC equality as before. Used by
+the text and entry checks; office unchanged. Live: `考:十二卷` returns 3 rows, no
+exact match.
+
+codex, first pass: one serious. A precomposed character (é = e + U+0301) passed the
+first version's per-code-point test, so a decomposed stored row would not contain
+the run. The review agent independently found the same (が, Hangul syllables, café).
+Fixed in `e274ed6`: a run character must have no NFC pre-image (all of Unicode, lazy
+scan), no canonical decomposition, combining class 0, and not be a conjoining Hangul
+jamo. codex re-review: no serious; caveat that Python's Unicode tables must agree
+with the server's. Review-agent minors fixed: the docstring's completeness claim,
+plus tests for Ω (U+2126) and が. Left as is: picking the longest run rather than the
+rarest may trip the page cap, which fails closed.

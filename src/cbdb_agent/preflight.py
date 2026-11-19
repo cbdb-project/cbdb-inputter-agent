@@ -198,10 +198,12 @@ def _is_stored_only_as_itself(char: str) -> bool:
 def _literal_core(canonical_name: str, min_length: int = 3) -> str | None:
     """The longest run of `canonical_name` that every equivalent spelling shares.
 
-    A character nothing else NFC-folds onto can only be stored as itself, so a stored
-    row whose NFC form equals `canonical_name` contains such a run byte for byte, and
-    a `LIKE %run%` search is guaranteed to return it. Too short a run would match
-    most of the table and trip the page cap, hence the minimum.
+    A run made only of characters that pass `_is_stored_only_as_itself` appears byte
+    for byte in every stored row whose NFC form equals `canonical_name`, so a
+    `LIKE %run%` search returns it (the column's `utf8mb4_unicode_ci` collation can
+    only add rows, which the exact filter then drops). Assumes Python's Unicode
+    tables agree with the server's. Too short a run would match most of the table
+    and trip the page cap (which fails closed), hence the minimum.
     """
     best, current = "", ""
     for char in canonical_name:

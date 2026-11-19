@@ -21,6 +21,7 @@ because candidates were summoned by imperial edict.
 |---|---|---|
 | `2026-11-19-recommendation-entry-codes` | 3 (`entry-codes` / create) | submitted 2026-11-19: production answered `501 目前尚未支援此變更模式` on ec1 (upstream `407a4e02` not yet deployed there). Nothing written: live search finds none of the three names, and there are no ENTRY_CODES operations since 2026-11-19. To re-submit once deployed |
 | `2026-11-19-recommendation-entry-codes-ningzhi-beikao` | 2 (`text-codes` / create 《寧志備考》; `texts` / create linking 趙維寰 560105 as 編纂者) | staged, not yet submitted |
+| `2026-11-19-recommendation-entry-codes-zhao-weihuan-merge` | 3 (`sources` + 2 `texts` creates on 趙維寰 560105, carrying over what the duplicate record 565838 holds) | staged, not yet submitted |
 
 ## Checked before creating
 

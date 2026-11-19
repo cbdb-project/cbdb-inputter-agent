@@ -866,3 +866,12 @@ def test_the_literal_run_never_includes_a_decomposable_character():
     assert _literal_core("寧志備考éabcdef") == "abcdef"
     assert _literal_core("寧志備考:十二卷") == "考:十二卷"
     assert _literal_core("寧志備éé") is None
+
+
+def test_the_literal_run_excludes_non_cjk_singleton_pre_images_and_composites():
+    """Ω has a singleton pre-image (U+2126 OHM SIGN), が decomposes to か + U+3099;
+    either may be stored in the other form, so neither may sit in the run."""
+    from cbdb_agent.preflight import _literal_core
+
+    assert _literal_core("寧志備Ωabc") == "abc"
+    assert _literal_core("寧志備がくもん") == "くもん"
