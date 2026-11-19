@@ -856,3 +856,13 @@ def test_a_title_within_the_cap_still_searches_every_spelling():
     from cbdb_agent.preflight import _search_queries
 
     assert len(_search_queries("寧志")) == 8   # 4 x 2, all searched, no fallback
+
+
+def test_the_literal_run_never_includes_a_decomposable_character():
+    """codex 2026-11-19: é may be stored as e + U+0301, which does not contain the
+    precomposed run byte for byte. Such a character must break the run."""
+    from cbdb_agent.preflight import _literal_core
+
+    assert _literal_core("寧志備考éabcdef") == "abcdef"
+    assert _literal_core("寧志備考:十二卷") == "考:十二卷"
+    assert _literal_core("寧志備éé") is None
