@@ -380,6 +380,64 @@ def test_an_entry_codes_create_needs_both_names(tmp_path):
     assert len(responses.calls) == 0
 
 
+# --- entry-code-type-rel (upstream a9fb97a5) --------------------------------------
+
+
+@responses.activate
+def test_entry_code_type_rel_create_sends_the_key_and_nothing_else(tmp_path):
+    responses.add(
+        responses.POST, "http://localhost:8000/api/v2/create",
+        json={"ok": True, "result": {"pk": {"c_entry_code": 350, "c_entry_type": "08"}}},
+        status=200,
+    )
+    api = make_api(tmp_path)
+    api.create("entry_code_type_rel", person_id=0,
+               target_pk={"c_entry_code": 350, "c_entry_type": "08"}, changes={},
+               resource_string="entry-code-type-rel")
+    assert len(responses.calls) == 1   # no duplicate-check read: the server 409s
+    sent = json.loads(responses.calls[0].request.body)
+    assert sent["resource"] == "entry-code-type-rel"
+    assert sent["mode"] == "direct"
+    assert sent["target"] == {"pk": {"c_entry_code": 350, "c_entry_type": "08"}}
+    assert not sent.get("changes")
+
+
+@responses.activate
+def test_entry_code_type_rel_refuses_an_integer_type_before_sending(tmp_path):
+    api = make_api(tmp_path)
+    with pytest.raises(FieldWhitelistError, match="c_entry_type"):
+        api.create("entry_code_type_rel", person_id=0,
+                   target_pk={"c_entry_code": 350, "c_entry_type": 8}, changes={},
+                   resource_string="entry-code-type-rel")
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_entry_code_type_rel_takes_no_changes(tmp_path):
+    api = make_api(tmp_path)
+    with pytest.raises(FieldWhitelistError):
+        api.create("entry_code_type_rel", person_id=0,
+                   target_pk={"c_entry_code": 350, "c_entry_type": "08"},
+                   changes={"c_notes": "x"}, resource_string="entry-code-type-rel")
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_entry_code_type_rel_reads_back_through_get(tmp_path):
+    responses.add(
+        responses.GET, "http://localhost:8000/api/v2/get",
+        json={"ok": True, "result": {"row": {"c_entry_code": 350, "c_entry_type": "08"}}},
+        status=200,
+    )
+    api = make_api(tmp_path)
+    api.get("entry_code_type_rel", person_id=0,
+            target_pk={"c_entry_code": 350, "c_entry_type": "08"},
+            resource_string="entry-code-type-rel")
+    sent = json.loads(responses.calls[0].request.body)
+    assert sent["resource"] == "entry-code-type-rel"
+    assert sent["target"]["pk"] == {"c_entry_code": 350, "c_entry_type": "08"}
+
+
 # --- office entity aggregate: the wire envelope, and the whitelist ---------
 
 

@@ -243,6 +243,13 @@ class ResourceSpec:
     # zero is significant** ("06", not 6), so pinning them to strings here is what stops
     # a YAML author writing `type_ids: [06]` and having it arrive as 6.
     list_fields: frozenset[str] = field(default_factory=frozenset)
+    # Key columns that are TEXT, where the leading zero is part of the value: "08"
+    # and "8" are different rows. A YAML author writing `c_entry_type: 08` gets the
+    # integer 8, which the server turns into "8" - a 422 on create, and on delete a
+    # 404 for a row that does exist. So these must arrive as a non-empty string with
+    # no surrounding whitespace (the server strips it, then matches exactly), checked
+    # in staging and again in mutation_api before the request is built.
+    text_key_fields: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         # A typo here would silently exempt nothing (or demand a field that is not
@@ -252,6 +259,25 @@ class ResourceSpec:
                  | set(self.requires_field)) - self.create_fields - self.update_fields
         if stray:
             raise ValueError(f"{self.key}: {sorted(stray)} named in a field rule but not writable")
+        stray_keys = self.text_key_fields - set(self.pk_fields)
+        if stray_keys:
+            raise ValueError(f"{self.key}: {sorted(stray_keys)} named as text keys but not key columns")
+
+    def text_key_errors(self, target_pk: dict) -> list[str]:
+        """Why each text key column in `target_pk` would not match its row, if any.
+
+        Only the columns present are checked; completeness is a separate rule."""
+        errors = []
+        for name in sorted(self.text_key_fields & set(target_pk)):
+            value = target_pk[name]
+            if not isinstance(value, str) or not value or value != value.strip():
+                errors.append(
+                    f"{self.key}: target_pk[{name!r}] must be the key exactly as stored, "
+                    f"as a quoted string with no surrounding spaces (e.g. \"08\"), got "
+                    f"{value!r} - the leading zero is part of the value, and an "
+                    "unquoted 08 in YAML arrives as the integer 8"
+                )
+        return errors
 
     def resolve_alias(self, resource_string: str, operation: str) -> None:
         """Raise FieldWhitelistError if resource_string is not a valid alias for
@@ -406,6 +432,9 @@ class ResourceSpec:
                 f"{self.key}: target_pk has field(s) not in this resource's PK: "
                 f"{sorted(unknown)}"
             )
+        text_key_errors = self.text_key_errors(target_pk)
+        if text_key_errors:
+            raise FieldWhitelistError("; ".join(text_key_errors))
 
     def validate_target_pk_for_update_or_delete(self, target_pk: dict) -> None:
         required = set(self.pk_fields) - self.optional_pk_fields
@@ -421,6 +450,9 @@ class ResourceSpec:
                 f"{self.key}: target_pk has field(s) not in this resource's PK: "
                 f"{sorted(unknown)}"
             )
+        text_key_errors = self.text_key_errors(target_pk)
+        if text_key_errors:
+            raise FieldWhitelistError("; ".join(text_key_errors))
 
 
 _CREATED_MODIFIED_AUDIT_FIELDS = frozenset(
@@ -1211,8 +1243,7 @@ RESOURCE_SPECS["admin_cat_codes"] = ResourceSpec(
 # on create silently stores ''. Hence both required on create here: a code with no
 # name is unusable, undeletable and unrenameable-to-blank. The key is a smallint;
 # the server assigns max+1, so the new code lands after the current maximum.
-# ENTRY_CODE_TYPE_REL (code -> entry type) is NOT writable through the API; linking
-# a new code to its type is still a /codes UI job for a human.
+# A new code is linked to its entry type through `entry_code_type_rel`, below.
 RESOURCE_SPECS["entry_codes"] = ResourceSpec(
     key="entry_codes",
     create_aliases=frozenset({"entry-codes", "entry_codes", "entrycodes"}),
@@ -1224,6 +1255,39 @@ RESOURCE_SPECS["entry_codes"] = ResourceSpec(
     update_fields=frozenset({"c_entry_desc", "c_entry_desc_chn"}),
     is_global_reference_data=True,
     required_create_fields=frozenset({"c_entry_desc", "c_entry_desc_chn"}),
+)
+
+
+# --- ENTRY_CODE_TYPE_REL (入仕途徑↔類型關聯). AGENTS.md rule 12 applies. -----------
+#
+# Opened upstream in `a9fb97a5`/`23bd0434` (2026-11-19/20; API.md 13.2a), modelled
+# here 2026-11-20. A pure link table: two key columns, no other column, so nothing
+# is writable in `changes` and there is no `update` (re-linking is delete + create).
+#
+# CREATE ONLY here. Upstream also opens `delete` - the one code table that has it,
+# because nothing references this table - but nothing in this repo needs it yet, and
+# an unneeded delete path on global data is a liability. Model it when a wrong link
+# has to be taken back.
+#
+# - `c_entry_type` is TEXT with a significant leading zero ("08"): `text_key_fields`.
+# - The server checks both columns exist (422 `not_found:ENTRY_CODES` /
+#   `not_found:ENTRY_TYPES`) and refuses an existing link (409 `conflict`), so unlike
+#   the name-keyed tables there is no client-side duplicate check: the key IS the row.
+# - Readable through `/api/v2/get` (API.md "讀取單列" note 4): 200 with the row, or
+#   404. That is the read-back after a create.
+# - Not recomputed into BIOG_MAIN.c_index_year until upstream next runs
+#   `cbdb:rebuild-index-year`.
+#
+# ALIASES: `entry-code-type-rel`/`entry_code_type_rel`/`entrycodetyperel`, none of
+# which overlap `entry-codes` or the person sub-resource `entries`.
+RESOURCE_SPECS["entry_code_type_rel"] = ResourceSpec(
+    key="entry_code_type_rel",
+    create_aliases=frozenset({"entry-code-type-rel", "entry_code_type_rel", "entrycodetyperel"}),
+    update_aliases=frozenset(),   # 501 server-side: no non-key column to update
+    delete_aliases=frozenset(),   # open upstream, deliberately not modelled yet
+    pk_fields=("c_entry_code", "c_entry_type"),
+    is_global_reference_data=True,
+    text_key_fields=frozenset({"c_entry_type"}),
 )
 
 
@@ -1262,6 +1326,8 @@ PK_REF_TARGETS: dict[str, dict[str, str]] = {
     "altnames": {"c_source": "text_codes"},
     # c_entry_code: a new ENTRY_CODES row cited in the same batch (2026-11-19).
     "entries": {"c_source": "text_codes", "c_entry_code": "entry_codes"},
+    # A new code linked to its type in the same batch that creates it.
+    "entry_code_type_rel": {"c_entry_code": "entry_codes"},
     "statuses": {"c_source": "text_codes"},
     "social_institutions": {"c_source": "text_codes"},
     "texts": {"c_textid": "text_codes", "c_source": "text_codes"},
