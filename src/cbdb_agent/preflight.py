@@ -172,6 +172,29 @@ def _has_any_nfc_pre_image(char: str) -> bool:
     return char in _ANY_PRE_IMAGE
 
 
+def _is_stored_only_as_itself(char: str) -> bool:
+    """Can `char`, inside any NFC-equal spelling, only appear as this one code point?
+
+    Four ways it could appear otherwise, each excluded:
+    * another code point NFC-folds onto it, alone or as part of a longer result
+      (compatibility ideographs; composition exclusions like U+0958);
+    * it has a canonical decomposition, so storage may hold the decomposed sequence
+      (é as e + U+0301 - codex, 2026-11-19);
+    * it is a combining mark (ccc != 0), which canonical reordering may move;
+    * it is a conjoining Hangul jamo, which composes algorithmically with neighbours.
+    """
+    if not char.strip():
+        return False
+    if unicodedata.normalize("NFD", char) != char:
+        return False
+    if unicodedata.combining(char) != 0:
+        return False
+    if 0x1100 <= ord(char) <= 0x11FF or 0xA960 <= ord(char) <= 0xA97F \
+            or 0xD7B0 <= ord(char) <= 0xD7FF:
+        return False
+    return not _has_any_nfc_pre_image(char)
+
+
 def _literal_core(canonical_name: str, min_length: int = 3) -> str | None:
     """The longest run of `canonical_name` that every equivalent spelling shares.
 
@@ -182,7 +205,7 @@ def _literal_core(canonical_name: str, min_length: int = 3) -> str | None:
     """
     best, current = "", ""
     for char in canonical_name:
-        if char.strip() and not _has_any_nfc_pre_image(char):
+        if _is_stored_only_as_itself(char):
             current += char
             if len(current) > len(best):
                 best = current
