@@ -19,9 +19,20 @@ because candidates were summoned by imperial edict.
 
 | Batch id | Proposals | Outcome |
 |---|---|---|
-| `2026-11-19-recommendation-entry-codes` | 3 (`entry-codes` / create) | submitted 2026-11-19: production answered `501 目前尚未支援此變更模式` on ec1 (upstream `407a4e02` not yet deployed there). Nothing written: live search finds none of the three names, and there are no ENTRY_CODES operations since 2026-11-19. To re-submit once deployed |
-| `2026-11-19-recommendation-entry-codes-ningzhi-beikao` | 2 (`text-codes` / create 《寧志備考》; `texts` / create linking 趙維寰 560105 as 編纂者) | staged, not yet submitted |
-| `2026-11-19-recommendation-entry-codes-zhao-weihuan-merge` | 3 (`sources` + 2 `texts` creates on 趙維寰 560105, carrying over what the duplicate record 565838 holds) | staged, not yet submitted |
+| `2026-11-19-recommendation-entry-codes` | 3 (`entry-codes` / create) | production answered `501 目前尚未支援此變更模式` on ec1 (upstream `407a4e02` not yet deployed); nothing written, reconciled (`reconciliation.json`) |
+| `2026-11-19-recommendation-entry-codes-retry` | 3 (resumed) | **in production, verified**: codes **350, 351, 352** (operations 386187–386189) |
+| `2026-11-19-recommendation-entry-codes-ningzhi-beikao` | 2 (`text-codes` create 《寧志備考:十二卷》; `texts` create, 趙維寰 560105 as 編纂者) | refused client-side: the title has 16 compatibility spellings, past the duplicate check's cap. Nothing sent; the check was extended (`docs/02`, 2026-11-19) |
+| `2026-11-19-recommendation-entry-codes-ningzhi-beikao-retry` | 2 (resumed) | **in production, verified**: TEXT_CODES **72269**, linked to 560105 (operations 386190–386191) |
+| `2026-11-19-recommendation-entry-codes-zhao-weihuan-merge` | 3 (`sources` 63342, `texts` 63120 and 63121, all on 560105) | **in production, verified** (operations 386192–386194) |
+
+## 趙維寰: two records
+
+CBDB has 趙維寰 twice: 560105 (平湖, 字無聲, 號雪廬, 1563–1644) and 565838 (a
+中國古籍總目 stub with two 雪廬 collections). zh.wikipedia's 趙維寰 (明朝) gives
+"又號雪廬" and lists both 《寧志備考》 and 《雪廬焚余稿》 among his works. At the user's
+instruction, what 565838 held and 560105 lacked (its source and two authorships) was
+copied onto 560105, the smaller id. 565838 itself is untouched; retiring it is the
+unmodelled `merged-person` resource and a separate decision.
 
 ## Checked before creating
 
