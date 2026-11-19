@@ -312,6 +312,7 @@ def test_the_global_reference_data_inventory():
         "social_institution_aggregate",
         "text_entity_aggregate",   # 2026-11-18, the 江蘇藝文志 (66769) correction
         "entry_codes",             # 2026-11-19, upstream 407a4e02
+        "entry_code_type_rel",     # 2026-11-20, upstream a9fb97a5
     }
 
 
@@ -832,3 +833,58 @@ def test_every_global_reference_resource_has_a_review_group_label():
 
     marked = {k for k, v in RESOURCE_SPECS.items() if v.is_global_reference_data}
     assert marked <= set(GLOBAL_REFERENCE_TABLES), sorted(marked - set(GLOBAL_REFERENCE_TABLES))
+
+
+def test_entry_code_type_rel_is_exactly_the_registry_entry():
+    """Source: config/code_table_writes.php, `ENTRY_CODE_TYPE_REL` (upstream a9fb97a5).
+    Two key columns, nothing assigned, nothing else writable, no update. Delete is
+    open upstream but deliberately not modelled here."""
+    spec = get_resource_spec("entry_code_type_rel")
+    assert spec.pk_fields == ("c_entry_code", "c_entry_type")
+    assert spec.server_assigned_pk_fields == frozenset()
+    assert spec.create_fields == frozenset() and spec.update_fields == frozenset()
+    assert spec.create_aliases == frozenset(
+        {"entry-code-type-rel", "entry_code_type_rel", "entrycodetyperel"})
+    assert spec.update_aliases == frozenset() and spec.delete_aliases == frozenset()
+    assert spec.text_key_fields == frozenset({"c_entry_type"})
+
+
+def test_entry_code_type_rel_aliases_collide_with_nothing():
+    from cbdb_agent.models import find_spec_by_alias
+
+    for alias in ("entry-code-type-rel", "entry_code_type_rel", "entrycodetyperel"):
+        assert find_spec_by_alias(alias).key == "entry_code_type_rel"
+    assert find_spec_by_alias("entry-codes").key == "entry_codes"
+    assert find_spec_by_alias("entries").key != "entry_code_type_rel"
+
+
+@pytest.mark.parametrize("value", [8, "8 ", " 08", "", None, 8.0])
+def test_a_text_key_must_be_the_exact_string(value):
+    """`c_entry_type: 08` in YAML is the integer 8, which the server turns into "8":
+    a 422 on create, a 404 on delete for a row that exists."""
+    spec = get_resource_spec("entry_code_type_rel")
+    with pytest.raises(FieldWhitelistError, match="c_entry_type"):
+        spec.validate_target_pk_for_create({"c_entry_code": 350, "c_entry_type": value})
+
+
+def test_a_text_key_as_a_string_passes():
+    spec = get_resource_spec("entry_code_type_rel")
+    spec.validate_target_pk_for_create({"c_entry_code": 350, "c_entry_type": "08"})
+    with pytest.raises(FieldWhitelistError, match="missing"):
+        spec.validate_target_pk_for_create({"c_entry_code": 350})
+
+
+def test_text_key_fields_must_be_key_columns():
+    from cbdb_agent.models import ResourceSpec
+
+    with pytest.raises(ValueError, match="text keys"):
+        ResourceSpec(key="x", create_aliases=frozenset(), update_aliases=frozenset(),
+                     delete_aliases=frozenset(), pk_fields=("a",),
+                     text_key_fields=frozenset({"b"}))
+
+
+def test_entry_code_type_rel_may_reference_an_entry_codes_create():
+    from cbdb_agent.models import pk_ref_target_resource
+
+    assert pk_ref_target_resource("entry_code_type_rel", "c_entry_code") == "entry_codes"
+    assert pk_ref_target_resource("entry_code_type_rel", "c_entry_type") is None

@@ -857,3 +857,48 @@ def test_preview_marks_global_reference_data():
         source_quote="q", confidence="high")])
     md2 = render_preview_markdown(ordinary, find_issues(ordinary))
     assert "global reference data" not in md2
+
+
+def _rel(id_="r1", target_pk=None, changes=None):
+    return Proposal(
+        id=id_, resource="entry-code-type-rel", operation="create", person_id=0,
+        target_pk=(target_pk if target_pk is not None
+                   else {"c_entry_code": 350, "c_entry_type": "08"}),
+        changes=changes or {}, source_quote="x", confidence="high",
+    )
+
+
+def test_entry_code_type_rel_clean_create_has_no_errors():
+    issues = find_issues(StagingBatch(batch_id="b1", proposals=[_rel()]))
+    assert [i for i in issues if i.severity == "error"] == []
+
+
+def test_entry_code_type_rel_needs_the_whole_key():
+    issues = find_issues(StagingBatch(batch_id="b1", proposals=[
+        _rel(target_pk={"c_entry_code": 350})]))
+    assert any("c_entry_type" in i.message and i.severity == "error" for i in issues)
+
+
+def test_entry_code_type_rel_integer_type_is_a_staging_error():
+    """What an unquoted `c_entry_type: 08` in proposal.yaml turns into."""
+    issues = find_issues(StagingBatch(batch_id="b1", proposals=[
+        _rel(target_pk={"c_entry_code": 350, "c_entry_type": 8})]))
+    assert any("quoted string" in i.message and i.severity == "error" for i in issues)
+
+
+def test_entry_code_type_rel_yaml_round_trip_keeps_the_leading_zero(tmp_path):
+    path = tmp_path / "proposal.yaml"
+    save_staging_file(StagingBatch(batch_id="b1", proposals=[_rel()]), path)
+    loaded = load_staging_file(path)
+    assert loaded.proposals[0].target_pk["c_entry_type"] == "08"
+
+
+def test_entry_code_type_rel_may_reference_a_new_entry_code():
+    code = Proposal(
+        id="ec1", resource="entry-codes", operation="create", person_id=0, target_pk={},
+        changes={"c_entry_desc": "x", "c_entry_desc_chn": "徵辟: 甲"},
+        source_quote="x", confidence="high",
+    )
+    rel = _rel(target_pk={"c_entry_code": {"ref": "ec1"}, "c_entry_type": "07"})
+    issues = find_issues(StagingBatch(batch_id="b1", proposals=[code, rel]))
+    assert [i for i in issues if i.severity == "error"] == []

@@ -708,8 +708,34 @@ explicitly. This client leaves it server-assigned.
 - **No audit columns**; operator and time are in `operations`/`audit_log`.
 - **Same-batch reference:** an `entries` (`ENTRY_DATA`) row may cite a code created
   earlier in the batch as `c_entry_code: {"ref": "<proposal id>"}` (`PK_REF_TARGETS`).
-- **`ENTRY_CODE_TYPE_REL` is not writable through the API.** A new code's link to its
-  entry type is still a `/codes` UI job.
+- A new code's link to its entry type is `entry_code_type_rel`, §22.
+
+## 22. entry_code_type_rel (`ENTRY_CODE_TYPE_REL`) — a link table, not person data ⚠️
+
+Opened upstream in `a9fb97a5` (2026-11-19) and `23bd0434` (2026-11-20; `API.md`
+§13.2a, upstream `docs/ENTRY_CODE_TYPE_REL_V2_WRITE_PLAN.md`); deployed to production
+by 2026-11-20 (a live `/api/v2/get` for 101/`"08"` returned the row). Aliases
+`entry-code-type-rel`/`entry_code_type_rel`/`entrycodetyperel`.
+
+| key column | notes |
+|---|---|
+| `c_entry_code` | smallint; must exist in `ENTRY_CODES` (else 422 `not_found:ENTRY_CODES`). May be `{"ref": ...}` to an `entry-codes` create earlier in the batch |
+| `c_entry_type` | **text**, exactly as in `ENTRY_TYPES` (`"08"`); must exist (else 422 `not_found:ENTRY_TYPES`). An integer `8` becomes `"8"` server-side: 422 on create, 404 on delete. **This client requires a string with no surrounding spaces** (`text_key_fields`) |
+
+- **No writable fields.** The key is the whole row: `changes` stays `{}` (anything
+  else is 422 `disallowed_fields` upstream, refused here first).
+- **Create only, as modelled.** No update upstream (501; re-linking is delete +
+  create). `delete` *is* open upstream — the only code table with one, because no
+  foreign key references this table — but is not modelled here until a wrong link
+  needs taking back.
+- **Duplicates:** an existing link is 409 `target.pk: ["conflict"]`. No client-side
+  check; per rule 5 a 409 is never retried.
+- **Read back with `/api/v2/get`** (resource `entry-code-type-rel`, both key columns,
+  any `person_id`): 200 with `result.row`, or 404.
+- `operations` records the `person_id` sent (send `0`) and
+  `resource_id` `c_entry_code=…&c_entry_type=…`.
+- A new or removed link changes no person's `c_index_year` until upstream next runs
+  `php artisan cbdb:rebuild-index-year`.
 
 ## Source citations
 

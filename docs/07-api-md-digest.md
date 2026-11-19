@@ -9,7 +9,7 @@ is the target system's own `API.md`:
 | Local path | `${CBDB_ONLINE_MAIN_SERVER_REPO_DIR}/API.md` (see `.env.sample`; `Config.online_main_server_repo_dir`) |
 | **Synced against** | `origin/develop` commit `df1495a7` (commit date 2026-10-07 18:45:51 +0800), `API.md` blob `6defc4f6` |
 | **Previous sync** | `76ac0a47` (2026-09-10), blob `b847dc89` — 7 commits and +41/−15 lines of `API.md` earlier; the 2026-10-07 re-sync is summarized in §1.10 and rewrote §2.3's `social-institution` entry |
-| Partial re-check | 2026-11-18 against `4aa269c9` (2026-11-13): **only** §13.4's `text-entity` entry and §9.13 `sources`, plus the upstream code behind `text-entity` — see the end of §2.3's `text-entity` bullet. Upstream `API.md` has +192/−7 lines since `df1495a7` (TEXT_INSTANCE_DATA opened in `927c0460`; OIDC); the rest of this digest has not been re-synced. 2026-11-19 against `407a4e02`: **only** the `ENTRY_CODES` hunks (§13 table, §13.1/§13.2 rows, the corrected NOT NULL/empty-string rule, the `entry-codes` note, §13.3's "eight tables") |
+| Partial re-check | 2026-11-18 against `4aa269c9` (2026-11-13): **only** §13.4's `text-entity` entry and §9.13 `sources`, plus the upstream code behind `text-entity` — see the end of §2.3's `text-entity` bullet. Upstream `API.md` has +192/−7 lines since `df1495a7` (TEXT_INSTANCE_DATA opened in `927c0460`; OIDC); the rest of this digest has not been re-synced. 2026-11-19 against `407a4e02`: **only** the `ENTRY_CODES` hunks (§13 table, §13.1/§13.2 rows, the corrected NOT NULL/empty-string rule, the `entry-codes` note, §13.3's "eight tables"). 2026-11-20 against `23bd0434`: **only** §13.2a `entry-code-type-rel` and the "讀取單列" note 4 |
 | Upstream length at sync | 2774 lines (v2 chapters 1–14, plus a "舊版 API 文檔" v1 appendix) |
 | Earlier syncs | `b2df35f5` (2026-09-04), blob `ff842de6`, 2701 lines; before that `fd747aba` (2026-08-18), blob `948585d1`, 2667 lines |
 | Stamp convention | **commit** date (`git log -1 --format=%ci`), not author date — they differ by minutes here and by a day for `fd747aba` |
@@ -422,7 +422,8 @@ this is from the repo. What is worth carrying in your head:
 | `addr-belongs-data` | 4-column composite, **all required, never assigned** | `c_source`/`c_pages`/`c_notes` | **update touches only those three — the key is write-once** |
 | `admin-cat-codes` | `c_admin_cat_code`, auto-assigned | py/hz/trans/notes | no `c_created_by`/`c_created_date` columns, so none are stamped — the operator and time are still in `operations` and `audit_log` |
 | `office-type-tree` | `c_office_type_node_id`, **text, required** | desc/desc_chn/parent | zero-padded path string; cycle guard returns 422 `tree_cycle` |
-| `entry-codes` (added `407a4e02`, 2026-11-19) | `c_entry_code`, smallint, auto-assigned or sent | desc/desc_chn | both NOT NULL and unclearable via JSON (`""` → `null` → 422); `ENTRY_CODE_TYPE_REL` not writable; see `docs/04` §21 |
+| `entry-codes` (added `407a4e02`, 2026-11-19) | `c_entry_code`, smallint, auto-assigned or sent | desc/desc_chn | both NOT NULL and unclearable via JSON (`""` → `null` → 422); see `docs/04` §21 |
+| `entry-code-type-rel` (§13.2a, `a9fb97a5`/`23bd0434`) | `c_entry_code` + `c_entry_type` (**text**, `"08"`), both required, never assigned | none | link table: create and **delete** (the only code-table delete), no update; both keys FK-checked (422 `not_found:…`), existing link 409; readable via `/api/v2/get`; see `docs/04` §22 |
 
 Rules that apply to the whole set:
 

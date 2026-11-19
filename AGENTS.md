@@ -267,7 +267,8 @@ user how old the build is instead of quietly trusting it.
     is `501 目前尚未支援此取得模式`, which is the documented answer there, not a
     failure. So read back through the **public lookups** instead, which several of
     these do have: `GET /api/select/search/addr` or `/api/code/addr` for `ADDR_CODES`,
-    `GET /api/select/search/entry` for `ENTRY_CODES`,
+    `GET /api/select/search/entry` for `ENTRY_CODES`, and `/api/v2/get` itself
+    for `entry-code-type-rel`, the one code table it answers for besides `nianhao`,
     `GET /api/select/search/office` for `office` (`docs/07` §2.3 — this is why
     `fetch_current_values()` reports "couldn't fetch" for an aggregate proposal).
     `ADDR_BELONGS_DATA`, `ADMIN_CAT_CODES`, `char_variant_map` and `OFFICE_TYPE_TREE`
@@ -287,7 +288,7 @@ user how old the build is instead of quietly trusting it.
     every code table that can be written — `text-codes` (new `TEXT_CODES` rows),
     `char-variant-map`, and, since 2026-09-11, **`addr-codes`, `addr-belongs-data`,
     `admin-cat-codes` and `office-type-tree`**, and since 2026-11-19
-    **`entry-codes`** — plus the `office`,
+    **`entry-codes`**, and since 2026-11-20 **`entry-code-type-rel`** — plus the `office`,
     `social-institution` and `text-entity` entity aggregates, and `merged-person`. What
     they share is
     **blast radius**: they are global reference data, referenced by potentially tens of
@@ -319,7 +320,7 @@ user how old the build is instead of quietly trusting it.
     regardless — so it recorded nothing the operations log did not already have, in a
     place only this client could read. Do not reintroduce it; if you find a mention in
     an older document, it is stale.
-    Eight such resources are modelled today:
+    Nine such resources are modelled today:
     **`text-codes`** (create only; `update` is not modelled since the server only allows
     `c_title`, and `delete` is disabled server-side), the three place-name tables opened
     (committed upstream 2026-09-10, pulled and modelled here 2026-09-11) —
@@ -366,9 +367,21 @@ user how old the build is instead of quietly trusting it.
     API afterwards). Its aliases are `entry-codes`/`entry_codes`/`entrycodes`;
     `entry`/`entries`/`entry_data` are the **person** sub-resource `ENTRY_DATA`.
     A live exact-name check (`preflight.assert_entry_create_is_not_a_duplicate`,
-    via `/api/select/search/entry`) runs before every create. Linking a new code to
-    its type (`ENTRY_CODE_TYPE_REL`) has no API path. See
+    via `/api/select/search/entry`) runs before every create. See
     `docs/04-field-whitelists.md` §21.
+    The ninth, modelled 2026-11-20 (opened upstream in `a9fb97a5`/`23bd0434`), is
+    **`entry-code-type-rel`** (`ENTRY_CODE_TYPE_REL`, a code's entry type) —
+    **create only** here. It is a pure link table: the two-column key
+    (`c_entry_code`, `c_entry_type`) is the whole row, so `changes` is always
+    empty and there is no update. `c_entry_type` is **text with a significant
+    leading zero** (`"08"`, never `8`): `ResourceSpec.text_key_fields` refuses
+    anything but the exact string, in staging and again before sending — an
+    unquoted `08` in YAML is the integer 8. The server checks both columns exist
+    and answers 409 for an existing link, so there is no client-side duplicate
+    check. It is readable through `/api/v2/get` (200 or 404), which is the
+    read-back. Upstream also opens **`delete`** on it — the only code table that
+    has one, since nothing references it — and that is **not modelled** yet. See
+    `docs/04-field-whitelists.md` §22.
     The rest (`char-variant-map`, `office-type-tree`, `merged-person`) are still
     unmodelled, so a staging file naming one
     is rejected as an unknown alias — a safe outcome, but by absence rather than by
@@ -392,7 +405,9 @@ user how old the build is instead of quietly trusting it.
     modelled** (see above); upstream API.md §13.3 now counts eight creatable
     tables. The properties below, written for the original six, hold for it too,
     except that it *is* readable through `/api/select/search/entry`, which is
-    what its live duplicate check uses.
+    what its live duplicate check uses. `ENTRY_CODE_TYPE_REL` (API.md §13.2a)
+    is registered there too but is the exception to most of them: no update,
+    `delete` open, and readable through `/api/v2/get`.
     "Matching" means the whitelists agree, not that the write is a full-row
     overwrite: a code-table `update` is **per-field** (omit a column and it keeps its
     value; an empty `changes` is a 422). Full-row overwrite is the *aggregate*
