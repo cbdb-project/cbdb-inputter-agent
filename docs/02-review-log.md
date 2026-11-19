@@ -3274,3 +3274,31 @@ showed no drift in any carried field): `2026-11-18-jiangsu-yiwenzhi-text`, opera
 variant replacement); `2026-11-18-jiangsu-yiwenzhi-citations`, 63/63, operations
 385815–385877. Independent read-back: 66769 equals what was sent field by field;
 every citation is found under its new `c_pages` and not under its old one.
+
+## 2026-11-19 — `entry-codes` (ENTRY_CODES) modelled, for three Ming entry methods
+
+Upstream `407a4e02` opened `ENTRY_CODES` for `/api/v2/create` and `update` at the
+user's request. Modelled as `entry_codes`: global reference data, create + update,
+symmetric whitelist `c_entry_desc`/`c_entry_desc_chn` (both required on create:
+NOT NULL, unclearable through JSON), key server-assigned, no delete. Live exact-name
+duplicate check (`preflight.assert_entry_create_is_not_a_duplicate`) over every page
+of `/api/select/search/entry`, sharing the paginator with the TEXT_CODES check
+(`_paged_search`). docs/07 partially re-synced for the ENTRY_CODES hunks only.
+Batch `2026-11-19-recommendation-entry-codes` staged (3 creates).
+
+### Review-agent pass — no serious; 6 minors
+
+Fixed: `review.GLOBAL_REFERENCE_TABLES` lacked `entry_codes`, so the review page
+headed the batch with the staging-mistake label (a test now requires every
+global-reference spec to have a label); `PK_REF_TARGETS` gains
+`entries.c_entry_code -> entry_codes`; the duplicate check's docstring names its
+blind spots (variant replacement on write, `\` as LIKE escape); AGENTS.md's
+"six tables" passages note ENTRY_CODES and its read route. Left: an `entry_codes`
+update shows "couldn't fetch" in the preview (same as the other code tables);
+placement after the current maximum (no range choice) is put to the user.
+
+### codex pass — no serious; 2 minors
+
+Fixed: `_paged_search` now refuses a result row with no id (rows would collapse onto
+one key and void the distinct-count check). The other minor is the blind spots
+already documented.

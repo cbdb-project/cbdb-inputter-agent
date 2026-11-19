@@ -267,6 +267,7 @@ user how old the build is instead of quietly trusting it.
     is `501 目前尚未支援此取得模式`, which is the documented answer there, not a
     failure. So read back through the **public lookups** instead, which several of
     these do have: `GET /api/select/search/addr` or `/api/code/addr` for `ADDR_CODES`,
+    `GET /api/select/search/entry` for `ENTRY_CODES`,
     `GET /api/select/search/office` for `office` (`docs/07` §2.3 — this is why
     `fetch_current_values()` reports "couldn't fetch" for an aggregate proposal).
     `ADDR_BELONGS_DATA`, `ADMIN_CAT_CODES`, `char_variant_map` and `OFFICE_TYPE_TREE`
@@ -285,7 +286,8 @@ user how old the build is instead of quietly trusting it.
     person data — never create, change or remove one on your own initiative.** This covers
     every code table that can be written — `text-codes` (new `TEXT_CODES` rows),
     `char-variant-map`, and, since 2026-09-11, **`addr-codes`, `addr-belongs-data`,
-    `admin-cat-codes` and `office-type-tree`** — plus the `office`,
+    `admin-cat-codes` and `office-type-tree`**, and since 2026-11-19
+    **`entry-codes`** — plus the `office`,
     `social-institution` and `text-entity` entity aggregates, and `merged-person`. What
     they share is
     **blast radius**: they are global reference data, referenced by potentially tens of
@@ -317,7 +319,7 @@ user how old the build is instead of quietly trusting it.
     regardless — so it recorded nothing the operations log did not already have, in a
     place only this client could read. Do not reintroduce it; if you find a mention in
     an older document, it is stale.
-    Seven such resources are modelled today:
+    Eight such resources are modelled today:
     **`text-codes`** (create only; `update` is not modelled since the server only allows
     `c_title`, and `delete` is disabled server-side), the three place-name tables opened
     (committed upstream 2026-09-10, pulled and modelled here 2026-09-11) —
@@ -358,6 +360,15 @@ user how old the build is instead of quietly trusting it.
     across **unchanged**: `MutationApi.update()` checks that live immediately before
     sending, and afterwards requires `instances_added`/`_removed`/`_updated` all to be
     0, stopping the batch otherwise.
+    The eighth, modelled 2026-11-19 (opened upstream in `407a4e02` that day), is
+    **`entry-codes`** (`ENTRY_CODES`) — create and update, no delete, both name
+    columns required on create (they are NOT NULL and cannot be cleared through the
+    API afterwards). Its aliases are `entry-codes`/`entry_codes`/`entrycodes`;
+    `entry`/`entries`/`entry_data` are the **person** sub-resource `ENTRY_DATA`.
+    A live exact-name check (`preflight.assert_entry_create_is_not_a_duplicate`,
+    via `/api/select/search/entry`) runs before every create. Linking a new code to
+    its type (`ENTRY_CODE_TYPE_REL`) has no API path. See
+    `docs/04-field-whitelists.md` §21.
     The rest (`char-variant-map`, `office-type-tree`, `merged-person`) are still
     unmodelled, so a staging file naming one
     is rejected as an unknown alias — a safe outcome, but by absence rather than by
@@ -377,6 +388,11 @@ user how old the build is instead of quietly trusting it.
     was opened upstream in `927c0460` (2026-11-05) and is **not modelled** here;
     don't mix it with `text-entity` for the same book — the aggregate's next update
     deletes any edition row it was not sent (API.md 13.2).
+    An eighth, **`ENTRY_CODES`** (`entry-codes`, `407a4e02`, 2026-11-19), **is
+    modelled** (see above); upstream API.md §13.3 now counts eight creatable
+    tables. The properties below, written for the original six, hold for it too,
+    except that it *is* readable through `/api/select/search/entry`, which is
+    what its live duplicate check uses.
     "Matching" means the whitelists agree, not that the write is a full-row
     overwrite: a code-table `update` is **per-field** (omit a column and it keeps its
     value; an empty `changes` is a 422). Full-row overwrite is the *aggregate*
