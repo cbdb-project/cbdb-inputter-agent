@@ -147,6 +147,67 @@ def _spellings(canonical_name: str) -> list[str]:
     return out
 
 
+_ANY_PRE_IMAGE: set[str] | None = None
+
+
+def _has_any_nfc_pre_image(char: str) -> bool:
+    """Does any OTHER code point NFC-fold onto `char`?
+
+    `_PRE_IMAGES` only scans the CJK compatibility blocks, which is enough to
+    enumerate spellings of an ideograph but not to vouch for a colon or a digit.
+    So this scans all of Unicode once, lazily - it is only needed on the fallback
+    path of `_search_queries`.
+    """
+    global _ANY_PRE_IMAGE
+    if _ANY_PRE_IMAGE is None:
+        targets: set[str] = set()
+        for codepoint in range(0x110000):
+            if 0xD800 <= codepoint <= 0xDFFF:
+                continue
+            source = chr(codepoint)
+            folded = unicodedata.normalize("NFC", source)
+            if folded != source:
+                targets.update(folded)
+        _ANY_PRE_IMAGE = targets
+    return char in _ANY_PRE_IMAGE
+
+
+def _literal_core(canonical_name: str, min_length: int = 3) -> str | None:
+    """The longest run of `canonical_name` that every equivalent spelling shares.
+
+    A character nothing else NFC-folds onto can only be stored as itself, so a stored
+    row whose NFC form equals `canonical_name` contains such a run byte for byte, and
+    a `LIKE %run%` search is guaranteed to return it. Too short a run would match
+    most of the table and trip the page cap, hence the minimum.
+    """
+    best, current = "", ""
+    for char in canonical_name:
+        if char.strip() and not _has_any_nfc_pre_image(char):
+            current += char
+            if len(current) > len(best):
+                best = current
+        else:
+            current = ""
+    return best if len(best) >= min_length else None
+
+
+def _search_queries(canonical_name: str) -> list[str]:
+    """What to search so that every stored spelling of the name comes back.
+
+    Every byte-distinct spelling when there are few enough (`_spellings`); otherwise
+    the one run all spellings share (`_literal_core`). Callers must still filter the
+    results by exact canonical equality - both strategies over-fetch. If neither
+    works, the error from `_spellings` stands: the check cannot be completed.
+    """
+    try:
+        return _spellings(canonical_name)
+    except PreflightError:
+        core = _literal_core(canonical_name)
+        if core is None:
+            raise
+        return [core]
+
+
 class PreflightError(CbdbApiError):
     """The pre-flight check could not be completed, so it cannot vouch for anything.
 
@@ -451,7 +512,7 @@ def find_text_title_matches(client: HttpClient, title: str) -> list[dict[str, An
     """
     wanted = _canonical(str(title))
     seen: dict[str, dict[str, Any]] = {}
-    for spelling in _spellings(wanted):
+    for spelling in _search_queries(wanted):
         seen.update(_paged_search(client, _TEXT_SEARCH_PATH, spelling,
                                   id_field="c_textid", what="text"))
     return [row for row in seen.values()
@@ -527,7 +588,7 @@ def find_entry_name_matches(client: HttpClient, name: str) -> list[dict[str, Any
     """
     wanted = _canonical(str(name))
     seen: dict[str, dict[str, Any]] = {}
-    for spelling in _spellings(wanted):
+    for spelling in _search_queries(wanted):
         seen.update(_paged_search(client, _ENTRY_SEARCH_PATH, spelling,
                                   id_field="c_entry_code", what="entry-code"))
     return [row for row in seen.values()

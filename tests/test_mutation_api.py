@@ -799,3 +799,60 @@ def test_an_entry_search_row_without_its_code_is_not_a_clean_answer(tmp_path):
                    resource_string="entry-codes")
     assert not [c for c in responses.calls if c.request.method == "POST"]
 
+
+
+# --- titles with too many compatibility spellings: search the shared literal run ---
+# 寧志備考:十二卷 has 16 byte-distinct spellings (寧 x4, 志 x2, 備 x2), past the cap.
+# Every one of them contains 考:十二卷 byte for byte, so that is what gets searched.
+
+_MANY_SPELLINGS_TITLE = "寧志備考:十二卷"
+
+
+@responses.activate
+def test_a_title_with_too_many_spellings_searches_the_shared_literal_run(tmp_path):
+    from urllib.parse import parse_qs, urlparse
+
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/text",
+        json={"data": [{"c_textid": 1, "c_title_chn": "毛詩備考:十二卷"}],
+              "last_page": 1, "total": 1}, status=200,
+    )
+    _ok_create()
+    api = make_api(tmp_path)
+    api.create("text_codes", person_id=0, target_pk={},
+               changes={"c_title_chn": _MANY_SPELLINGS_TITLE}, resource_string="text-codes")
+    gets = [c for c in responses.calls if c.request.method == "GET"]
+    assert len(gets) == 1
+    assert parse_qs(urlparse(gets[0].request.url).query)["q"] == ["考:十二卷"]
+    assert [c for c in responses.calls if c.request.method == "POST"]
+
+
+@responses.activate
+def test_the_literal_run_finds_a_row_stored_with_a_compatibility_ideograph(tmp_path):
+    from cbdb_agent.preflight import PreflightError
+
+    stored = "\uf95f志備考:十二卷"   # 寧 as U+F95F; NFC-equal to the new title
+    responses.add(
+        responses.GET, "http://localhost:8000/api/select/search/text",
+        json={"data": [{"c_textid": 777, "c_title_chn": stored}],
+              "last_page": 1, "total": 1}, status=200,
+    )
+    api = make_api(tmp_path)
+    with pytest.raises(PreflightError, match="777"):
+        api.create("text_codes", person_id=0, target_pk={},
+                   changes={"c_title_chn": _MANY_SPELLINGS_TITLE}, resource_string="text-codes")
+    assert not [c for c in responses.calls if c.request.method == "POST"]
+
+
+def test_no_literal_run_long_enough_still_refuses():
+    from cbdb_agent.preflight import PreflightError, _search_queries
+
+    # Every character has a compatibility pre-image, so no run is shared.
+    with pytest.raises(PreflightError, match="byte-distinct spellings"):
+        _search_queries("寧志備寧志備")
+
+
+def test_a_title_within_the_cap_still_searches_every_spelling():
+    from cbdb_agent.preflight import _search_queries
+
+    assert len(_search_queries("寧志")) == 8   # 4 x 2, all searched, no fallback
